@@ -194,6 +194,152 @@ function validateDMLSyntaxBasic(dml) {
     };
 }
 // =============================================================================
+// Analysis & Auditing
+// =============================================================================
+/**
+ * Run static analysis on the DML code
+ */
+export async function analyzeDML(dml) {
+    const swipl = await getProlog();
+    const tempPath = `/tmp/analysis_${Date.now()}_${Math.random().toString(36).substring(7)}.dml`;
+    try {
+        swipl.FS.writeFile(tempPath, dml);
+        // Query Prolog to read file and analyze
+        const query = `
+      read_file_to_string('${tempPath}', Code, []),
+      deepclause_analysis:analyze_source(Code, Result).
+    `;
+        const result = await swipl.prolog.query(query).once();
+        // @ts-ignore
+        const rawAnalysis = result.Result;
+        // Convert Prolog result to AnalysisResult
+        // Prolog dicts come back as objects with keys
+        const warnings = [];
+        if (rawAnalysis.warnings && Array.isArray(rawAnalysis.warnings)) {
+            for (const w of rawAnalysis.warnings) {
+                let level = 'low';
+                let message = 'Unknown warning';
+                // Handle swipl-wasm compound term structure: { functor: 'name', name: [[args]] }
+                let args = [];
+                if (w.args) {
+                    args = w.args;
+                }
+                else if (w.functor && w[w.functor] && Array.isArray(w[w.functor])) {
+                    // It seems arguments are wrapped in a nested array: [ [Arg1, Arg2] ]
+                    const inner = w[w.functor];
+                    args = Array.isArray(inner[0]) ? inner[0] : inner;
+                }
+                if (args.length >= 2) {
+                    level = args[0];
+                    const msgObj = args[1];
+                    // Handle PrologString object { v: "text" }
+                    message = (typeof msgObj === 'object' && msgObj && 'v' in msgObj) ? msgObj.v : String(msgObj);
+                }
+                warnings.push({
+                    level: level,
+                    message
+                });
+            }
+        }
+        const capabilities = [];
+        if (rawAnalysis.capabilities && Array.isArray(rawAnalysis.capabilities)) {
+            for (const cap of rawAnalysis.capabilities) {
+                if (typeof cap === 'string') {
+                    capabilities.push(cap);
+                }
+                else if (typeof cap === 'object' && cap) {
+                    // Handle compound terms like tool_use(name)
+                    const functor = cap.functor;
+                    if (functor) {
+                        let args = [];
+                        const inner = cap[functor];
+                        if (Array.isArray(inner) && Array.isArray(inner[0])) {
+                            args = inner[0];
+                        }
+                        if (functor === 'tool_use' && args.length > 0) {
+                            capabilities.push(`tool_use(${args[0]})`);
+                        }
+                        else {
+                            capabilities.push(`${functor}(${args.join(', ')})`);
+                        }
+                    }
+                    else {
+                        capabilities.push(String(cap));
+                    }
+                }
+            }
+        }
+        return {
+            valid: rawAnalysis.valid === true || rawAnalysis.valid === 'true',
+            warnings,
+            capabilities,
+            auditorReport: undefined,
+            error: rawAnalysis.error ? String(rawAnalysis.error) : undefined
+        };
+    }
+    catch (e) {
+        console.warn('Analysis failed:', e);
+        return {
+            valid: false, // Fail if analysis throws (e.g. timeout or prolog error)
+            warnings: [{ level: 'low', message: `Analysis failed: ${e}` }],
+            capabilities: [],
+            error: String(e)
+        };
+    }
+    finally {
+        try {
+            swipl.FS.unlink(tempPath);
+        }
+        catch { }
+    }
+}
+/**
+ * Run LLM-based security audit
+ */
+async function auditDML(dml, staticAnalysis, model, provider) {
+    const llm = getLanguageModel(provider, model);
+    const prompt = `
+You are a senior security engineer auditing a DeepClause agent (DML).
+DML is a Prolog dialect for controlling LLMs.
+
+CODE:
+\`\`\`prolog
+${dml}
+\`\`\`
+
+STATIC ANALYSIS FINDINGS:
+${staticAnalysis.warnings.map(w => `- [${w.level.toUpperCase()}] ${w.message}`).join('\n')}
+
+DETECTED CAPABILITIES:
+${staticAnalysis.capabilities.join(', ')}
+
+TASK:
+Review the code for logic flaws, security risks, and bad practices.
+Focus on:
+1. Prompt Injection: Is user input properly isolated?
+2. Command Injection: Are tool arguments validated?
+3. Logic: Does the flow make sense?
+4. Tool Misuse: Are dangerous tools used appropriately?
+
+OUTPUT:
+Provide a concise Markdown report with:
+- Critical Issues (if any)
+- Warnings
+- Suggestions for improvement
+`;
+    try {
+        const result = await generateText({
+            model: llm,
+            prompt,
+            temperature: 0.1
+        });
+        return result.text;
+    }
+    catch (e) {
+        return `Audit failed: ${e}`;
+    }
+}
+// =============================================================================
 // Main Compilation Function
 // =============================================================================
 /**
@@ -219,6 +365,12 @@ export async function compileToDML(source, options) {
             lastValidation = validation;
             attempts.push({ dml, validation });
             if (validation.valid) {
+                // Run Static Analysis
+                const analysis = await analyzeDML(dml);
+                // Optionally Run Auditor
+                if (options.audit) {
+                    analysis.auditorReport = await auditDML(dml, analysis, model, provider);
+                }
                 // Generate explanation
                 const explanation = await generateExplanation(dml, model, provider);
                 return {
@@ -226,7 +378,8 @@ export async function compileToDML(source, options) {
                     tools: extractToolDependencies(dml),
                     explanation,
                     attempts: attempt,
-                    valid: true
+                    valid: true,
+                    analysis
                 };
             }
         }

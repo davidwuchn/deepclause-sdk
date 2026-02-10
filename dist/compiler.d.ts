@@ -4,7 +4,7 @@
  * Compiles Markdown task descriptions to DML programs using an agentic loop
  * with LLM generation and Prolog validation.
  */
-import { CompileOptions, CompileResult } from './types.js';
+import { CompileOptions, CompileResult, AnalysisResult } from './types.js';
 interface ValidationResult {
     valid: boolean;
     errors: string[];
@@ -14,6 +14,10 @@ interface ValidationResult {
  * Validate DML code using the actual Prolog parser
  */
 export declare function validateWithProlog(dml: string): Promise<ValidationResult>;
+/**
+ * Run static analysis on the DML code
+ */
+export declare function analyzeDML(dml: string): Promise<AnalysisResult>;
 /**
  * Compile a natural language prompt or markdown directly to DML
  */

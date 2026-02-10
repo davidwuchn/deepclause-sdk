@@ -118,6 +118,7 @@ function loadPrologModules(swipl) {
     const moduleNames = [
         'deepclause_strings.pl',
         'deepclause_mi.pl',
+        'deepclause_analysis.pl',
     ];
     for (const name of moduleNames) {
         // Read the source file from disk

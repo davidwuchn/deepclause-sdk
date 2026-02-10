@@ -98,6 +98,23 @@ export interface CompileTool {
     schema?: object;
 }
 /**
+ * Static Analysis Warning
+ */
+export interface AnalysisWarning {
+    level: 'critical' | 'high' | 'medium' | 'low';
+    message: string;
+}
+/**
+ * Result of DML Analysis
+ */
+export interface AnalysisResult {
+    valid: boolean;
+    warnings: AnalysisWarning[];
+    capabilities: string[];
+    auditorReport?: string;
+    error?: string;
+}
+/**
  * Options for DML compilation
  */
 export interface CompileOptions {
@@ -113,6 +130,8 @@ export interface CompileOptions {
     verbose?: boolean;
     /** Custom tools to describe to the compiler */
     tools?: CompileTool[];
+    /** Run LLM-based security audit */
+    audit?: boolean;
 }
 /**
  * Result of a DML compilation
@@ -129,6 +148,8 @@ export interface CompileResult {
     /** Validation details */
     valid: boolean;
     errors?: string[];
+    /** Static and Semantic Analysis results */
+    analysis?: AnalysisResult;
 }
 /**
  * JSON Schema type for tool parameters

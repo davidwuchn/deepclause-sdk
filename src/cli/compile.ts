@@ -29,6 +29,7 @@ export interface CompileOptions {
   maxAttempts?: number;
   verbose?: boolean;
   stream?: boolean;
+  audit?: boolean;
 }
 
 export interface CompileResult {
@@ -146,6 +147,7 @@ export async function compile(
   const maxAttempts = options.maxAttempts ?? 3;
   const verbose = options.verbose ?? false;
   const shouldStream = options.stream ?? true;
+  const shouldAudit = options.audit ?? true;
   
   // Resolve paths
   const absoluteSource = path.resolve(sourcePath);
@@ -220,7 +222,8 @@ export async function compile(
       temperature: options.temperature,
       maxAttempts,
       verbose,
-      tools: tools as any // Map CLI tools to compiler tools
+      tools: tools as any, // Map CLI tools to compiler tools
+      audit: shouldAudit
     });
 
     if (result.valid && result.dml) {
@@ -228,6 +231,23 @@ export async function compile(
       const dml = result.dml;
       const explanation = result.explanation || 'DML program compiled successfully.';
       
+      // Print Analysis Warnings
+      if (result.analysis) {
+        if (result.analysis.warnings && result.analysis.warnings.length > 0) {
+          console.log('\n⚠️  Static Analysis Warnings:');
+          for (const w of result.analysis.warnings) {
+             const icon = w.level === 'critical' ? '🔴' : w.level === 'high' ? '🟠' : w.level === 'medium' ? '🟡' : '⚪';
+             console.log(`  ${icon} [${w.level.toUpperCase()}] ${w.message}`);
+          }
+        }
+        
+        if (result.analysis.auditorReport) {
+          console.log('\n🛡️  Security Audit Report:');
+          console.log(result.analysis.auditorReport);
+          console.log('--------------------------------------------------');
+        }
+      }
+
       // If validate-only, return without saving
       if (options.validateOnly) {
         console.log('\n✅ Compilation successful!\n');
@@ -300,7 +320,7 @@ export async function compile(
     } else {
       status.stop();
       console.log('\n❌ Compilation failed.\n');
-      console.log('Validation errors:');
+      console.log('Errors:');
       for (const error of result.errors || []) {
         console.log(`  - ${error}`);
       }

@@ -14,6 +14,7 @@ export interface CompileOptions {
     maxAttempts?: number;
     verbose?: boolean;
     stream?: boolean;
+    audit?: boolean;
 }
 export interface CompileResult {
     output: string;

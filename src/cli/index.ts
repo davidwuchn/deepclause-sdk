@@ -94,6 +94,7 @@ program
   .option('--max-attempts <number>', 'Max compilation attempts (default: 3)', parseInt)
   .option('-v, --verbose', 'Show detailed output including generated code')
   .option('--no-stream', 'Disable streaming output')
+  .option('--no-audit', 'Disable security audit and static analysis')
   .action(async (source, output, options) => {
     try {
       const config = await loadConfig(process.cwd());
@@ -106,7 +107,8 @@ program
         temperature: options.temperature,
         maxAttempts: options.maxAttempts,
         verbose: options.verbose,
-        stream: options.stream !== false
+        stream: options.stream !== false,
+        audit: options.audit !== false
       });
       
       if (result.skipped) {
