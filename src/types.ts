@@ -26,6 +26,9 @@ export interface CreateOptions {
   streaming?: boolean;
   /** Enable debug logging (shows prompts, tool calls, etc.) */
   debug?: boolean;
+  /** Provider-specific options passed to the AI SDK (e.g. Google thinkingConfig, OpenAI reasoningEffort) */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  providerOptions?: Record<string, Record<string, any>>;
 }
 
 /**
@@ -44,6 +47,9 @@ export interface RunOptions {
   onUserInput?: (prompt: string) => Promise<string>;
   /** Abort signal for cancellation */
   signal?: AbortSignal;
+  /** Initial conversation messages seeded into memory before DML execution.
+   *  These appear as proper user/assistant turns, not in the system prompt. */
+  initialMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
 }
 
 /**
@@ -67,8 +73,20 @@ export interface TraceEntry {
 /**
  * Events emitted during DML execution
  */
+/**
+ * Token usage data from a single LLM call.
+ */
+export interface LLMUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+}
+
 export interface DMLEvent {
-  type: 'output' | 'log' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'tool_call';
+  type: 'output' | 'log' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'tool_call' | 'usage';
   content?: string;
   prompt?: string;
   /** Execution trace (only present in 'finished' event when trace mode enabled) */
@@ -81,6 +99,8 @@ export interface DMLEvent {
   toolArgs?: Record<string, unknown>;
   /** Tool result (only for 'tool_call' events, set after execution) */
   toolResult?: unknown;
+  /** Token usage from an LLM call (only for 'usage' events) */
+  usage?: LLMUsage;
 }
 
 /**
@@ -142,6 +162,8 @@ export interface CompileOptions {
   tools?: CompileTool[];
   /** Run LLM-based security audit */
   audit?: boolean;
+  /** Base URL for the LLM API (e.g. a proxy endpoint) */
+  baseUrl?: string;
 }
 
 /**

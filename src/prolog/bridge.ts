@@ -2,10 +2,288 @@
  * JavaScript-Prolog Bridge utilities
  */
 
-import { google } from '@ai-sdk/google';
-import { anthropic } from '@ai-sdk/anthropic';
+import { randomUUID } from 'crypto';
+import { request as httpsRequest } from 'https';
+import { PassThrough, Readable } from 'stream';
+import { google, createGoogleGenerativeAI } from '@ai-sdk/google';
+import { anthropic, createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { LanguageModel } from 'ai';
+
+function describeFetchError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const details: string[] = [`${error.name}: ${error.message}`];
+  const topLevelCode = (error as Error & { code?: string }).code;
+  if (topLevelCode) details.push(`code=${topLevelCode}`);
+
+  const cause = error.cause;
+  if (cause && typeof cause === 'object') {
+    const causeRecord = cause as { name?: string; message?: string; code?: string; errno?: string | number; syscall?: string; address?: string; port?: number };
+    const causeParts = [
+      causeRecord.name,
+      causeRecord.message,
+      causeRecord.code ? `code=${causeRecord.code}` : undefined,
+      causeRecord.errno ? `errno=${causeRecord.errno}` : undefined,
+      causeRecord.syscall ? `syscall=${causeRecord.syscall}` : undefined,
+      causeRecord.address ? `address=${causeRecord.address}` : undefined,
+      causeRecord.port ? `port=${causeRecord.port}` : undefined,
+    ].filter(Boolean);
+    if (causeParts.length > 0) {
+      details.push(`cause=${causeParts.join(' ')}`);
+    }
+  }
+
+  if (error.stack) {
+    details.push(`stack=${error.stack.split('\n').slice(0, 4).join(' | ')}`);
+  }
+
+  return details.join(' ');
+}
+
+function normalizeRequestBody(body: unknown): string | Uint8Array | undefined {
+  if (body == null) return undefined;
+  if (typeof body === 'string') return body;
+  if (body instanceof URLSearchParams) return body.toString();
+  if (body instanceof Uint8Array) return body;
+  if (body instanceof ArrayBuffer) return new Uint8Array(body);
+  if (ArrayBuffer.isView(body)) {
+    return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  }
+  return undefined;
+}
+
+function createResponseHeaders(headers: Record<string, string | string[] | undefined>): Headers {
+  const responseHeaders = new Headers();
+  for (const [key, value] of Object.entries(headers)) {
+    if (value == null) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        responseHeaders.append(key, item);
+      }
+      continue;
+    }
+    responseHeaders.set(key, value);
+  }
+  return responseHeaders;
+}
+
+function getIsolatedProxyAttemptTimeoutMs(): number {
+  const raw = process.env.DC_PROXY_ATTEMPT_TIMEOUT_MS;
+  if (raw != null) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  return 20_000;
+}
+
+function getConfiguredTimeoutMs(envVar: string, fallback: number): number {
+  const raw = process.env[envVar];
+  if (raw != null) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  return fallback;
+}
+
+function getIsolatedProxyFirstByteTimeoutMs(): number {
+  return getConfiguredTimeoutMs('DC_PROXY_FIRST_BYTE_TIMEOUT_MS', getIsolatedProxyAttemptTimeoutMs());
+}
+
+function getIsolatedProxyBodyIdleTimeoutMs(): number {
+  return getConfiguredTimeoutMs('DC_PROXY_BODY_IDLE_TIMEOUT_MS', getIsolatedProxyAttemptTimeoutMs());
+}
+
+async function isolatedHttpsFetch(
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  const body = normalizeRequestBody(init.body);
+  if (init.body != null && body == null) {
+    throw new Error(`Unsupported request body type for isolated HTTPS fetch: ${typeof init.body}`);
+  }
+
+  return new Promise<Response>((resolve, reject) => {
+    const target = new URL(url);
+    const headers = new Headers(init.headers);
+    headers.set('connection', 'close');
+    if (body != null && !headers.has('content-length')) {
+      const bodyByteLength = typeof body === 'string' ? Buffer.byteLength(body) : body.byteLength;
+      headers.set('content-length', String(bodyByteLength));
+    }
+    const timeoutMs = getIsolatedProxyAttemptTimeoutMs();
+    const abortSignal = init.signal;
+    let settled = false;
+    let timeoutId: NodeJS.Timeout | undefined;
+    let abortRequest: () => void = () => {};
+
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      if (abortSignal) {
+        abortSignal.removeEventListener('abort', abortRequest);
+      }
+      fn();
+    };
+
+    const fail = (error: unknown) => settle(() => reject(error));
+    const succeed = (response: Response) => settle(() => resolve(response));
+
+    const buildRetryableTimeoutError = (message: string) => {
+      const timeoutError = new Error(message);
+      (timeoutError as Error & { code?: string }).code = 'ETIMEDOUT';
+
+      const fetchError = new TypeError('fetch failed') as TypeError & { cause?: unknown };
+      fetchError.cause = timeoutError;
+      return { timeoutError, fetchError };
+    };
+
+    const req = httpsRequest(
+      {
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port ? Number.parseInt(target.port, 10) : 443,
+        path: `${target.pathname}${target.search}`,
+        method: init.method ?? 'GET',
+        headers: Object.fromEntries(headers.entries()),
+        agent: false,
+      },
+      (res) => {
+        const status = res.statusCode ?? 500;
+        const statusText = res.statusMessage ?? '';
+        const responseHeaders = createResponseHeaders(res.headers);
+        const contentLength = Array.isArray(res.headers['content-length'])
+          ? res.headers['content-length'][0]
+          : res.headers['content-length'];
+        const hasNoBody = status === 204 || status === 304 || contentLength === '0';
+
+        if (hasNoBody) {
+          succeed(new Response(null, { status, statusText, headers: responseHeaders }));
+          return;
+        }
+
+        const firstByteTimeoutMs = getIsolatedProxyFirstByteTimeoutMs();
+        let firstByteSettled = false;
+        let firstByteTimeoutId: NodeJS.Timeout | undefined;
+
+        const settleFirstByte = (fn: () => void) => {
+          if (firstByteSettled) return;
+          firstByteSettled = true;
+          if (firstByteTimeoutId) clearTimeout(firstByteTimeoutId);
+          res.removeListener('data', onFirstData);
+          res.removeListener('end', onEndBeforeFirstByte);
+          res.removeListener('error', onFirstByteError);
+          res.removeListener('aborted', onFirstByteAborted);
+          fn();
+        };
+
+        const onFirstByteError = (error: Error) => {
+          settleFirstByte(() => fail(error));
+        };
+
+        const onFirstByteAborted = () => {
+          const abortedError = new Error('Upstream response aborted before first body byte');
+          (abortedError as Error & { code?: string }).code = 'ECONNRESET';
+          settleFirstByte(() => fail(abortedError));
+        };
+
+        const onEndBeforeFirstByte = () => {
+          settleFirstByte(() => {
+            succeed(new Response(null, { status, statusText, headers: responseHeaders }));
+          });
+        };
+
+        const onFirstData = (firstChunk: Buffer) => {
+          settleFirstByte(() => {
+            const passthrough = new PassThrough();
+            const forwardError = (error: Error) => {
+              passthrough.destroy(error);
+            };
+            const forwardAbort = () => {
+              const abortedError = new Error('Upstream response aborted before completion');
+              (abortedError as Error & { code?: string }).code = 'ECONNRESET';
+              passthrough.destroy(abortedError);
+            };
+
+            res.on('error', forwardError);
+            res.on('aborted', forwardAbort);
+            passthrough.on('close', () => {
+              res.removeListener('error', forwardError);
+              res.removeListener('aborted', forwardAbort);
+            });
+
+            passthrough.write(firstChunk);
+            res.pipe(passthrough);
+            succeed(new Response(Readable.toWeb(passthrough) as ReadableStream<Uint8Array>, {
+              status,
+              statusText,
+              headers: responseHeaders,
+            }));
+          });
+        };
+
+        res.once('data', onFirstData);
+        res.once('end', onEndBeforeFirstByte);
+        res.once('error', onFirstByteError);
+        res.once('aborted', onFirstByteAborted);
+
+        if (firstByteTimeoutMs > 0) {
+          firstByteTimeoutId = setTimeout(() => {
+            const { timeoutError, fetchError } = buildRetryableTimeoutError(
+              `Proxy response timed out waiting for first body byte after ${firstByteTimeoutMs}ms`,
+            );
+            res.destroy(timeoutError);
+            fail(fetchError);
+          }, firstByteTimeoutMs);
+        }
+      },
+    );
+
+    abortRequest = () => {
+      const reason = abortSignal?.reason instanceof Error
+        ? abortSignal.reason
+        : Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+      req.destroy(reason);
+      fail(reason);
+    };
+
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        abortRequest();
+        return;
+      }
+      abortSignal.addEventListener('abort', abortRequest, { once: true });
+    }
+
+    req.on('socket', (socket) => {
+      socket.setNoDelay(true);
+    });
+    req.on('error', fail);
+
+    if (timeoutMs > 0) {
+      timeoutId = setTimeout(() => {
+        const { timeoutError, fetchError } = buildRetryableTimeoutError(
+          `Proxy request timed out after ${timeoutMs}ms`,
+        );
+        req.destroy(timeoutError);
+        fail(fetchError);
+      }, timeoutMs);
+    }
+
+    if (body != null) {
+      req.write(body);
+    }
+
+    req.end();
+  });
+}
 
 /**
  * Create a model provider for the Vercel AI SDK
@@ -13,30 +291,175 @@ import type { LanguageModel } from 'ai';
 export function createModelProvider(
   provider: string,
   model: string,
-  baseUrl?: string
+  baseUrl?: string,
+  debugLog?: (...args: unknown[]) => void,
 ): LanguageModel {
-  switch (provider) {
-    case 'google':
-      return google(model);
+  let proxyRequestSeq = 0;
 
-    case 'anthropic':
+  // Create an instrumented fetch that logs HTTP-level timing and body chunk delivery.
+  const timedFetch: typeof globalThis.fetch | undefined = (debugLog || baseUrl)
+    ? async (input: Parameters<typeof globalThis.fetch>[0], init?: Parameters<typeof globalThis.fetch>[1]) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        const headers = new Headers(input instanceof Request ? input.headers : undefined);
+        if (init?.headers) {
+          const initHeaders = new Headers(init.headers);
+          initHeaders.forEach((value, key) => headers.set(key, value));
+        }
+
+        proxyRequestSeq += 1;
+        const requestId = `${process.env.SESSION_ID ?? 'no-session'}-${proxyRequestSeq}-${randomUUID().slice(0, 8)}`;
+        headers.set('x-deepclause-request-id', requestId);
+        headers.set('x-deepclause-llm-call-seq', String(proxyRequestSeq));
+        if (process.env.SESSION_ID) headers.set('x-deepclause-exec-session-id', process.env.SESSION_ID);
+        if (process.env.DC_SESSION_ID) headers.set('x-deepclause-dc-session-id', process.env.DC_SESSION_ID);
+        if (process.env.SKILL) headers.set('x-deepclause-skill', process.env.SKILL);
+        if (process.env.TASK_MODE) headers.set('x-deepclause-task-mode', process.env.TASK_MODE);
+
+        const nextInit = { ...init, headers };
+        const bodyLen = nextInit.body
+          ? typeof nextInit.body === 'string'
+            ? Buffer.byteLength(nextInit.body)
+            : nextInit.body instanceof Uint8Array
+              ? nextInit.body.byteLength
+              : '(stream)'
+          : 0;
+        const fetchT0 = Date.now();
+        const useIsolatedProxyTransport = Boolean(baseUrl && url.startsWith(baseUrl));
+        const transport = useIsolatedProxyTransport ? 'https-one-shot' : 'undici';
+        debugLog?.(`[fetch] POST ${url} requestId=${requestId} seq=${proxyRequestSeq} transport=${transport} (body=${bodyLen})`);
+        let response: Response;
+        try {
+          response = useIsolatedProxyTransport
+            ? await isolatedHttpsFetch(url, nextInit)
+            : await globalThis.fetch(input, nextInit);
+        } catch (err) {
+          const elapsed = Date.now() - fetchT0;
+          debugLog?.(`[fetch] FAILED requestId=${requestId} seq=${proxyRequestSeq} after ${elapsed}ms: ${describeFetchError(err)}`);
+          throw err;
+        }
+        const ttfb = Date.now() - fetchT0;
+        debugLog?.(`[fetch] Response requestId=${requestId} seq=${proxyRequestSeq}: ${response.status} in ${ttfb}ms (TTFB) content-type=${response.headers.get('content-type')} content-encoding=${response.headers.get('content-encoding')}`);
+
+        // Wrap response.body to track when chunks actually arrive
+        if (response.body) {
+          const originalBody = response.body;
+          let chunkCount = 0;
+          let totalBytes = 0;
+          let firstChunkMs: number | null = null;
+          const bodyIdleTimeoutMs = getIsolatedProxyBodyIdleTimeoutMs();
+          const bodyAbortController = bodyIdleTimeoutMs > 0 ? new AbortController() : undefined;
+          let bodyIdleTimer: NodeJS.Timeout | undefined;
+
+          const clearBodyIdleTimer = () => {
+            if (bodyIdleTimer) {
+              clearTimeout(bodyIdleTimer);
+              bodyIdleTimer = undefined;
+            }
+          };
+
+          const scheduleBodyIdleTimer = () => {
+            if (!bodyAbortController) return;
+            clearBodyIdleTimer();
+            bodyIdleTimer = setTimeout(() => {
+              const idleError = new Error(`Proxy response body stalled for ${bodyIdleTimeoutMs}ms`);
+              (idleError as Error & { code?: string }).code = 'ETIMEDOUT';
+              debugLog?.(`[fetch] Body timeout requestId=${requestId} seq=${proxyRequestSeq} after ${bodyIdleTimeoutMs}ms without data`);
+              bodyAbortController.abort(idleError);
+            }, bodyIdleTimeoutMs);
+          };
+
+          const bodyTap = new TransformStream({
+            transform(chunk, controller) {
+              chunkCount++;
+              const bytes = chunk.byteLength ?? chunk.length ?? 0;
+              totalBytes += bytes;
+              const elapsed = Date.now() - fetchT0;
+              if (firstChunkMs === null) {
+                firstChunkMs = elapsed;
+                debugLog?.(`[fetch] First body chunk requestId=${requestId} seq=${proxyRequestSeq} at ${elapsed}ms (${bytes} bytes)`);
+              } else if (chunkCount <= 10 || chunkCount % 50 === 0) {
+                // Log first 10 chunks and every 50th after
+                debugLog?.(`[fetch] Body chunk requestId=${requestId} seq=${proxyRequestSeq} #${chunkCount} at ${elapsed}ms (${bytes} bytes, total=${totalBytes})`);
+              }
+              scheduleBodyIdleTimer();
+              controller.enqueue(chunk);
+            },
+            flush() {
+              clearBodyIdleTimer();
+              debugLog?.(`[fetch] Body complete requestId=${requestId} seq=${proxyRequestSeq}: ${chunkCount} chunks, ${totalBytes} bytes, ${Date.now() - fetchT0}ms total`);
+            },
+          });
+
+          const bodyPipe = originalBody.pipeTo(
+            bodyTap.writable,
+            bodyAbortController ? { signal: bodyAbortController.signal } : undefined,
+          );
+
+          void bodyPipe.catch((err) => {
+            clearBodyIdleTimer();
+            const failure = bodyAbortController?.signal.aborted
+              ? bodyAbortController.signal.reason ?? err
+              : err;
+            const kind = bodyAbortController?.signal.aborted ? 'aborted' : 'errored';
+            debugLog?.(`[fetch] Body ${kind} requestId=${requestId} seq=${proxyRequestSeq} after ${Date.now() - fetchT0}ms: ${describeFetchError(failure)}`);
+          });
+
+          // Return a new Response with the instrumented body 
+          return new Response(bodyTap.readable, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+          });
+        }
+        return response;
+      }
+    : undefined;
+
+  switch (provider) {
+    case 'google': {
+      if (baseUrl) {
+        const g = createGoogleGenerativeAI({
+          baseURL: baseUrl,
+          apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
+          ...(timedFetch ? { fetch: timedFetch } : {}),
+        });
+        return g(model);
+      }
+      return google(model);
+    }
+
+    case 'anthropic': {
+      if (baseUrl) {
+        const a = createAnthropic({
+          baseURL: baseUrl,
+          apiKey: process.env.ANTHROPIC_API_KEY,
+          ...(timedFetch ? { fetch: timedFetch } : {}),
+        });
+        return a(model);
+      }
       return anthropic(model);
+    }
 
     case 'openai': {
       const openai = createOpenAI({
         apiKey: process.env.OPENAI_API_KEY,
         baseURL: baseUrl,
+        ...(timedFetch ? { fetch: timedFetch } : {}),
       });
-      return openai(model);
+      // Use .chat() when a custom baseUrl is set to force the chat completions API.
+      // Without this, @ai-sdk/openai defaults to the Responses API, which is not
+      // supported by OpenRouter or any other proxy.
+      return baseUrl ? openai.chat(model) : openai(model);
     }
 
     case 'openrouter': {
       const openrouter = createOpenAI({
         name: 'openrouter',
-        baseURL: 'https://openrouter.ai/api/v1',
-        apiKey: process.env.OPENROUTER_API_KEY,
+        baseURL: baseUrl ?? 'https://openrouter.ai/api/v1',
+        apiKey: process.env.OPENROUTER_API_KEY ?? process.env.OPENAI_API_KEY,
+        ...(timedFetch ? { fetch: timedFetch } : {}),
       });
-      return openrouter(model);
+      return openrouter.chat(model);
     }
 
     default: {
@@ -44,8 +467,11 @@ export function createModelProvider(
       const defaultProvider = createOpenAI({
         apiKey: process.env.OPENAI_API_KEY,
         baseURL: baseUrl,
+        ...(timedFetch ? { fetch: timedFetch } : {}),
       });
-      return defaultProvider(model);
+      // Use .chat() when a custom baseUrl is set to force chat completions API
+      // instead of the Responses API (required for OpenRouter-compatible proxies).
+      return baseUrl ? defaultProvider.chat(model) : defaultProvider(model);
     }
   }
 }

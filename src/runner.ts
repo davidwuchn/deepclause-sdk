@@ -71,6 +71,8 @@ export interface RunnerOptions {
   trace?: boolean;
   streaming?: boolean;
   debug?: boolean;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  providerOptions?: Record<string, Record<string, any>>;
 }
 
 export interface InternalRunOptions {
@@ -82,6 +84,7 @@ export interface InternalRunOptions {
   toolPolicy: ToolPolicy | null;
   onInputRequired: (prompt: string) => Promise<string>;
   signal?: AbortSignal;
+  initialMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
 }
 
 /**
@@ -132,6 +135,7 @@ export class DMLRunner {
   private engine: unknown = null;
   private sessionId: string = '';
   private currentMemory: MemoryMessage[] = [];
+  private initialMessagesApplied = false;
 
   constructor(swipl: SWIPLModule, options: RunnerOptions) {
     this.swipl = swipl;
@@ -335,6 +339,18 @@ export class DMLRunner {
   }
 
   /**
+   * Quote a string as a Prolog atom if it contains non-atom characters.
+   * Valid unquoted atoms: start with lowercase letter, contain only [a-zA-Z0-9_]
+   */
+  private quoteAtom(str: string): string {
+    if (/^[a-z][a-zA-Z0-9_]*$/.test(str)) {
+      return str;
+    }
+    // Quote and escape internal single quotes
+    return `'${str.replace(/'/g, "''")}'`;
+  }
+
+  /**
    * Convert JS value to Prolog term string
    */
   private toPrologTerm(value: unknown): string {
@@ -357,7 +373,7 @@ export class DMLRunner {
     }
     if (value && typeof value === 'object') {
       const entries = Object.entries(value)
-        .map(([k, v]) => `${k}: ${this.toPrologTerm(v)}`)
+        .map(([k, v]) => `${this.quoteAtom(k)}: ${this.toPrologTerm(v)}`)
         .join(', ');
       return `dict{${entries}}`;
     }
@@ -459,9 +475,19 @@ export class DMLRunner {
 
     // Extract memory from payload (now passed via state threading)
     const memory = this.extractMemoryFromPayload(rawPayload);
+
+    // Prepend initial conversation messages (from RunOptions.initialMessages)
+    // Only on the FIRST task() call — after that, persistent messages already include them.
+    const initialMsgs = (!this.initialMessagesApplied && options.initialMessages?.length)
+      ? options.initialMessages as MemoryMessage[]
+      : undefined;
+    const fullMemory = initialMsgs
+      ? [...initialMsgs, ...memory]
+      : memory;
+    if (initialMsgs) this.initialMessagesApplied = true;
     
     // Store current memory for getMemory() access
-    this.currentMemory = memory;
+    this.currentMemory = fullMemory;
 
     // Callback for tool output events
     const onToolOutput = (text: string) => {
@@ -527,7 +553,7 @@ export class DMLRunner {
     const resultPromise = runAgentLoop({
       taskDescription,
       outputVars,
-      memory,
+      memory: fullMemory,
       tools: availableTools,
       modelOptions: {
         model: this.options.model,
@@ -535,6 +561,7 @@ export class DMLRunner {
         temperature: this.options.temperature,
         maxOutputTokens: this.options.maxTokens,
         baseUrl: this.options.baseUrl,
+        providerOptions: this.options.providerOptions,
       },
       streaming: this.options.streaming,
       debug: this.options.debug,
@@ -548,6 +575,13 @@ export class DMLRunner {
       },
       onToolCall: (toolName: string, args: Record<string, unknown>) => {
         streamQueue.push({ type: 'tool_call', toolName, toolArgs: args });
+        if (streamResolve) {
+          streamResolve();
+          streamResolve = null;
+        }
+      },
+      onUsage: (usage) => {
+        streamQueue.push({ type: 'usage', usage });
         if (streamResolve) {
           streamResolve();
           streamResolve = null;
@@ -1137,6 +1171,7 @@ export class DMLRunner {
                   temperature: this.options.temperature,
                   maxOutputTokens: this.options.maxTokens,
                   baseUrl: this.options.baseUrl,
+                  providerOptions: this.options.providerOptions,
                 },
                 streaming: false, // Nested loops don't stream
                 debug: this.options.debug,

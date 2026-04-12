@@ -18,7 +18,17 @@ tool(process_data(Input, Result), "Process and save data") :-
     % Sink: exec
     exec(read_file(path: FinalPath), Result).
 
-agent_main(UserInput) :-
+agent_main(% Before (broken):
+(   Body == true
+->  true  % StateOut left unbound!
+;   mi_call(Body, StateIn, StateOut)
+).
+
+% After (fixed):
+(   Body == true
+->  StateOut = StateIn  % Properly unify state
+;   mi_call(Body, StateIn, StateOut)
+).) :-
     % UserInput is tainted (agent argument)
     
     % Hop

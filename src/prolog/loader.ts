@@ -42,7 +42,14 @@ let currentWorkspacePath: string | null = null;
 // Get the directory of this module for resolving Prolog source files
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const PROLOG_SRC_DIR = join(__dirname, '..', 'prolog-src');
+// Allow env override for bundled deployments where prolog-src is co-located with the bundle.
+// Falls back to the standard SDK layout: ../prolog-src relative to this module.
+const PROLOG_SRC_DIR = (() => {
+  if (process.env.PROLOG_SRC_DIR && existsSync(process.env.PROLOG_SRC_DIR)) return process.env.PROLOG_SRC_DIR;
+  const sibling = join(__dirname, 'prolog-src');
+  if (existsSync(sibling)) return sibling;
+  return join(__dirname, '..', 'prolog-src');
+})();
 
 /**
  * Load and initialize SWI-Prolog WASM
@@ -148,6 +155,14 @@ async function initializeProlog(): Promise<SWIPLModule> {
 
   // Load the DeepClause Prolog modules
   loadPrologModules(swipl);
+
+  // Pre-load commonly needed libraries so DML skills don't need explicit :- use_module
+  // Note: use_module/1 is called as a goal, NOT as a :- directive (directives can't be called from JS)
+  try {
+    swipl.prolog.call('use_module(library(http/json)).');
+  } catch {
+    // library(http/json) may not be available in all WASM builds — skip silently
+  }
 
   return swipl;
 }

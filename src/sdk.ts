@@ -45,6 +45,7 @@ export async function createDeepClause(options: CreateOptions): Promise<DeepClau
     trace: options.trace ?? false,
     streaming: options.streaming ?? false,
     debug: options.debug ?? false,
+    providerOptions: options.providerOptions,
   });
 
   // Tool registry

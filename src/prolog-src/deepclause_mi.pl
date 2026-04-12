@@ -241,6 +241,7 @@ process_clause((:- Directive), SessionId) :-
 %% Handle tool/2 with description: tool(Head, Description) :- Body
 process_clause((tool(ToolHead, Description) :- Body), SessionId) :-
     !,
+    (catch(expand_dict_dots(Body, ExpandedBody), _, fail) -> true ; ExpandedBody = Body),
     extract_tool_schema(ToolHead, Description, ToolName, Schema),
     assertz(session_user_tools(SessionId, ToolName)),
     assertz(session_user_tool_schema(SessionId, ToolName, Schema)),
@@ -248,11 +249,12 @@ process_clause((tool(ToolHead, Description) :- Body), SessionId) :-
     format(string(SourceCode), "tool(~w, ~q) :-~n    ~w.", [ToolHead, Description, Body]),
     assertz(SessionId:tool_source(ToolName, SourceCode)),
     % Assert the tool implementation (use just ToolHead for execution)
-    assertz(SessionId:(tool(ToolHead) :- Body)).
+    assertz(SessionId:(tool(ToolHead) :- ExpandedBody)).
 
 %% Handle tool/1 without description: tool(Head) :- Body
 process_clause((tool(ToolHead) :- Body), SessionId) :-
     !,
+    (catch(expand_dict_dots(Body, ExpandedBody), _, fail) -> true ; ExpandedBody = Body),
     extract_tool_schema(ToolHead, none, ToolName, Schema),
     assertz(session_user_tools(SessionId, ToolName)),
     assertz(session_user_tool_schema(SessionId, ToolName, Schema)),
@@ -260,16 +262,85 @@ process_clause((tool(ToolHead) :- Body), SessionId) :-
     format(string(SourceCode), "tool(~w) :-~n    ~w.", [ToolHead, Body]),
     assertz(SessionId:tool_source(ToolName, SourceCode)),
     % Assert the tool implementation
-    assertz(SessionId:(tool(ToolHead) :- Body)).
+    assertz(SessionId:(tool(ToolHead) :- ExpandedBody)).
 
 process_clause((Head :- Body), SessionId) :-
     !,
-    % Regular clause - assert it
-    assertz(SessionId:(Head :- Body)).
+    % Expand dict dot-notation (Dict.Key → get_dict), then assert
+    (   catch(expand_dict_dots(Body, ExpandedBody), _, fail)
+    ->  true
+    ;   ExpandedBody = Body
+    ),
+    assertz(SessionId:(Head :- ExpandedBody)).
 
 process_clause(Fact, SessionId) :-
     % Simple fact
     assertz(SessionId:Fact).
+
+%% ============================================================
+%% Dict Dot-Notation Expansion (compile-time)
+%% ============================================================
+%% SWI-Prolog's dict functional notation (Dict.Key) is normally
+%% expanded by goal_expansion during compilation. Since DML clauses
+%% are loaded via assertz (no goal expansion), we must expand
+%% Dict.Key → get_dict(Key, Dict, Value) manually before asserting.
+%%
+%% Handles:
+%%   Dict.Key = Value   →  get_dict(Key, Dict, Value)
+%%   Value = Dict.Key   →  get_dict(Key, Dict, Value)
+%%   Dict.Key == Value  →  get_dict(Key, Dict, Tmp), Tmp == Value
+%%   Value == Dict.Key  →  get_dict(Key, Dict, Tmp), Tmp == Value
+
+%% expand_dict_dots(+GoalIn, -GoalOut)
+%% Top-level expansion for goal bodies
+expand_dict_dots(Var, Var) :- var(Var), !.
+expand_dict_dots((A, B), (EA, EB)) :- !, expand_dict_dots(A, EA), expand_dict_dots(B, EB).
+expand_dict_dots((A ; B), (EA ; EB)) :- !, expand_dict_dots(A, EA), expand_dict_dots(B, EB).
+expand_dict_dots((A -> B), (EA -> EB)) :- !, expand_dict_dots(A, EA), expand_dict_dots(B, EB).
+
+%% Unification with dict dot access: Dict.Key = Value
+expand_dict_dots(Goal, Result) :-
+    nonvar(Goal),
+    functor(Goal, =, 2),
+    !,
+    arg(1, Goal, A),
+    arg(2, Goal, B),
+    (   nonvar(A), is_dot_access(A, Dict, Key)
+    ->  Result = get_dict(Key, Dict, B)
+    ;   nonvar(B), is_dot_access(B, Dict, Key)
+    ->  Result = get_dict(Key, Dict, A)
+    ;   Result = Goal
+    ).
+
+%% Equality check with dict dot access: Dict.Key == Value
+expand_dict_dots(Goal, Result) :-
+    nonvar(Goal),
+    functor(Goal, ==, 2),
+    !,
+    arg(1, Goal, A),
+    arg(2, Goal, B),
+    (   nonvar(A), is_dot_access(A, Dict, Key)
+    ->  Result = (get_dict(Key, Dict, Tmp), Tmp == B)
+    ;   nonvar(B), is_dot_access(B, Dict, Key)
+    ->  Result = (get_dict(Key, Dict, Tmp), Tmp == A)
+    ;   Result = Goal
+    ).
+
+expand_dict_dots(Goal, Goal).
+
+%% is_dot_access(+Term, -Dict, -Key)
+%% Check if Term is a dict dot-access expression: '.'(Dict, Key) where Key is atom
+is_dot_access(Term, Dict, Key) :-
+    compound(Term),
+    compound_name_arity(Term, '.', 2),
+    arg(1, Term, Dict),
+    arg(2, Term, Key),
+    atom(Key).
+
+%% expand_dict_expr(+ExprIn, -ExprOut)
+%% Expand dict access in value-level expressions (just pass through for now)
+expand_dict_expr(Var, Var) :- var(Var), !.
+expand_dict_expr(Expr, Expr).
 
 %% ============================================================
 %% Tool Schema Extraction
@@ -559,6 +630,12 @@ set_context_stack(StateIn, Stack, StateOut) :-
 %% set_memory(+StateIn, +Memory, -StateOut)
 set_memory(StateIn, Memory, StateOut) :-
     StateOut = StateIn.put(memory, Memory).
+
+%% is_system_memory_message(+Message)
+%% True if the memory message has role=system
+is_system_memory_message(Message) :-
+    is_dict(Message),
+    get_dict(role, Message, system).
 
 %% ============================================================
 %% Tool Scope Helpers
@@ -928,8 +1005,13 @@ mi_call(task(Desc), StateIn, StateOut) :-
     ),
     % Use full messages from agent loop result
     (   get_dict(messages, Result, Messages), Messages \= []
-    ->  % Replace memory with all messages from agent (includes system, history, and new messages)
-        set_memory(StateAfterAgent, Messages, StateOut)
+    ->  % Preserve system messages from current memory (agent only returns user/assistant)
+        get_memory(StateAfterAgent, OldMemory),
+        include(is_system_memory_message, OldMemory, SystemMessages),
+        append(SystemMessages, Messages, NewMemory),
+        set_memory(StateAfterAgent, NewMemory, StateOut),
+        % Add exit trace for task/1
+        add_trace_entry(SessionId, exit, task, [InterpDesc], Depth)
     ;   % Fallback: just add task description and response (old behavior)
         add_memory(StateAfterAgent, user, InterpDesc, State1),
         (   get_dict(response, Result, Response), Response \= ""
@@ -958,6 +1040,8 @@ mi_call(prompt(Desc), StateIn, StateOut) :-
     get_params(StateIn, Params),
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, llm_call, prompt, [InterpDesc], Depth),
     % prompt/N is a simple LLM call - no tools, no tool scope
     engine_yield(request_agent_loop(InterpDesc, [], [], [], none)),
     % Wait for agent_done (no tool calls expected since no tools provided)
@@ -966,11 +1050,12 @@ mi_call(prompt(Desc), StateIn, StateOut) :-
     retract(session_agent_result(SessionId, _)),
     % Check success and warn on failure
     (   Result.success == true
-    ->  true
+    ->  add_trace_entry(SessionId, exit, prompt, [InterpDesc], Depth)
     ;   (   get_dict(error, Result, ErrorMsg), ErrorMsg \= ""
         ->  format(atom(WarnMsg), 'Warning: prompt/1 failed: ~w', [ErrorMsg])
         ;   format(atom(WarnMsg), 'Warning: prompt/1 failed (success=false)', [])
         ),
+        add_trace_entry(SessionId, fail, prompt, [InterpDesc], Depth),
         engine_yield(output(WarnMsg)),
         fail
     ).
@@ -990,6 +1075,8 @@ mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     get_params(StateIn, Params),
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, llm_call, prompt, [InterpDesc], Depth),
     % prompt/N is a simple LLM call - no tools, no tool scope
     engine_yield(request_agent_loop(InterpDesc, VarNames, [], [], none)),
     % Wait for agent_done (no tool calls expected since no tools provided)
@@ -998,13 +1085,14 @@ mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     retract(session_agent_result(SessionId, _)),
     % Check success and warn on failure
     (   Result.success == true
-    ->  true
+    ->  add_trace_entry(SessionId, exit, prompt, [InterpDesc], Depth)
     ;   length(VarNames, Arity),
         ActualArity is Arity + 1,
         (   get_dict(error, Result, ErrorMsg), ErrorMsg \= ""
         ->  format(atom(WarnMsg), 'Warning: prompt/~w failed: ~w', [ActualArity, ErrorMsg])
         ;   format(atom(WarnMsg), 'Warning: prompt/~w failed (success=false)', [ActualArity])
         ),
+        add_trace_entry(SessionId, fail, prompt, [InterpDesc], Depth),
         engine_yield(output(WarnMsg)),
         fail
     ),
@@ -1017,6 +1105,8 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     get_params(StateIn, Params),
     interpolate_desc(Desc, Params, InterpDesc),
     get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, llm_call, task, [InterpDesc], Depth),
     collect_user_tools(SessionId, UserTools),
     get_memory(StateIn, Memory),
     get_tool_scope(StateIn, ToolScope),
@@ -1040,8 +1130,13 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     bind_task_variables(Result.variables, VarNames, Vars),
     % Use full messages from agent loop result
     (   get_dict(messages, Result, Messages), Messages \= []
-    ->  % Replace memory with all messages from agent
-        set_memory(StateAfterAgent, Messages, StateOut)
+    ->  % Preserve system messages from current memory (agent only returns user/assistant)
+        get_memory(StateAfterAgent, OldMemory),
+        include(is_system_memory_message, OldMemory, SystemMessages),
+        append(SystemMessages, Messages, NewMemory),
+        set_memory(StateAfterAgent, NewMemory, StateOut),
+        % Add exit trace for task_n
+        add_trace_entry(SessionId, exit, task, [InterpDesc], Depth)
     ;   % Fallback: just add task description and response (old behavior)
         add_memory(StateAfterAgent, user, InterpDesc, State1),
         (   get_dict(response, Result, Response), Response \= ""
@@ -1585,9 +1680,10 @@ consult_process_term((tool(ToolHead) :- Body), SessionId) :-
     assertz(SessionId:(tool(ToolHead) :- Body)).
 
 consult_process_term((Head :- Body), SessionId) :-
-    % Assert a clause
+    % Expand dict dot-notation, then assert
     !,
-    assertz(SessionId:(Head :- Body)).
+    (catch(expand_dict_dots(Body, ExpandedBody), _, fail) -> true ; ExpandedBody = Body),
+    assertz(SessionId:(Head :- ExpandedBody)).
 
 consult_process_term(Head, SessionId) :-
     % Assert a fact

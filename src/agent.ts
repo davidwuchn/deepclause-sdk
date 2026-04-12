@@ -7,7 +7,7 @@
  * - Uses result.response.messages for message history management
  */
 
-import { generateText, streamText, tool as aiTool } from 'ai';
+import { generateText, streamText, hasToolCall, tool as aiTool } from 'ai';
 import { z } from 'zod';
 import type { ToolDefinition, MemoryMessage, TypedVar } from './types.js';
 import { createModelProvider } from './prolog/bridge.js';
@@ -57,10 +57,13 @@ export interface AgentLoopOptions {
     temperature: number;
     maxOutputTokens: number;
     baseUrl?: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    providerOptions?: Record<string, Record<string, any>>;
   };
   onOutput: (text: string) => void;
   onStream?: (chunk: string, done: boolean) => void;
   onToolCall?: (toolName: string, args: Record<string, unknown>) => void;
+  onUsage?: (usage: import('./types.js').LLMUsage) => void;
   onAskUser: (prompt: string) => Promise<string>;
   signal?: AbortSignal;
   streaming?: boolean;
@@ -161,6 +164,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     onOutput,
     onStream,
     onToolCall,
+    onUsage,
     signal,
     streaming = false,
     debug = false,
@@ -299,7 +303,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   debugLog('Subtask:', taskDescription);
 
   // Create model provider
-  const model = createModelProvider(modelOptions.provider, modelOptions.model, modelOptions.baseUrl);
+  const model = createModelProvider(modelOptions.provider, modelOptions.model, modelOptions.baseUrl, debugLog);
 
   // Agent loop
   const maxIterations = 50;
@@ -310,6 +314,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   while (!finished && iteration < maxIterations) {
     iteration++;
+    const iterStartMs = Date.now();
     debugLog(`Iteration ${iteration}`);
 
     if (signal?.aborted) {
@@ -320,7 +325,23 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       await tick();
       
       if (streaming && onStream) {
-        // Streaming mode
+        // Signal LLM call start so TTFT (time-to-first-token) is captured in timing.
+        // For thinking models (e.g. Claude with extended thinking), textStream yields
+        // nothing during the thinking phase — without this signal, the thinking time
+        // (potentially 60+ seconds) would be invisible in LLM timing metrics.
+        onStream('', false);
+
+
+        //save messages to a json file for debugging
+        if (debug || process.env.DEBUG_AGENT) {
+          const fs = await import('fs/promises');
+          await fs.writeFile(`agent_messages_iteration_${iteration}.json`, JSON.stringify(messages, null, 2), 'utf-8');
+        }
+        
+        // Streaming mode — tools WITH execute, SDK handles tool execution.
+        // stopWhen: hasToolCall('finish') stops multi-step after finish is called.
+        const apiCallMs = Date.now();
+
         const result = streamText({
           model,
           messages,
@@ -329,24 +350,122 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           temperature: modelOptions.temperature,
           maxOutputTokens: modelOptions.maxOutputTokens,
           abortSignal: signal,
+          providerOptions: modelOptions.providerOptions,
+          stopWhen: hasToolCall('finish'),
+          onStepFinish: (step) => {
+            debugLog(`Step finished: finishReason=${step.finishReason} toolCalls=${step.toolCalls?.length ?? 0}`);
+          },
         });
 
-        // Collect streamed text
+        // Collect results from fullStream
         let fullText = '';
-        for await (const chunk of result.textStream) {
-          fullText += chunk;
-          onStream(chunk, false);
+        let ttftMs: number | null = null;       // time to first TEXT token
+        let ttfeMs: number | null = null;       // time to first event (any type)
+        let ttfrMs: number | null = null;       // time to first reasoning token
+        let ttftiMs: number | null = null;      // time to first tool-input token
+        let firstToolCallMs: number | null = null; // time to first tool-call (complete)
+        let chunkCount = 0;
+        let reasoningChunks = 0;
+        let reasoningChars = 0;
+        let toolInputChunks = 0;
+        let toolInputChars = 0;
+        let finishReason: string = 'other';
+        let lastToolCallName: string | null = null;
+        let stepUsage: { inputTokens?: number; outputTokens?: number; totalTokens?: number; inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number }; outputTokenDetails?: { reasoningTokens?: number } } | null = null;
+        let lastEventMs = apiCallMs;
+        const eventCounts: Record<string, number> = {};
+
+        for await (const part of result.fullStream) {
+          const nowMs = Date.now();
+          if (ttfeMs === null) ttfeMs = nowMs - apiCallMs;
+          eventCounts[part.type] = (eventCounts[part.type] ?? 0) + 1;
+
+          switch (part.type) {
+            case 'text-delta':
+              if (ttftMs === null) ttftMs = nowMs - apiCallMs;
+              chunkCount++;
+              fullText += part.text;
+              onStream(part.text, false);
+              break;
+
+            case 'reasoning-delta':
+              if (ttfrMs === null) {
+                ttfrMs = nowMs - apiCallMs;
+                debugLog(`First reasoning token at ${ttfrMs}ms`);
+              }
+              reasoningChunks++;
+              reasoningChars += (part as { text?: string }).text?.length ?? 0;
+              break;
+
+            case 'tool-input-delta':
+              if (ttftiMs === null) {
+                ttftiMs = nowMs - apiCallMs;
+                debugLog(`First tool-input token at ${ttftiMs}ms`);
+              }
+              toolInputChunks++;
+              toolInputChars += (part as { delta?: string }).delta?.length ?? 0;
+              break;
+
+            case 'tool-call':
+              if (firstToolCallMs === null) firstToolCallMs = nowMs - apiCallMs;
+              lastToolCallName = part.toolName;
+              debugLog(`Tool call: ${part.toolName}`, JSON.stringify(part.input));
+              if (onToolCall) {
+                onToolCall(part.toolName, part.input as Record<string, unknown>);
+              }
+              break;
+
+            case 'tool-result':
+              debugLog(`Tool result for ${part.toolName}:`, JSON.stringify(part.output).substring(0, 500));
+              break;
+
+            case 'error':
+              debugLog(`Stream error:`, part.error);
+              break;
+
+            case 'finish-step':
+              finishReason = part.finishReason;
+              stepUsage = part.usage;
+              break;
+
+            default:
+              break;
+          }
+          lastEventMs = nowMs;
         }
+        const streamDoneMs = Date.now() - apiCallMs;
+        const gapAfterLastEvent = Date.now() - lastEventMs;
+        debugLog(`Iteration ${iteration} fullStream: ${chunkCount} text, ${reasoningChunks} reasoning (${reasoningChars}ch), ${toolInputChunks} tool-input (${toolInputChars}ch), ${streamDoneMs}ms`);
+        debugLog(`Iteration ${iteration} stream timing: TTFE=${ttfeMs ?? '-'}ms TTFR=${ttfrMs ?? '-'}ms TTFTI=${ttftiMs ?? '-'}ms TTFT=${ttftMs ?? '-'}ms firstToolCall=${firstToolCallMs ?? '-'}ms gapAfterLastEvent=${gapAfterLastEvent}ms`);
+        debugLog(`Iteration ${iteration} event counts:`, eventCounts);
 
         if (fullText) {
           onStream('', true);
         }
 
-        // Get results
-        const finishReason = await result.finishReason;
-        const toolCalls = await result.toolCalls;
-        const toolResults = await result.toolResults;
-        const responseObj = await result.response;
+        // Emit usage data from the last step
+        let usageStr = '';
+        if (stepUsage) {
+          const cacheRead = stepUsage.inputTokenDetails?.cacheReadTokens ?? 0;
+          const cacheWrite = stepUsage.inputTokenDetails?.cacheWriteTokens ?? 0;
+          const reasoning = stepUsage.outputTokenDetails?.reasoningTokens ?? 0;
+          usageStr = ` | in=${stepUsage.inputTokens ?? 0} out=${stepUsage.outputTokens ?? 0}` +
+            (cacheRead ? ` cacheRead=${cacheRead}` : '') +
+            (cacheWrite ? ` cacheWrite=${cacheWrite}` : '') +
+            (reasoning ? ` reasoning=${reasoning}` : '');
+          if (onUsage) {
+            onUsage({
+              inputTokens: stepUsage.inputTokens ?? 0,
+              outputTokens: stepUsage.outputTokens ?? 0,
+              totalTokens: stepUsage.totalTokens ?? 0,
+              cacheReadTokens: cacheRead || undefined,
+              cacheWriteTokens: cacheWrite || undefined,
+              reasoningTokens: reasoning || undefined,
+            });
+          }
+        }
+
+        debugLog(`Iteration ${iteration} timing: TTFE=${ttfeMs ?? '-'}ms TTFR=${ttfrMs ?? '-'}ms TTFT=${ttftMs ?? 'no-text'}ms stream=${streamDoneMs}ms total=${Date.now() - iterStartMs}ms${usageStr}`);
         
         // Check if finish was called during tool execution
         if (finished) {
@@ -355,7 +474,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         }
 
         debugLog(`Response text: ${fullText || '(empty)'}`);
-        debugLog(`Tool calls: ${toolCalls?.length ?? 0}`);
         debugLog(`Finish reason: ${finishReason}`);
 
         // Handle errors
@@ -376,67 +494,35 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           onOutput(fullText);
         }
 
-        // Emit tool call events
-        if (toolCalls && toolCalls.length > 0) {
-          for (const tc of toolCalls) {
-            debugLog(`Tool call: ${tc.toolName}`, JSON.stringify(tc.input));
-            if (onToolCall) {
-              onToolCall(tc.toolName, tc.input as Record<string, unknown>);
-            }
-          }
-          
-          // Log tool results
-          if (toolResults) {
-            for (const tr of toolResults) {
-              debugLog(`Tool result for ${tr.toolName}:`, JSON.stringify(tr.output).substring(0, 500));
-            }
-          }
+        // Use SDK's response.messages for message history.
+        // The SDK handles tool execution and includes tool results in messages.
+        const responseAwaitT0 = Date.now();
+        const responseMessages = (await result.response).messages;
+        const responseAwaitMs = Date.now() - responseAwaitT0;
+        if (responseAwaitMs > 100) {
+          debugLog(`Iteration ${iteration} await result.response took ${responseAwaitMs}ms (unexpectedly slow)`);
+        }
+        if (responseMessages.length > 0) {
+          messages.push(...responseMessages);
         }
 
-        // Use response.messages to update message history (AI SDK v6 pattern)
-        if (responseObj?.messages) {
-          messages = [...messages, ...responseObj.messages];
-        } else {
-          // Fallback: manually add messages if response.messages not available
-          if (fullText) {
-            messages.push({ role: 'assistant', content: fullText });
-          }
-          if (toolCalls && toolCalls.length > 0 && toolResults) {
-            // Add tool calls as assistant message
-            messages.push({
-              role: 'assistant',
-              content: toolCalls.map(tc => ({
-                type: 'tool-call',
-                toolCallId: tc.toolCallId,
-                toolName: tc.toolName,
-                input: tc.input,
-              })),
-            });
-            // Add tool results
-            messages.push({
-              role: 'tool',
-              content: toolResults.map(tr => ({
-                type: 'tool-result',
-                toolCallId: tr.toolCallId,
-                toolName: tr.toolName,
-                output: tr.output,
-              })),
-            });
-          }
-        }
-
-        // If no tool calls and model stopped, prompt to continue or we're done
-        if (finishReason === 'stop' && (!toolCalls || toolCalls.length === 0)) {
-          if (!finished) {
-            messages.push({
-              role: 'user',
-              content: 'Please take action using the available tools, or call finish() when done.',
-            });
-          }
+        // If no tool calls were made, nudge the model to act.
+        // This handles 'stop', 'other', and any unexpected finish reason.
+        if (lastToolCallName === null && !finished) {
+          messages.push({
+            role: 'user',
+            content: 'Please take action using the available tools, or call finish() when done.',
+          });
         }
 
       } else {
+        // Signal LLM call start for TTFT measurement (even in non-streaming mode)
+        if (onStream) {
+          onStream('', false);
+        }
+
         // Non-streaming mode
+        const apiCallMs = Date.now();
         const result = await generateText({
           model,
           messages,
@@ -445,7 +531,33 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           temperature: modelOptions.temperature,
           maxOutputTokens: modelOptions.maxOutputTokens,
           abortSignal: signal,
+          providerOptions: modelOptions.providerOptions,
         });
+
+        // Emit usage data (fetch before timing log so we can include token counts)
+        let genUsageStr = '';
+        if (result.usage) {
+          const u = result.usage;
+          const cacheRead = u.inputTokenDetails?.cacheReadTokens ?? 0;
+          const cacheWrite = u.inputTokenDetails?.cacheWriteTokens ?? 0;
+          const reasoning = u.outputTokenDetails?.reasoningTokens ?? 0;
+          genUsageStr = ` | in=${u.inputTokens ?? 0} out=${u.outputTokens ?? 0}` +
+            (cacheRead ? ` cacheRead=${cacheRead}` : '') +
+            (cacheWrite ? ` cacheWrite=${cacheWrite}` : '') +
+            (reasoning ? ` reasoning=${reasoning}` : '');
+          if (onUsage) {
+            onUsage({
+              inputTokens: u.inputTokens ?? 0,
+              outputTokens: u.outputTokens ?? 0,
+              totalTokens: u.totalTokens ?? 0,
+              cacheReadTokens: cacheRead || undefined,
+              cacheWriteTokens: cacheWrite || undefined,
+              reasoningTokens: reasoning || undefined,
+            });
+          }
+        }
+
+        debugLog(`Iteration ${iteration} timing: generateText=${Date.now() - apiCallMs}ms total=${Date.now() - iterStartMs}ms${genUsageStr}`);
 
         // Check if finish was called during tool execution
         if (finished) {
@@ -496,14 +608,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         // This is the key change - let the SDK handle message formatting
         messages = [...messages, ...result.response.messages];
 
-        // If no tool calls and model stopped, prompt to continue or we're done
-        if (result.finishReason === 'stop' && (!result.toolCalls || result.toolCalls.length === 0)) {
-          if (!finished) {
-            messages.push({
-              role: 'user',
-              content: 'Please take action using the available tools, or call finish() when done.',
-            });
-          }
+        // If no tool calls were made, nudge the model to act.
+        // This handles 'stop', 'other', and any unexpected finish reason.
+        if ((!result.toolCalls || result.toolCalls.length === 0) && !finished) {
+          messages.push({
+            role: 'user',
+            content: 'Please take action using the available tools, or call finish() when done.',
+          });
         }
       }
     } catch (error) {

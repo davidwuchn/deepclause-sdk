@@ -1,6 +1,6 @@
 {
   "name": "deepclause-sdk",
-  "version": "0.0.7",
+  "version": "0.0.56",
   "description": "DeepClause CLI Tool and Typescript SDK",
   "type": "module",
   "main": "dist/index.js",
@@ -12,6 +12,10 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./compiler": {
+      "import": "./dist/compiler.js",
+      "types": "./dist/compiler.d.ts"
     }
   },
   "scripts": {
@@ -29,9 +33,9 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.35",
-    "@ai-sdk/google": "^3.0.20",
+    "@ai-sdk/google": "^3.0.60",
     "@ai-sdk/openai": "^3.0.25",
-    "ai": "^6.0.67",
+    "ai": "^6.0.116",
     "commander": "^12.1.0",
     "deepclause-agentvm": "^0.0.5",
     "swipl-wasm": "file:./vendor/swipl-wasm",
