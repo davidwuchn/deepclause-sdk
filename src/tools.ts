@@ -10,7 +10,7 @@ import type { ToolPolicy, CompileTool } from './types.js';
 export const BUILTIN_COMPILE_TOOLS: CompileTool[] = [
   {
     name: 'vm_exec',
-    description: 'Execute a shell command in a sandboxed Alpine Linux VM with Python. Returns stdout, stderr, and exit code.',
+    description: 'Execute a shell command using the active workspace shell backend. With --sandbox, this runs inside AgentVM.',
     provider: 'agentvm',
     schema: {
       type: 'object',

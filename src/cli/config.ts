@@ -7,6 +7,20 @@
 import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import {
+  DEFAULT_MODEL_IDS,
+  DEFAULT_TEMPERATURES,
+  buildModelOverride,
+  formatModelId,
+  normalizeModelId,
+  resolveModelSlotConfig,
+  type ModelSlot,
+  type Provider,
+  type ResolvedModelConfig,
+} from '../system/config/model-slots.js';
+
+export type { ModelSlot, Provider, ResolvedModelConfig } from '../system/config/model-slots.js';
+export { buildModelOverride } from '../system/config/model-slots.js';
 
 // =============================================================================
 // Configuration Schema
@@ -39,17 +53,29 @@ const ProvidersSchema = z.object({
   openrouter: ProviderConfigSchema.optional()
 }).optional().default({});
 
+const ModelsSchema = z.object({
+  gateway: z.string().min(1).default(DEFAULT_MODEL_IDS.gateway),
+  run: z.string().min(1).default(DEFAULT_MODEL_IDS.run),
+  compile: z.string().min(1).default(DEFAULT_MODEL_IDS.compile),
+});
+
+const TemperaturesSchema = z.object({
+  gateway: z.number().min(0).max(2).default(DEFAULT_TEMPERATURES.gateway),
+  run: z.number().min(0).max(2).default(DEFAULT_TEMPERATURES.run),
+  compile: z.number().min(0).max(2).default(DEFAULT_TEMPERATURES.compile),
+});
+
 export const ConfigSchema = z.object({
-  model: z.string().min(1, 'Model is required'),
-  provider: z.enum(['openai', 'anthropic', 'google', 'openrouter']).default('openai'),
+  models: ModelsSchema.default(DEFAULT_MODEL_IDS),
+  temperatures: TemperaturesSchema.default(DEFAULT_TEMPERATURES),
   providers: ProvidersSchema,
   mcp: MCPConfigSchema.optional().default({ servers: {} }),
   agentvm: AgentVMConfigSchema,
   dmlBase: z.string().optional().default('.deepclause/tools'),
-  workspace: z.string().optional().default('./')
+  workspace: z.string().optional().default('./'),
+  model: z.string().optional(),
+  provider: z.enum(['openai', 'anthropic', 'google', 'openrouter']).optional(),
 });
-
-export type Provider = 'openai' | 'anthropic' | 'google' | 'openrouter';
 
 export type Config = z.infer<typeof ConfigSchema>;
 export type MCPServer = z.infer<typeof MCPServerSchema>;
@@ -59,8 +85,8 @@ export type MCPServer = z.infer<typeof MCPServerSchema>;
 // =============================================================================
 
 const DEFAULT_CONFIG: Config = {
-  model: 'gpt-4o',
-  provider: 'openai',
+  models: { ...DEFAULT_MODEL_IDS },
+  temperatures: { ...DEFAULT_TEMPERATURES },
   providers: {},
   mcp: { servers: {} },
   agentvm: { network: false },
@@ -118,13 +144,18 @@ export async function initConfig(
   await fs.mkdir(toolsDir, { recursive: true });
 
   // Create config with optional model override
+  const initialModelId = options.model ? normalizeModelId(options.model) : DEFAULT_MODEL_IDS.run;
   const config: Config = {
     ...DEFAULT_CONFIG,
-    model: options.model || DEFAULT_CONFIG.model
+    models: {
+      gateway: initialModelId,
+      run: initialModelId,
+      compile: initialModelId,
+    },
   };
 
   // Write config
-  await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n');
+  await fs.writeFile(configPath, serializeConfig(config));
 
   // Create .gitignore for the .deepclause directory
   const gitignorePath = path.join(configDir, '.gitignore');
@@ -159,9 +190,10 @@ export async function loadConfig(workspaceRoot: string): Promise<Config> {
 
   // Resolve environment variables in config
   const resolvedConfig = resolveEnvVars(rawConfig);
+  const migratedConfig = migrateLegacyConfig(resolvedConfig);
 
   // Validate
-  return validateConfig(resolvedConfig);
+  return validateConfig(migratedConfig);
 }
 
 /**
@@ -177,82 +209,113 @@ export function validateConfig(config: unknown): Config {
     throw new Error(`Invalid configuration:\n${errors}`);
   }
 
-  return result.data;
+  return {
+    ...result.data,
+    models: {
+      gateway: normalizeModelId(result.data.models.gateway),
+      run: normalizeModelId(result.data.models.run),
+      compile: normalizeModelId(result.data.models.compile),
+    },
+  };
 }
 
 /**
- * Parse a model string in format "provider/model" or just "model"
- * If no provider specified, attempts to infer from model name
+ * Parse a model string in either canonical provider:model form, legacy provider/model form,
+ * or just model name form.
  */
-export function parseModelString(modelString: string): { provider: Provider; model: string } {
-  if (!modelString || modelString.trim() === '') {
-    throw new Error('Invalid model: model name cannot be empty');
-  }
-
-  // Check for provider/model format
-  if (modelString.includes('/')) {
-    const [providerPart, ...modelParts] = modelString.split('/');
-    const provider = providerPart.toLowerCase() as Provider;
-    const model = modelParts.join('/'); // Handle models with / in name
-    
-    if (!['openai', 'anthropic', 'google', 'openrouter'].includes(provider)) {
-      throw new Error(`Unknown provider: ${provider}. Valid providers: openai, anthropic, google, openrouter`);
-    }
-    
-    return { provider, model };
-  }
-
-  // Infer provider from model name
-  const model = modelString;
-  let provider: Provider;
-  
-  if (model.startsWith('gpt-') || model.startsWith('o1') || model.startsWith('o3')) {
-    provider = 'openai';
-  } else if (model.startsWith('claude-')) {
-    provider = 'anthropic';
-  } else if (model.startsWith('gemini-')) {
-    provider = 'google';
-  } else {
-    // Default to openrouter for unknown models
-    provider = 'openrouter';
-  }
-
-  return { provider, model };
+export function parseModelString(modelString: string): string {
+  return normalizeModelId(modelString);
 }
 
 /**
- * Format provider and model as a single string
+ * Format a model id as canonical provider:model
  */
-export function formatModelString(provider: Provider, model: string): string {
-  return `${provider}/${model}`;
+export function formatModelString(modelId: string): string {
+  return formatModelId(modelId);
 }
 
 /**
- * Set the default model in configuration
- * Accepts format: "provider/model" or just "model" (provider inferred)
+ * Set the default model in configuration.
+ * When slot is omitted, all slots are updated for backward compatibility.
  */
-export async function setModel(workspaceRoot: string, modelString: string): Promise<{ provider: Provider; model: string }> {
-  const { provider, model } = parseModelString(modelString);
+export async function setModel(
+  workspaceRoot: string,
+  modelString: string,
+  slot?: ModelSlot,
+): Promise<{ modelId: string; updatedSlots: ModelSlot[] }> {
+  const modelId = parseModelString(modelString);
 
   const config = await loadConfig(workspaceRoot);
-  config.model = model;
-  config.provider = provider;
+  const updatedSlots: ModelSlot[] = slot ? [slot] : ['gateway', 'run', 'compile'];
+  for (const nextSlot of updatedSlots) {
+    config.models[nextSlot] = modelId;
+  }
 
   const configPath = getConfigPath(workspaceRoot);
-  await fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n');
+  await fs.writeFile(configPath, serializeConfig(config));
   
-  return { provider, model };
+  return { modelId, updatedSlots };
 }
 
 /**
- * Get the current model from configuration
+ * Get the current model configuration from configuration
  */
-export async function showModel(workspaceRoot: string): Promise<{ provider: Provider; model: string; formatted: string }> {
+export async function showModel(workspaceRoot: string): Promise<{
+  models: Record<ModelSlot, string>;
+  temperatures: Record<ModelSlot, number>;
+  formatted: string;
+}> {
   const config = await loadConfig(workspaceRoot);
+  const lines = (['gateway', 'run', 'compile'] as ModelSlot[]).map((slotName) => {
+    const modelId = formatModelString(config.models[slotName]);
+    const temperature = config.temperatures[slotName];
+    return `${slotName}: ${modelId} (temperature=${temperature})`;
+  });
+
   return {
-    provider: config.provider,
-    model: config.model,
-    formatted: formatModelString(config.provider, config.model)
+    models: { ...config.models },
+    temperatures: { ...config.temperatures },
+    formatted: lines.join('\n'),
+  };
+}
+
+export function resolveModelSlot(
+  config: Config,
+  slot: ModelSlot,
+  overrides: { modelId?: string; temperature?: number } = {},
+): ResolvedModelConfig {
+  return resolveModelSlotConfig(config, slot, overrides);
+}
+
+export function applyResolvedModelConfig(selection: ResolvedModelConfig): void {
+  if (!selection.apiKey) {
+    return;
+  }
+
+  switch (selection.provider) {
+    case 'openai':
+      process.env.OPENAI_API_KEY = selection.apiKey;
+      break;
+    case 'anthropic':
+      process.env.ANTHROPIC_API_KEY = selection.apiKey;
+      break;
+    case 'google':
+      process.env.GOOGLE_GENERATIVE_AI_API_KEY = selection.apiKey;
+      break;
+    case 'openrouter':
+      process.env.OPENROUTER_API_KEY = selection.apiKey;
+      break;
+  }
+}
+
+export function getDefaultConfig(): Config {
+  return {
+    ...DEFAULT_CONFIG,
+    models: { ...DEFAULT_CONFIG.models },
+    temperatures: { ...DEFAULT_CONFIG.temperatures },
+    providers: { ...DEFAULT_CONFIG.providers },
+    mcp: { servers: {} },
+    agentvm: { network: DEFAULT_CONFIG.agentvm?.network ?? false },
   };
 }
 
@@ -264,13 +327,21 @@ export async function updateConfig(
   updates: Partial<Config>
 ): Promise<Config> {
   const config = await loadConfig(workspaceRoot);
-  const updated = { ...config, ...updates };
+  const updated = {
+    ...config,
+    ...updates,
+    models: { ...config.models, ...updates.models },
+    temperatures: { ...config.temperatures, ...updates.temperatures },
+    providers: { ...config.providers, ...updates.providers },
+    mcp: updates.mcp ? { ...config.mcp, ...updates.mcp } : config.mcp,
+    agentvm: updates.agentvm ? { ...config.agentvm, ...updates.agentvm } : config.agentvm,
+  };
   
   // Re-validate
   const validated = validateConfig(updated);
 
   const configPath = getConfigPath(workspaceRoot);
-  await fs.writeFile(configPath, JSON.stringify(validated, null, 2) + '\n');
+  await fs.writeFile(configPath, serializeConfig(validated));
 
   return validated;
 }
@@ -310,6 +381,62 @@ function resolveEnvVars(obj: unknown): unknown {
   }
 
   return obj;
+}
+
+function migrateLegacyConfig(config: unknown): unknown {
+  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
+    return config;
+  }
+
+  const record = { ...(config as Record<string, unknown>) };
+  const legacyModel = typeof record.model === 'string' ? record.model : undefined;
+  const legacyProvider = typeof record.provider === 'string' ? record.provider as Provider : undefined;
+  const legacyModelId = legacyModel ? buildModelOverride(legacyModel, legacyProvider) : undefined;
+
+  const rawModels = record.models && typeof record.models === 'object' && !Array.isArray(record.models)
+    ? record.models as Record<string, unknown>
+    : {};
+  const rawTemperatures = record.temperatures && typeof record.temperatures === 'object' && !Array.isArray(record.temperatures)
+    ? record.temperatures as Record<string, unknown>
+    : {};
+
+  record.models = {
+    gateway: typeof rawModels.gateway === 'string'
+      ? normalizeModelId(rawModels.gateway)
+      : legacyModelId ?? DEFAULT_MODEL_IDS.gateway,
+    run: typeof rawModels.run === 'string'
+      ? normalizeModelId(rawModels.run)
+      : legacyModelId ?? DEFAULT_MODEL_IDS.run,
+    compile: typeof rawModels.compile === 'string'
+      ? normalizeModelId(rawModels.compile)
+      : legacyModelId ?? DEFAULT_MODEL_IDS.compile,
+  };
+
+  record.temperatures = {
+    gateway: coerceTemperature(rawTemperatures.gateway, DEFAULT_TEMPERATURES.gateway),
+    run: coerceTemperature(rawTemperatures.run, DEFAULT_TEMPERATURES.run),
+    compile: coerceTemperature(rawTemperatures.compile, DEFAULT_TEMPERATURES.compile),
+  };
+
+  return record;
+}
+
+function coerceTemperature(value: unknown, fallback: number): number {
+  if (typeof value === 'number' && value >= 0 && value <= 2) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value);
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 2) {
+      return parsed;
+    }
+  }
+  return fallback;
+}
+
+function serializeConfig(config: Config): string {
+  const { model, provider, ...rest } = config;
+  return JSON.stringify(rest, null, 2) + '\n';
 }
 
 /**

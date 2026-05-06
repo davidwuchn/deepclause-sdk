@@ -23,13 +23,13 @@ export interface ListToolsOptions {
 }
 
 // =============================================================================
-// Built-in AgentVM Tools
+// Built-in runtime tools
 // =============================================================================
 
 const AGENTVM_TOOLS: Tool[] = [
   {
     name: 'vm_exec',
-    description: 'Execute a shell command in a sandboxed Alpine Linux VM with Python. Returns stdout, stderr, and exit code.',
+    description: 'Execute a shell command using the active workspace shell backend. With --sandbox, this runs inside AgentVM.',
     provider: 'agentvm',
     schema: {
       type: 'object',
@@ -37,6 +37,43 @@ const AGENTVM_TOOLS: Tool[] = [
         command: { type: 'string', description: 'Shell command to execute (e.g., "python3 script.py", "echo hello", "ls -la")' }
       },
       required: ['command']
+    }
+  },
+  {
+    name: 'bash',
+    description: 'Execute a shell command in the active workspace shell. Alias of vm_exec.',
+    provider: 'agentvm',
+    schema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'Shell command to execute' }
+      },
+      required: ['command']
+    }
+  },
+  {
+    name: 'url_fetch',
+    description: 'Fetch a URL and optionally save the response into the workspace.',
+    provider: 'agentvm',
+    schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'Absolute URL to fetch' },
+        save_to: { type: 'string', description: 'Optional workspace-relative output file' }
+      },
+      required: ['url']
+    }
+  },
+  {
+    name: 'calculator',
+    description: 'Evaluate a basic arithmetic expression.',
+    provider: 'agentvm',
+    schema: {
+      type: 'object',
+      properties: {
+        expression: { type: 'string', description: 'Arithmetic expression to evaluate' }
+      },
+      required: ['expression']
     }
   }
 ];
@@ -81,7 +118,7 @@ const SEARCH_TOOLS: Tool[] = [
 // =============================================================================
 
 /**
- * List all available tools from AgentVM, Search, and configured MCP servers
+ * List all available built-in runtime tools, search tools, and configured MCP servers
  */
 export async function listTools(
   workspaceRoot: string,
@@ -126,7 +163,7 @@ export async function resolveTools(
   const resolved: Record<string, Tool> = {};
   const missing: string[] = [];
   
-  // All built-in tools (AgentVM + Search)
+  // All built-in tools (runtime shell + search)
   const builtInTools = [...AGENTVM_TOOLS, ...SEARCH_TOOLS];
   
   // Check built-in tools first
@@ -252,7 +289,7 @@ function formatToolsList(tools: Tool[]): string {
 }
 
 /**
- * Get all built-in tools (AgentVM + Search)
+ * Get all built-in tools (runtime shell + search)
  */
 export function getAgentVMTools(): Tool[] {
   return [...AGENTVM_TOOLS, ...SEARCH_TOOLS];

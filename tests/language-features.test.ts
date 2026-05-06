@@ -505,6 +505,23 @@ describe('String Interpolation', () => {
 
       expect(events.find(e => e.type === 'answer')?.content).toBe('No variables here');
     });
+
+    it('should preserve literal braces in system and output strings', async () => {
+      const code = `
+        agent_main :-
+            system("JavaScript example: async page => { return await page.title(); }"),
+            output("Object literal: { path: '/tmp/example.png' }"),
+            answer("done").
+      `;
+
+      const events: any[] = [];
+      for await (const event of sdk.runDML(code)) {
+        events.push(event);
+      }
+
+      expect(events.find(e => e.type === 'output')?.content).toBe("Object literal: { path: '/tmp/example.png' }");
+      expect(events.find(e => e.type === 'answer')?.content).toBe('done');
+    });
   });
 
   describe('with params', () => {

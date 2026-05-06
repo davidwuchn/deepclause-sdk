@@ -6,11 +6,13 @@
  */
 
 import { Command } from 'commander';
-import { initConfig, setModel, showModel, loadConfig } from './config.js';
+import { initConfig, setModel, showModel } from './config.js';
 import { compile, compileAll } from './compile.js';
 import { run } from './run.js';
 import { listTools } from './tools.js';
 import { listCommands } from './commands.js';
+import { buildModelOverride, type ModelSlot } from '../system/config/model-slots.js';
+import { runPromptHeadless, startTui } from './tui.js';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -23,11 +25,14 @@ const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
 const version = packageJson.version;
 
 const program = new Command();
+const CLI_SUBCOMMANDS = new Set(['init', 'set-model', 'show-model', 'compile', 'compile-all', 'run', 'list-tools', 'list-commands', 'help']);
 
 program
   .name('deepclause')
   .description('Compile Markdown to DML and run neurosymbolic AI agents')
-  .version(version);
+  .version(version)
+  .option('-p, --prompt <text>', 'Run a prompt in headless conductor mode with a fresh session')
+  .option('--sandbox', 'Run shell tools inside AgentVM instead of the local workspace shell');
 
 // =============================================================================
 // Configuration Commands
@@ -51,11 +56,14 @@ program
 
 program
   .command('set-model <model>')
-  .description('Set the default LLM model (format: provider/model or just model)')
-  .action(async (model) => {
+  .description('Set the default LLM model (canonical format: provider:model)')
+  .option('--slot <slot>', 'Apply only to a single slot: gateway, run, or compile')
+  .action(async (model, options) => {
     try {
-      const result = await setModel(process.cwd(), model);
-      console.log(`✅ Model set to: ${result.provider}/${result.model}`);
+      const slot = options.slot as ModelSlot | undefined;
+      const result = await setModel(process.cwd(), model, slot);
+      console.log(`✅ Model set to: ${result.modelId}`);
+      console.log(`   Updated slots: ${result.updatedSlots.join(', ')}`);
     } catch (error) {
       console.error('❌ Error:', (error as Error).message);
       process.exit(1);
@@ -70,7 +78,7 @@ program
     try {
       const result = await showModel(process.cwd());
       if (options.json) {
-        console.log(JSON.stringify({ provider: result.provider, model: result.model }, null, 2));
+        console.log(JSON.stringify({ models: result.models, temperatures: result.temperatures }, null, 2));
       } else {
         console.log(result.formatted);
       }
@@ -89,6 +97,7 @@ program
   .description('Compile Markdown task description to DML')
   .option('-f, --force', 'Force recompilation even if source unchanged')
   .option('--validate-only', 'Validate without saving output')
+  .option('--sandbox', 'Run shell tools inside AgentVM instead of the local workspace shell')
   .option('--model <model>', 'Override model for compilation')
   .option('--temperature <number>', 'Override temperature (0.0-2.0)', parseFloat)
   .option('--max-attempts <number>', 'Max compilation attempts (default: 3)', parseInt)
@@ -97,13 +106,13 @@ program
   .option('--no-audit', 'Disable security audit and static analysis')
   .action(async (source, output, options) => {
     try {
-      const config = await loadConfig(process.cwd());
       const outputDir = output || '.deepclause/tools';
       
       const result = await compile(source, outputDir, {
         force: options.force,
         validateOnly: options.validateOnly,
-        model: options.model || config.model,
+        sandbox: options.sandbox,
+        model: buildModelOverride(options.model),
         temperature: options.temperature,
         maxAttempts: options.maxAttempts,
         verbose: options.verbose,
@@ -130,15 +139,16 @@ program
   .command('compile-all <sourceDir> [outputDir]')
   .description('Compile all Markdown files in a directory')
   .option('-f, --force', 'Force recompilation of all files')
+  .option('--sandbox', 'Run shell tools inside AgentVM instead of the local workspace shell')
   .option('--model <model>', 'Override model for compilation')
   .action(async (sourceDir, outputDir, options) => {
     try {
-      const config = await loadConfig(process.cwd());
       const out = outputDir || '.deepclause/tools';
       
       const result = await compileAll(sourceDir, out, {
         force: options.force,
-        model: options.model || config.model
+        sandbox: options.sandbox,
+        model: buildModelOverride(options.model)
       });
       
       console.log(`\n📊 Compilation Summary:`);
@@ -162,6 +172,7 @@ program
   .option('--verbose', 'Show debug output including tool calls')
   .option('--stream', 'Stream LLM responses in real-time')
   .option('--headless', 'Plain output only, no TUI formatting')
+  .option('--sandbox', 'Run shell tools inside AgentVM instead of the local workspace shell')
   .option('--trace <file>', 'Save execution trace to file')
   .option('--dry-run', 'Show what would be executed without running')
   .option('--model <model>', 'Override configured model (can be provider/model format, e.g., google/gemini-2.5-pro)')
@@ -186,10 +197,11 @@ program
         verbose: options.verbose,
         stream: options.stream,
         headless: options.headless,
+        sandbox: options.sandbox,
         trace: options.trace,
         dryRun: options.dryRun,
         model,
-        provider: provider as import('./config.js').Provider,
+        provider: provider as import('../system/config/model-slots.js').Provider,
         temperature: options.temperature,
         gasLimit: options.gasLimit,
         params: options.param,
@@ -241,7 +253,7 @@ program
 
 program
   .command('list-tools')
-  .description('List all available tools from MCP servers and AgentVM')
+  .description('List all available built-in runtime tools and MCP server tools')
   .option('--json', 'Output as JSON')
   .action(async (options) => {
     try {
@@ -312,5 +324,52 @@ function collectParams(value: string, previous: Record<string, string>): Record<
   return { ...previous, [key]: val };
 }
 
-// Parse and run
-program.parse();
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  const rootPrompt = readRootPrompt(argv);
+  const rootSandbox = hasRootSandbox(argv);
+
+  if (rootPrompt && !hasSubcommand(argv)) {
+    await runPromptHeadless(rootPrompt, process.cwd(), { sandbox: rootSandbox });
+    return;
+  }
+
+  if (argv.length === 0) {
+    await startTui(process.cwd(), { sandbox: rootSandbox });
+    return;
+  }
+
+  if (argv.length === 1 && rootSandbox) {
+    await startTui(process.cwd(), { sandbox: true });
+    return;
+  }
+
+  await program.parseAsync(process.argv);
+}
+
+function hasSubcommand(argv: string[]): boolean {
+  return argv.some((arg) => !arg.startsWith('-') && CLI_SUBCOMMANDS.has(arg));
+}
+
+function readRootPrompt(argv: string[]): string | undefined {
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index];
+    if (arg === '-p' || arg === '--prompt') {
+      return argv[index + 1];
+    }
+    if (arg.startsWith('--prompt=')) {
+      return arg.slice('--prompt='.length);
+    }
+  }
+
+  return undefined;
+}
+
+function hasRootSandbox(argv: string[]): boolean {
+  return argv.includes('--sandbox');
+}
+
+main().catch((error) => {
+  console.error('❌ Error:', (error as Error).message);
+  process.exit(1);
+});

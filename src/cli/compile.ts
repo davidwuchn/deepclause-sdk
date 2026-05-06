@@ -8,12 +8,21 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { loadConfig, type Config, type Provider } from './config.js';
-import { getAgentVMTools, type Tool } from './tools.js';
-import { 
-  compileToDML, 
-  extractParameters, 
-  extractDescription 
+import {
+  applyResolvedModelConfig,
+  buildModelOverride,
+  getDefaultConfig,
+  loadConfig,
+  resolveModelSlot,
+  type Config,
+  type Provider,
+} from './config.js';
+import { promptUser } from './interactive.js';
+import { compileWithSkillCreator } from '../system/runtime/skill-creator.js';
+import {
+  extractDescription as extractDescriptionFromCompiler,
+  extractParameters as extractParametersFromCompiler,
+  extractToolDependencies as extractToolDependenciesFromCompiler,
 } from '../compiler.js';
 
 // =============================================================================
@@ -23,6 +32,7 @@ import {
 export interface CompileOptions {
   force?: boolean;
   validateOnly?: boolean;
+  sandbox?: boolean;
   model?: string;
   provider?: Provider;
   temperature?: number;
@@ -147,7 +157,6 @@ export async function compile(
   const maxAttempts = options.maxAttempts ?? 3;
   const verbose = options.verbose ?? false;
   const shouldStream = options.stream ?? true;
-  const shouldAudit = options.audit ?? true;
   
   // Resolve paths
   const absoluteSource = path.resolve(sourcePath);
@@ -185,147 +194,72 @@ export async function compile(
 
   // Load config for model/provider (try cwd first, then source dir, then use defaults)
   let config: Config;
+  let workspaceRoot: string | undefined;
   try {
+    workspaceRoot = process.cwd();
     config = await loadConfig(process.cwd());
   } catch {
     try {
       const sourceDir = path.dirname(absoluteSource).split('/.deepclause')[0];
+      workspaceRoot = sourceDir;
       config = await loadConfig(sourceDir);
     } catch {
       // Use sensible defaults if no config found
-      config = {
-        model: 'gpt-4o',
-        provider: 'openai' as Provider,
-        providers: {},
-        mcp: { servers: {} },
-        agentvm: { network: true },
-        dmlBase: '.deepclause/tools',
-        workspace: './'
-      };
+      workspaceRoot = process.cwd();
+      config = getDefaultConfig();
     }
   }
-  const model = options.model || config.model;
-  const provider = options.provider || config.provider;
-
-  // Get available tools for the prompt
-  const tools = await getAvailableTools(config);
+  const compileSelection = resolveModelSlot(config, 'compile', {
+    modelId: buildModelOverride(options.model, options.provider),
+    temperature: options.temperature,
+  });
+  applyResolvedModelConfig(compileSelection);
+  const runSelection = resolveModelSlot(config, 'run');
 
   // Status indicator
   const status = new StatusIndicator(verbose || shouldStream);
   status.start(`Compiling...`);
 
   try {
-    // Call the shared compiler
-    const result = await compileToDML(markdown, {
-      model,
-      provider: provider as any,
-      temperature: options.temperature,
+    const result = await compileWithSkillCreator(markdown, {
+      sourcePath: absoluteSource,
+      outputDir: absoluteOutputDir,
+      baseName,
+      workspaceRoot,
+      workspacePath: path.resolve(config.workspace || './workspace'),
+      config,
+      compileSelection,
+      runSelection,
+      sandbox: options.sandbox,
+      validateOnly: options.validateOnly,
       maxAttempts,
       verbose,
-      tools: tools as any, // Map CLI tools to compiler tools
-      audit: shouldAudit
+      onUserInput: promptUser,
     });
 
-    if (result.valid && result.dml) {
-      status.stop();
-      const dml = result.dml;
-      const explanation = result.explanation || 'DML program compiled successfully.';
-      
-      // Print Analysis Warnings
-      if (result.analysis) {
-        if (result.analysis.warnings && result.analysis.warnings.length > 0) {
-          console.log('\n⚠️  Static Analysis Warnings:');
-          for (const w of result.analysis.warnings) {
-             const icon = w.level === 'critical' ? '🔴' : w.level === 'high' ? '🟠' : w.level === 'medium' ? '🟡' : '⚪';
-             console.log(`  ${icon} [${w.level.toUpperCase()}] ${w.message}`);
-          }
-        }
-        
-        if (result.analysis.auditorReport) {
-          console.log('\n🛡️  Security Audit Report:');
-          console.log(result.analysis.auditorReport);
-          console.log('--------------------------------------------------');
-        }
+    status.stop();
+
+    if (result.analysis.warnings.length > 0) {
+      console.log('\n⚠️  Static Analysis Warnings:');
+      for (const warning of result.analysis.warnings) {
+        const icon = warning.level === 'critical' ? '🔴' : warning.level === 'high' ? '🟠' : warning.level === 'medium' ? '🟡' : '⚪';
+        console.log(`  ${icon} [${warning.level.toUpperCase()}] ${warning.message}`);
       }
-
-      // If validate-only, return without saving
-      if (options.validateOnly) {
-        console.log('\n✅ Compilation successful!\n');
-        console.log(explanation);
-        
-        return {
-          output: dmlPath,
-          tools: result.tools,
-          skipped: false,
-          valid: true,
-          dml,
-          explanation,
-          attempts: result.attempts
-        };
-      }
-
-      // Save the DML
-      await fs.mkdir(absoluteOutputDir, { recursive: true });
-
-      // Load existing meta for history
-      const existingMeta = await loadExistingMeta(metaPath);
-      const history = existingMeta?.history || [];
-      const newVersion = history.length + 1;
-
-      // Create new meta file
-      const extractedTools = result.tools;
-      const extractedParams = extractParameters(dml);
-      const description = extractDescription(markdown);
-
-      const meta: MetaFile = {
-        version: '1.0.0',
-        source: path.relative(absoluteOutputDir, absoluteSource),
-        sourceHash,
-        compiledAt: new Date().toISOString(),
-        model,
-        provider,
-        description,
-        parameters: extractedParams,
-        tools: extractedTools,
-        history: [
-          ...history,
-          {
-            version: newVersion,
-            timestamp: new Date().toISOString(),
-            sourceHash,
-            model,
-            provider
-          }
-        ]
-      };
-
-      // Write files
-      await fs.writeFile(dmlPath, dml);
-      await fs.writeFile(metaPath, JSON.stringify(meta, null, 2) + '\n');
-
-      // Print success
-      console.log('\n✅ Compilation successful!\n');
-      console.log(explanation);
-
-      return {
-        output: dmlPath,
-        tools: extractedTools,
-        skipped: false,
-        valid: true,
-        dml,
-        meta,
-        explanation,
-        attempts: result.attempts
-      };
-    } else {
-      status.stop();
-      console.log('\n❌ Compilation failed.\n');
-      console.log('Errors:');
-      for (const error of result.errors || []) {
-        console.log(`  - ${error}`);
-      }
-      throw new Error(`Compilation failed: ${(result.errors || []).join(', ')}`);
     }
+
+    console.log('\n✅ Compilation successful!\n');
+    console.log(result.explanation);
+
+    return {
+      output: dmlPath,
+      tools: result.tools,
+      skipped: false,
+      valid: true,
+      dml: result.dml,
+      meta: result.meta,
+      explanation: result.explanation,
+      attempts: 1,
+    };
   } catch (error) {
     status.stop();
     throw error;
@@ -394,42 +328,34 @@ export async function compilePrompt(
   prompt: string,
   options: CompileOptions = {}
 ): Promise<{ dml: string; tools: string[] }> {
+  const workspaceRoot = process.cwd();
   const config = await loadConfig(process.cwd());
-  const model = options.model || config.model;
-  const provider = options.provider || config.provider;
-
-  // Get available tools for the prompt
-  const tools = await getAvailableTools(config);
-
-  const result = await compileToDML(prompt, {
-    model,
-    provider: provider as any,
+  const compileSelection = resolveModelSlot(config, 'compile', {
+    modelId: buildModelOverride(options.model, options.provider),
     temperature: options.temperature,
+  });
+  const runSelection = resolveModelSlot(config, 'run');
+
+  const result = await compileWithSkillCreator(prompt, {
+    sourcePath: 'oneshot.md',
+    outputDir: path.resolve(config.dmlBase || '.deepclause/tools'),
+    baseName: 'oneshot',
+    workspaceRoot,
+    workspacePath: path.resolve(config.workspace || './workspace'),
+    config,
+    compileSelection,
+    runSelection,
+    sandbox: options.sandbox,
+    validateOnly: true,
     maxAttempts: options.maxAttempts,
-    tools: tools as any
+    verbose: options.verbose,
+    onUserInput: promptUser,
   });
 
-  if (result.valid && result.dml) {
-    return {
-      dml: result.dml,
-      tools: result.tools
-    };
-  }
-
-  throw new Error(`Failed to generate valid DML: ${(result.errors || []).join(", ")}`);
-}
-
-// =============================================================================
-// Tool Resolution
-// =============================================================================
-
-/**
- * Get all available tools for compilation prompt
- */
-async function getAvailableTools(_config: Config): Promise<Tool[]> {
-  const tools: Tool[] = [];
-  tools.push(...getAgentVMTools());
-  return tools;
+  return {
+    dml: result.dml,
+    tools: result.tools,
+  };
 }
 
 // =============================================================================
@@ -453,4 +379,47 @@ async function loadExistingMeta(metaPath: string): Promise<MetaFile | null> {
   } catch {
     return null;
   }
+}
+
+export const extractToolDependencies = extractToolDependenciesFromCompiler;
+export const extractParameters = extractParametersFromCompiler;
+export const extractDescription = extractDescriptionFromCompiler;
+
+export function validateDMLSyntax(dml: string): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  if (!dml.includes('agent_main')) {
+    errors.push('Missing agent_main predicate');
+  }
+
+  const stripped = dml
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/%.*$/gm, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+
+  let parenCount = 0;
+  let bracketCount = 0;
+  for (const char of stripped) {
+    if (char === '(') parenCount++;
+    if (char === ')') parenCount--;
+    if (char === '[') bracketCount++;
+    if (char === ']') bracketCount--;
+  }
+
+  if (parenCount !== 0) {
+    errors.push('Unbalanced parentheses');
+  }
+  if (bracketCount !== 0) {
+    errors.push('Unbalanced brackets');
+  }
+
+  const withoutQuotedStrings = dml.replace(/"(?:[^"\\]|\\.)*"/g, '');
+  if ((withoutQuotedStrings.match(/"/g) || []).length % 2 !== 0) {
+    errors.push('Unclosed string literal');
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors: [...new Set(errors)],
+  };
 }

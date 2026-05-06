@@ -2199,14 +2199,15 @@ flatten_conjunction((A1, A2), B, Result) :- !,
 flatten_conjunction(A, B, (A, B)).
 
 %% string_needs_interpolation(+String)
-%% Check if a string contains {VarName} patterns
+%% Check if a string contains identifier-like {VarName} patterns
 string_needs_interpolation(String) :-
     (   string(String) -> S = String
     ;   atom(String) -> atom_string(String, S)
     ;   fail
     ),
-    sub_string(S, _, _, _, "{"),
-    sub_string(S, _, _, _, "}").
+    string_codes(S, Codes),
+    extract_vars_from_codes(Codes, VarNames, _),
+    VarNames \= [].
 
 %% build_format_call(+Template, +Bindings, -TempVar, -FormatGoal)
 %% Build a format/3 call that produces the interpolated string
@@ -2247,10 +2248,16 @@ extract_interpolation_vars(Template, VarNames, FormatString) :-
 extract_vars_from_codes([], [], []) :- !.
 
 % Found opening brace
-extract_vars_from_codes([0'{|Rest], [VarName|VarNames], [0'~, 0'w|FormatRest]) :- !,
+extract_vars_from_codes([0'{|Rest], [VarName|VarNames], [0'~, 0'w|FormatRest]) :-
     extract_var_until_close(Rest, VarNameCodes, AfterClose),
+    valid_placeholder_codes(VarNameCodes),
+    !,
     atom_codes(VarName, VarNameCodes),
     extract_vars_from_codes(AfterClose, VarNames, FormatRest).
+
+% Invalid placeholder syntax - keep the opening brace literal
+extract_vars_from_codes([0'{|Rest], VarNames, [0'{|FormatRest]) :- !,
+    extract_vars_from_codes(Rest, VarNames, FormatRest).
 
 % Escape tilde for format/3
 extract_vars_from_codes([0'~|Rest], VarNames, [0'~, 0'~|FormatRest]) :- !,
@@ -2265,6 +2272,20 @@ extract_var_until_close([0'}|Rest], [], Rest) :- !.
 extract_var_until_close([C|Rest], [C|VarRest], Final) :-
     extract_var_until_close(Rest, VarRest, Final).
 extract_var_until_close([], [], []).
+
+%% valid_placeholder_codes(+Codes)
+%% Placeholder names must look like identifiers: [A-Za-z_][A-Za-z0-9_]*
+valid_placeholder_codes([First|Rest]) :-
+    valid_placeholder_start(First),
+    maplist(valid_placeholder_char, Rest).
+
+valid_placeholder_start(Code) :-
+    code_type(Code, alpha)
+    ; Code =:= 0'_.
+
+valid_placeholder_char(Code) :-
+    code_type(Code, alnum)
+    ; Code =:= 0'_.
 
 %% lookup_vars_with_params(+VarNames, +Bindings, -VarList, -ParamGoals)
 %% Look up each variable name:

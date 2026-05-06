@@ -195,12 +195,20 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const aiTools: Record<string, any> = {};
 
   // Add finish tool with Zod schema
+  const requiredVarNames = normalizedOutputVars.map(v => v.name);
   aiTools['finish'] = aiTool({
     description: 'CRITICAL: You MUST call this tool to complete the task and return success/failure. Call with success=true if you have set all required results, or success=false if the task is impossible.',
     inputSchema: z.object({
       success: z.boolean().describe('Whether the task was completed successfully')
     }),
     execute: async ({ success: s }: { success: boolean }) => {
+      // Guard: success=true requires all output variables to be set
+      if (s && requiredVarNames.length > 0) {
+        const missing = requiredVarNames.filter(v => !(v in variables));
+        if (missing.length > 0) {
+          return { finished: false, error: `Cannot finish with success=true — missing required result variable(s): ${missing.join(', ')}. Call set_result for each before finishing.` };
+        }
+      }
       finished = true;
       success = s;
       return { finished: true, success: s };
@@ -619,9 +627,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      debugLog(`ERROR in agent loop: ${message}`);
+      errorRetryCount++;
+      debugLog(`ERROR in agent loop (attempt ${errorRetryCount}/${MAX_ERROR_RETRIES}): ${message}`);
       if (error instanceof Error && error.stack) {
         debugLog(`Stack trace: ${error.stack}`);
+      }
+      if (errorRetryCount <= MAX_ERROR_RETRIES) {
+        debugLog(`Retrying in ${errorRetryCount}s...`);
+        await new Promise(resolve => setTimeout(resolve, 1000 * errorRetryCount));
+        continue;
       }
       outputs.push(`Error: ${message}`);
       break;
