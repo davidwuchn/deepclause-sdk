@@ -16,6 +16,7 @@ export interface WebSearchParams {
   count?: number;
   freshness?: string;
   country?: string;
+  signal?: AbortSignal;
 }
 
 // =============================================================================
@@ -27,7 +28,7 @@ export interface WebSearchParams {
  * Returns plain text formatted results
  */
 export async function webSearch(params: WebSearchParams): Promise<string> {
-  return braveSearch(params.query, 'web', params.count ?? 10, params.country ?? 'us', params.freshness);
+  return braveSearch(params.query, 'web', params.count ?? 10, params.country ?? 'us', params.freshness, params.signal);
 }
 
 /**
@@ -35,7 +36,7 @@ export async function webSearch(params: WebSearchParams): Promise<string> {
  * Returns plain text formatted results
  */
 export async function newsSearch(params: WebSearchParams): Promise<string> {
-  return braveSearch(params.query, 'news', params.count ?? 10, params.country ?? 'us', params.freshness);
+  return braveSearch(params.query, 'news', params.count ?? 10, params.country ?? 'us', params.freshness, params.signal);
 }
 
 /**
@@ -62,7 +63,8 @@ async function braveSearch(
   searchType: string = 'web',
   count: number = 10,
   country: string = 'us',
-  freshness?: string
+  freshness?: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   const apiKey = process.env.BRAVE_KEY || process.env.BRAVE_API_KEY;
   
@@ -106,7 +108,7 @@ async function braveSearch(
         break;
     }
 
-    const response = await fetch(endpoint, { headers });
+    const response = await fetch(endpoint, { headers, signal });
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -173,10 +175,17 @@ async function braveSearch(
     return `No results found for: ${query}`;
 
   } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
     console.error('Brave search failed:', error);
     // Fall back to mock results
     return generateMockSearchResults(query, count);
   }
+}
+
+function isAbortError(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'AbortError';
 }
 
 /**

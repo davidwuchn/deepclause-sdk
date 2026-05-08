@@ -2,17 +2,43 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const conductorMocks = vi.hoisted(() => ({
   createConductorSession: vi.fn(),
+  getConductorSessionDetail: vi.fn(),
   listConductorSessions: vi.fn(),
   runConductorTurn: vi.fn(),
 }));
 
+const commandMocks = vi.hoisted(() => ({
+  listCommands: vi.fn(),
+}));
+
+const runMocks = vi.hoisted(() => ({
+  run: vi.fn(),
+}));
+
 vi.mock('../src/system/runtime/conductor.js', () => ({
   createConductorSession: conductorMocks.createConductorSession,
+  getConductorSessionDetail: conductorMocks.getConductorSessionDetail,
   listConductorSessions: conductorMocks.listConductorSessions,
   runConductorTurn: conductorMocks.runConductorTurn,
 }));
 
-import { LiveExecutionPrinter, runPromptHeadless } from '../src/cli/tui.js';
+vi.mock('../src/cli/commands.js', () => ({
+  listCommands: commandMocks.listCommands,
+}));
+
+vi.mock('../src/cli/run.js', () => ({
+  run: runMocks.run,
+}));
+
+import {
+  canSubmitParsedInputWhileBusy,
+  computeFramePatch,
+  LiveExecutionPrinter,
+  completeSlashCommand,
+  parseCommandArgs,
+  parseSlashInput,
+  runPromptHeadless,
+} from '../src/cli/tui.js';
 
 describe('LiveExecutionPrinter', () => {
   it('streams tokens and hides internal tool noise', () => {
@@ -54,7 +80,18 @@ describe('runPromptHeadless', () => {
       output: ['status line'],
       answer: 'final answer',
     });
+    conductorMocks.getConductorSessionDetail.mockResolvedValue({
+      id: 'session-123',
+      title: 'Session',
+      createdAt: '2026-05-05T00:00:00.000Z',
+      updatedAt: '2026-05-05T00:00:00.000Z',
+      messages: [],
+      assistantMemory: '',
+      taskMemory: '',
+    });
     conductorMocks.listConductorSessions.mockResolvedValue([]);
+    commandMocks.listCommands.mockResolvedValue([]);
+    runMocks.run.mockResolvedValue({ output: [], answer: undefined });
   });
 
   it('creates a fresh session and prints the session identifier', async () => {
@@ -79,5 +116,70 @@ describe('runPromptHeadless', () => {
     expect(output[0]).toBe('Session: session-123');
     expect(output).toContain('status line');
     expect(output).toContain('final answer');
+  });
+});
+
+describe('slash command parsing', () => {
+  it('parses quoted skill arguments', () => {
+    expect(parseCommandArgs('alpha "two words" 3')).toEqual(['alpha', 'two words', '3']);
+    expect(parseSlashInput('/research alpha "two words" 3')).toEqual({
+      kind: 'skill',
+      name: 'research',
+      rawArgs: 'alpha "two words" 3',
+      args: ['alpha', 'two words', '3'],
+    });
+  });
+
+  it('treats built-ins separately from skills', () => {
+    expect(parseSlashInput('/new Planning Session')).toEqual({
+      kind: 'builtin',
+      name: 'new',
+      rawArgs: 'Planning Session',
+      args: ['Planning Session'],
+    });
+    expect(parseSlashInput('summarize this')).toEqual({ kind: 'text', prompt: 'summarize this' });
+  });
+
+  it('completes slash commands and skills', () => {
+    expect(completeSlashCommand('/rese', ['research'])).toEqual({
+      value: '/research ',
+      matches: ['research'],
+      applied: true,
+    });
+
+    expect(completeSlashCommand('/re', ['report', 'research'])).toEqual({
+      value: '/re',
+      matches: ['report', 'research'],
+      applied: false,
+    });
+  });
+
+  it('only allows cancel-or-exit commands while busy', () => {
+    expect(canSubmitParsedInputWhileBusy(parseSlashInput('/cancel'))).toBe(true);
+    expect(canSubmitParsedInputWhileBusy(parseSlashInput('/quit'))).toBe(true);
+    expect(canSubmitParsedInputWhileBusy(parseSlashInput('/sessions'))).toBe(false);
+    expect(canSubmitParsedInputWhileBusy(parseSlashInput('keep going'))).toBe(false);
+  });
+
+  it('computes minimal frame patches when only a few rows change', () => {
+    expect(computeFramePatch(
+      ['row 1', 'row 2', 'row 3'],
+      ['row 1', 'row 2 updated', 'row 3'],
+      { columns: 80, rows: 3 },
+      { columns: 80, rows: 3 },
+    )).toEqual({
+      fullRender: false,
+      changedRows: [{ row: 2, line: 'row 2 updated' }],
+    });
+
+    expect(computeFramePatch(
+      ['row 1'],
+      ['row 1'],
+      { columns: 80, rows: 1 },
+      { columns: 100, rows: 1 },
+    )).toEqual({
+      fullRender: true,
+      changedRows: [],
+    });
   });
 });

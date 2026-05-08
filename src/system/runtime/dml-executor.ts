@@ -3,6 +3,7 @@ import type { Config } from '../../cli/config.js';
 import { applyResolvedModelConfig } from '../../cli/config.js';
 import type { DMLEvent, DeepClauseSDK } from '../../types.js';
 import type { ResolvedModelConfig } from '../config/model-slots.js';
+import { withCapturedConsole } from './console-capture.js';
 import { registerLocalRuntimeTools } from './runtime-tools.js';
 import { createShellManager, type ShellManager } from './shell-manager.js';
 
@@ -26,6 +27,7 @@ export interface ExecuteDmlOptions {
   verbose?: boolean;
   headless?: boolean;
   sandbox?: boolean;
+  signal?: AbortSignal;
   onUserInput?: (prompt: string) => Promise<string>;
   initialMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
   onEvent?: (event: DMLEvent) => void;
@@ -41,6 +43,20 @@ export interface ExecuteDmlResult {
 }
 
 export async function executeDml(options: ExecuteDmlOptions): Promise<ExecuteDmlResult> {
+  if (options.headless && options.onEvent) {
+    return withCapturedConsole(
+      (entry) => options.onEvent?.({
+        type: 'log',
+        content: `[${entry.level}] ${entry.text}`,
+      }),
+      () => executeDmlInternal(options),
+    );
+  }
+
+  return executeDmlInternal(options);
+}
+
+async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDmlResult> {
   applyResolvedModelConfig(options.selection);
 
   const shell = createShellManager({
@@ -70,6 +86,7 @@ export async function executeDml(options: ExecuteDmlOptions): Promise<ExecuteDml
     registerLocalRuntimeTools(sdk, {
       workspacePath: options.workspacePath,
       shell,
+      signal: options.signal,
     });
 
     await options.registerAdditionalTools?.(sdk, {
@@ -86,6 +103,7 @@ export async function executeDml(options: ExecuteDmlOptions): Promise<ExecuteDml
       params: options.params,
       workspacePath: options.workspacePath,
       gasLimit: options.gasLimit,
+      signal: options.signal,
       onUserInput: options.onUserInput,
       initialMessages: options.initialMessages,
     })) {

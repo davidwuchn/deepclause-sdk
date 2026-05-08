@@ -161,11 +161,7 @@ EXACT CALLING SYNTAX AND RETURN TYPES:
    Call:    exec(url_fetch(url: "https://example.com/file.csv", save_to: "data.csv"), Result)
    Returns: Dict with keys: file_path, size, status
 
-4. calculator - Evaluate math expression
-   Call:    exec(calculator(expression: "2 + 2 * 3"), Result)
-   Returns: Dict with key: result (string)
-
-5. bash - Run shell command
+4. bash - Run shell command
    Call:    exec(bash(command: "echo hello"), Result)
    Returns: Dict with keys: success (bool), stdout (string), stderr (string), exitCode (integer), summary (string)
    Access:  get_dict(stdout, Result, Output), get_dict(exitCode, Result, Code)
@@ -173,7 +169,7 @@ EXACT CALLING SYNTAX AND RETURN TYPES:
    ALLOWED: pip install, npm install, apt-get install
    BANNED:  curl, wget (use url_fetch instead)
 
-6. ask_user - Ask user for input
+5. ask_user - Ask user for input
   Call:    exec(ask_user(prompt: "What is your name?"), Result)
   Returns: Dict with key: user_response (string)
 
@@ -186,7 +182,6 @@ QUICK REFERENCE TABLE:
 | news_search | exec(news_search(query: Q), R)              | List of {title, url, snippet}                  |
 | url_fetch   | exec(url_fetch(url: U), R)                  | {body, status, headers}                        |
 | url_fetch   | exec(url_fetch(url: U, save_to: F), R)      | {file_path, size, status}                      |
-| calculator  | exec(calculator(expression: E), R)          | {result}                                       |
 | bash        | exec(bash(command: C), R)                   | {success, stdout, stderr, exitCode, summary}   |
 | ask_user    | exec(ask_user(prompt: P), R)                | {user_response}                                |
 </external_tools>

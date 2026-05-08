@@ -25,6 +25,7 @@ import { verifyRuntimeToolsAvailable } from '../system/runtime/runtime-tools.js'
 // =============================================================================
 
 export interface RunOptions {
+  configRoot?: string;
   workspace?: string;
   verbose?: boolean;
   stream?: boolean;
@@ -36,8 +37,10 @@ export interface RunOptions {
   provider?: Provider;
   temperature?: number;
   gasLimit?: number;
+  signal?: AbortSignal;
   params?: Record<string, string>;
   prompt?: string;
+  onUserInput?: (prompt: string) => Promise<string>;
   onEvent?: (event: DMLEvent) => void;
 }
 
@@ -63,8 +66,7 @@ export async function run(
   args: string[],
   options: RunOptions = {}
 ): Promise<RunResult> {
-  // Config is always loaded from current working directory
-  const configRoot = process.cwd();
+  const configRoot = path.resolve(options.configRoot ?? process.cwd());
   const config = await loadConfig(configRoot);
   
   let dmlCode: string;
@@ -112,7 +114,7 @@ export async function run(
     if (!file) {
       throw new Error('Either a DML file or a --prompt must be provided');
     }
-    absolutePath = await resolveDmlPath(file);
+    absolutePath = await resolveDmlPath(file, configRoot);
     
     // Load DML file
     try {
@@ -139,8 +141,8 @@ export async function run(
 
   // Resolve workspace path
   const workspacePath = options.workspace 
-    ? path.resolve(options.workspace)
-    : path.resolve(config.workspace || './workspace');
+    ? path.resolve(configRoot, options.workspace)
+    : path.resolve(configRoot, config.workspace || './workspace');
 
   // Ensure workspace exists
   await fs.mkdir(workspacePath, { recursive: true });
@@ -180,10 +182,11 @@ export async function run(
     verbose: options.verbose,
     headless: options.headless,
     sandbox: options.sandbox,
+    signal: options.signal,
     onEvent: options.onEvent,
-    onUserInput: options.headless
+    onUserInput: options.onUserInput ?? (options.headless
       ? async () => ''
-      : promptUser,
+      : promptUser),
   });
 
   if (options.trace && result.trace) {
@@ -269,8 +272,8 @@ function parseArgValue(value: string): unknown {
   return value;
 }
 
-async function resolveDmlPath(file: string): Promise<string> {
-  const candidate = path.resolve(file);
+async function resolveDmlPath(file: string, configRoot: string): Promise<string> {
+  const candidate = path.resolve(configRoot, file);
   if (await fileExists(candidate)) {
     return candidate;
   }

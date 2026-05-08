@@ -2,14 +2,16 @@ import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { createDeepClause } from '../../sdk.js';
-import type { AnalysisResult, DeepClauseSDK } from '../../types.js';
+import type { AnalysisResult, DMLEvent, DeepClauseSDK } from '../../types.js';
 import { analyzeDML, extractDescription, extractParameters, validateWithProlog } from '../../compiler.js';
 import { newsSearch, webSearch } from '../../cli/search.js';
 import type { Config } from '../../cli/config.js';
 import type { MetaFile } from '../../cli/compile.js';
 import type { ResolvedModelConfig } from '../config/model-slots.js';
 import { readSystemPromptAsset, readSystemSkillAsset } from '../assets/index.js';
+import { withCapturedConsole } from './console-capture.js';
 import { createShellManager, type ShellManager } from './shell-manager.js';
+import { recordTokenUsage, type TokenUsageByModel } from './token-usage.js';
 
 interface PublishResult {
   dml: string;
@@ -31,6 +33,8 @@ export interface SkillCreatorCompileOptions {
   maxAttempts?: number;
   verbose?: boolean;
   onUserInput?: (prompt: string) => Promise<string>;
+  signal?: AbortSignal;
+  onEvent?: (event: DMLEvent) => void;
 }
 
 export interface SkillCreatorCompileResult {
@@ -40,6 +44,7 @@ export interface SkillCreatorCompileResult {
   outputPath: string;
   explanation: string;
   analysis: AnalysisResult;
+  usageByModel: TokenUsageByModel;
 }
 
 const CREATOR_TOOL_CATALOG = [
@@ -55,6 +60,23 @@ const CREATOR_TOOL_CATALOG = [
 ];
 
 export async function compileWithSkillCreator(
+  markdown: string,
+  options: SkillCreatorCompileOptions,
+): Promise<SkillCreatorCompileResult> {
+  if (options.onEvent) {
+    return withCapturedConsole(
+      (entry) => options.onEvent?.({
+        type: 'log',
+        content: `[${entry.level}] ${entry.text}`,
+      }),
+      () => compileWithSkillCreatorInternal(markdown, options),
+    );
+  }
+
+  return compileWithSkillCreatorInternal(markdown, options);
+}
+
+async function compileWithSkillCreatorInternal(
   markdown: string,
   options: SkillCreatorCompileOptions,
 ): Promise<SkillCreatorCompileResult> {
@@ -82,6 +104,7 @@ export async function compileWithSkillCreator(
   let published: PublishResult | undefined;
   let finalAnswer = '';
   let runtimeError: string | undefined;
+  const usageByModel: TokenUsageByModel = {};
 
   try {
     registerSkillCreatorTools(sdk, {
@@ -96,6 +119,7 @@ export async function compileWithSkillCreator(
       onPublish: (result) => {
         published = result;
       },
+      signal: options.signal,
     });
 
     const skillCreatorDml = await readSystemSkillAsset('skill-creator', {
@@ -119,12 +143,17 @@ export async function compileWithSkillCreator(
       workspacePath,
       gasLimit: Math.max(240, (options.maxAttempts ?? 3) * 160),
       onUserInput: options.onUserInput,
+      signal: options.signal,
     })) {
-      if (event.type === 'output' && options.verbose && event.content) {
+      options.onEvent?.(event);
+      if (event.type === 'output' && options.verbose && !options.onEvent && event.content) {
         console.log(event.content);
       }
-      if (event.type === 'tool_call' && options.verbose && event.toolName) {
+      if (event.type === 'tool_call' && options.verbose && !options.onEvent && event.toolName) {
         console.log(`  🔧 ${event.toolName}`);
+      }
+      if (event.type === 'usage') {
+        recordTokenUsage(usageByModel, options.compileSelection.id, event.usage);
       }
       if (event.type === 'answer' && event.content) {
         finalAnswer = event.content;
@@ -152,6 +181,7 @@ export async function compileWithSkillCreator(
       outputPath: publishResult.outputPath,
       explanation: finalAnswer || 'Skill creator runtime compiled and published the skill.',
       analysis,
+      usageByModel,
     };
   } finally {
     await sdk.dispose();
@@ -171,6 +201,7 @@ function registerSkillCreatorTools(
     runSelection: ResolvedModelConfig;
     validateOnly: boolean;
     onPublish: (result: PublishResult) => void;
+    signal?: AbortSignal;
   },
 ): void {
   sdk.registerTool('web_search', {
@@ -186,6 +217,7 @@ function registerSkillCreatorTools(
     execute: async (args) => webSearch({
       query: String(args.query ?? ''),
       count: typeof args.count === 'number' ? args.count : 10,
+      signal: context.signal,
     }),
   });
 
@@ -202,6 +234,7 @@ function registerSkillCreatorTools(
     execute: async (args) => newsSearch({
       query: String(args.query ?? ''),
       count: typeof args.count === 'number' ? args.count : 10,
+      signal: context.signal,
     }),
   });
 
@@ -215,7 +248,7 @@ function registerSkillCreatorTools(
       },
       required: ['url'],
     },
-    execute: async (args) => urlFetch(context.workspacePath, args),
+    execute: async (args) => urlFetch(context.workspacePath, args, context.signal),
   });
 
   sdk.registerTool('bash', {
@@ -227,7 +260,7 @@ function registerSkillCreatorTools(
       },
       required: ['command'],
     },
-    execute: async (args) => context.shell.exec(String(args.command ?? '')),
+    execute: async (args) => context.shell.exec(String(args.command ?? ''), context.signal),
   });
 
   sdk.registerTool('write_file', {
@@ -496,6 +529,7 @@ function registerGeneralRuntimeTools(
   sdk: DeepClauseSDK,
   workspacePath: string,
   shell: ShellManager,
+  signal?: AbortSignal,
 ): void {
   sdk.registerTool('web_search', {
     description: 'Search the web for information.',
@@ -510,6 +544,7 @@ function registerGeneralRuntimeTools(
     execute: async (args) => webSearch({
       query: String(args.query ?? ''),
       count: typeof args.count === 'number' ? args.count : 10,
+      signal,
     }),
   });
 
@@ -522,7 +557,7 @@ function registerGeneralRuntimeTools(
       },
       required: ['query'],
     },
-    execute: async (args) => newsSearch({ query: String(args.query ?? ''), count: 10 }),
+    execute: async (args) => newsSearch({ query: String(args.query ?? ''), count: 10, signal }),
   });
 
   sdk.registerTool('url_fetch', {
@@ -535,7 +570,7 @@ function registerGeneralRuntimeTools(
       },
       required: ['url'],
     },
-    execute: async (args) => urlFetch(workspacePath, args),
+    execute: async (args) => urlFetch(workspacePath, args, signal),
   });
 
   sdk.registerTool('bash', {
@@ -547,19 +582,7 @@ function registerGeneralRuntimeTools(
       },
       required: ['command'],
     },
-    execute: async (args) => shell.exec(String(args.command ?? '')),
-  });
-
-  sdk.registerTool('calculator', {
-    description: 'Evaluate a math expression.',
-    parameters: {
-      type: 'object',
-      properties: {
-        expression: { type: 'string', description: 'Arithmetic expression.' },
-      },
-      required: ['expression'],
-    },
-    execute: async (args) => calculateExpression(String(args.expression ?? '')),
+    execute: async (args) => shell.exec(String(args.command ?? ''), signal),
   });
 }
 
@@ -659,13 +682,14 @@ function extractToolNames(analysis: AnalysisResult): string[] {
 async function urlFetch(
   workspacePath: string,
   args: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const url = String(args.url ?? '');
   if (!url) {
     throw new Error('url is required');
   }
 
-  const response = await fetch(url);
+  const response = await fetch(url, { signal });
   const headers = Object.fromEntries(response.headers.entries());
 
   if (typeof args.save_to === 'string' && args.save_to.trim()) {
@@ -697,14 +721,6 @@ function resolveWorkspacePath(workspacePath: string, filePath: string): string {
     throw new Error(`Path must stay inside workspace: ${filePath}`);
   }
   return resolved;
-}
-
-function calculateExpression(expression: string): { result: string } {
-  if (!/^[0-9+\-*/().,%\s^<>=!&|]+$/.test(expression)) {
-    throw new Error('Unsupported calculator expression');
-  }
-  const result = Function(`"use strict"; return (${expression});`)();
-  return { result: String(result) };
 }
 
 function normalizeDeployInputs(specMarkdown: string, metadataJson: string): { specMarkdown: string; metadataJson: string } {

@@ -15,6 +15,12 @@ import type { DMLEvent, DeepClauseSDK } from '../../types.js';
 import { readSystemPromptAsset, readSystemSkillAsset } from '../assets/index.js';
 import { executeDml, type DmlExecutionContext } from './dml-executor.js';
 import { compileWithSkillCreator } from './skill-creator.js';
+import {
+  isTokenUsageEmpty,
+  mergeTokenUsageMaps,
+  recordTokenUsage,
+  type TokenUsageByModel,
+} from './token-usage.js';
 
 const DEFAULT_SESSION_TITLE_PREFIX = 'Session';
 
@@ -37,6 +43,7 @@ interface SessionPaths {
   messagesPath: string;
   assistantMemoryPath: string;
   taskMemoryPath: string;
+  usagePath: string;
 }
 
 interface LoadedSession {
@@ -54,6 +61,19 @@ export interface ConductorSessionSummary {
   updatedAt: string;
 }
 
+export interface ConductorSessionMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
+
+export interface ConductorSessionDetail extends ConductorSessionSummary {
+  messages: ConductorSessionMessage[];
+  assistantMemory: string;
+  taskMemory: string;
+  usageByModel?: TokenUsageByModel;
+}
+
 export interface ConductorTurnOptions {
   sessionId?: string;
   sessionTitle?: string;
@@ -66,6 +86,7 @@ export interface ConductorTurnOptions {
   stream?: boolean;
   headless?: boolean;
   sandbox?: boolean;
+  signal?: AbortSignal;
   onUserInput?: (prompt: string) => Promise<string>;
   onEvent?: (event: ConductorLogEvent) => void;
 }
@@ -81,6 +102,7 @@ export interface ConductorTurnResult {
 export interface ConductorLogEvent {
   scope: 'main' | 'child';
   childSlug?: string;
+  modelId?: string;
   event: DMLEvent;
 }
 
@@ -121,7 +143,28 @@ export async function createConductorSession(
   await fs.writeFile(paths.messagesPath, '', 'utf8');
   await fs.writeFile(paths.assistantMemoryPath, '', 'utf8');
   await fs.writeFile(paths.taskMemoryPath, '', 'utf8');
+  await fs.writeFile(paths.usagePath, '{}\n', 'utf8');
   return metadata;
+}
+
+export async function getConductorSessionDetail(
+  workspaceRoot = process.cwd(),
+  sessionId: string,
+): Promise<ConductorSessionDetail> {
+  const paths = getSessionPaths(workspaceRoot, sessionId);
+  const metadata = await readRequiredSessionMetadata(paths.dir);
+  const messages = await readSessionMessages(paths.messagesPath);
+  const assistantMemory = await readOptionalText(paths.assistantMemoryPath);
+  const taskMemory = await readOptionalText(paths.taskMemoryPath);
+  const usageByModel = await readSessionUsage(paths.usagePath);
+
+  return {
+    ...metadata,
+    messages,
+    assistantMemory,
+    taskMemory,
+    usageByModel,
+  };
 }
 
 export async function runConductorTurn(
@@ -147,6 +190,13 @@ export async function runConductorTurn(
   });
   const conductorDml = await readSystemSkillAsset('conductor', { workspaceRoot });
   const onUserInput = options.onUserInput ?? promptUser;
+  const usageByModel: TokenUsageByModel = {};
+  const emitLogEvent = (event: ConductorLogEvent): void => {
+    if (event.event.type === 'usage') {
+      recordTokenUsage(usageByModel, event.modelId, event.event.usage);
+    }
+    options.onEvent?.(event);
+  };
 
   const result = await executeDml({
     dmlCode: conductorDml,
@@ -163,9 +213,10 @@ export async function runConductorTurn(
     stream: options.stream ?? false,
     trace: options.trace,
     sandbox: options.sandbox,
+    signal: options.signal,
     onUserInput,
     initialMessages: session.messages,
-    onEvent: (event) => options.onEvent?.({ scope: 'main', event }),
+    onEvent: (event) => emitLogEvent({ scope: 'main', modelId: gatewaySelection.id, event }),
     registerAdditionalTools: async (sdk, context) => registerConductorTools(sdk, context, {
       workspaceRoot,
       workspacePath,
@@ -176,8 +227,9 @@ export async function runConductorTurn(
       stream: options.stream ?? false,
       verbose: options.verbose,
       sandbox: options.sandbox ?? false,
+      signal: options.signal,
       onUserInput,
-      onEvent: options.onEvent,
+      onEvent: emitLogEvent,
     }),
   });
 
@@ -196,6 +248,7 @@ export async function runConductorTurn(
       timestamp: new Date().toISOString(),
     });
   }
+  await mergeSessionUsage(workspaceRoot, session.metadata.id, usageByModel);
   await touchSession(workspaceRoot, session.metadata.id);
 
   return {
@@ -220,6 +273,7 @@ async function registerConductorTools(
     stream: boolean;
     verbose?: boolean;
     sandbox: boolean;
+    signal?: AbortSignal;
     onUserInput: (prompt: string) => Promise<string>;
     onEvent?: (event: ConductorLogEvent) => void;
   },
@@ -241,6 +295,8 @@ async function registerConductorTools(
       options.stream,
       options.verbose,
       options.sandbox,
+      options.signal,
+      options.onUserInput,
       options.onEvent,
       args,
     ),
@@ -265,7 +321,9 @@ async function registerConductorTools(
       sessionId: options.session.metadata.id,
       verbose: options.verbose,
       sandbox: options.sandbox,
+      signal: options.signal,
       onUserInput: options.onUserInput,
+      onEvent: options.onEvent,
     }),
   });
 
@@ -289,6 +347,8 @@ async function runCatalogSkill(
   stream: boolean,
   verbose: boolean | undefined,
   sandbox: boolean,
+  signal: AbortSignal | undefined,
+  onUserInput: (prompt: string) => Promise<string>,
   onEvent: ((event: ConductorLogEvent) => void) | undefined,
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
@@ -303,13 +363,16 @@ async function runCatalogSkill(
   const skillPath = path.join(getToolsDir(workspaceRoot), slug);
   const skillArgs = normalizeStringArray(args.args);
   const result = await run(skillPath, skillArgs, {
+    configRoot: workspaceRoot,
     workspace: workspacePath,
     headless: true,
     stream,
     verbose,
     model: modelId,
     sandbox,
-    onEvent: (event) => onEvent?.({ scope: 'child', childSlug: slug, event }),
+    signal,
+    onUserInput,
+    onEvent: (event) => onEvent?.({ scope: 'child', childSlug: slug, modelId, event }),
   });
 
   return {
@@ -330,7 +393,9 @@ async function createLocalSkill(options: {
   sessionId: string;
   verbose?: boolean;
   sandbox: boolean;
+  signal?: AbortSignal;
   onUserInput: (prompt: string) => Promise<string>;
+  onEvent?: (event: ConductorLogEvent) => void;
 }): Promise<Record<string, unknown>> {
   if (!options.spec.trim()) {
     throw new Error('spec is required');
@@ -353,8 +418,17 @@ async function createLocalSkill(options: {
     runSelection: options.runSelection,
     sandbox: options.sandbox,
     verbose: options.verbose,
+    signal: options.signal,
     onUserInput: options.onUserInput,
+    onEvent: (event) => options.onEvent?.({
+      scope: 'child',
+      childSlug: 'skill-creator',
+      modelId: options.compileSelection.id,
+      event,
+    }),
   });
+
+  await mergeSessionUsage(options.workspaceRoot, options.sessionId, result.usageByModel);
 
   return {
     success: true,
@@ -454,6 +528,7 @@ function getSessionPaths(workspaceRoot: string, sessionId: string): SessionPaths
     messagesPath: path.join(dir, 'messages.jsonl'),
     assistantMemoryPath: path.join(dir, 'assistant-memory.md'),
     taskMemoryPath: path.join(dir, 'task-memory.md'),
+    usagePath: path.join(dir, 'usage.json'),
   };
 }
 
@@ -488,8 +563,37 @@ async function readSessionMessages(messagesPath: string): Promise<SessionMessage
     .filter((message) => message.role === 'user' || message.role === 'assistant');
 }
 
+async function readSessionUsage(usagePath: string): Promise<TokenUsageByModel> {
+  const content = await readOptionalText(usagePath);
+  if (!content.trim()) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(content) as TokenUsageByModel;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 async function appendSessionMessage(messagesPath: string, message: SessionMessage): Promise<void> {
   await fs.appendFile(messagesPath, JSON.stringify(message) + '\n', 'utf8');
+}
+
+async function mergeSessionUsage(
+  workspaceRoot: string,
+  sessionId: string,
+  delta: TokenUsageByModel,
+): Promise<void> {
+  if (isTokenUsageEmpty(delta)) {
+    return;
+  }
+
+  const paths = getSessionPaths(workspaceRoot, sessionId);
+  const current = await readSessionUsage(paths.usagePath);
+  const merged = mergeTokenUsageMaps(current, delta);
+  await fs.writeFile(paths.usagePath, JSON.stringify(merged, null, 2) + '\n', 'utf8');
 }
 
 async function touchSession(workspaceRoot: string, sessionId: string): Promise<void> {

@@ -11,7 +11,6 @@ const BUILT_IN_RUNTIME_TOOLS = new Set([
   'web_search',
   'news_search',
   'url_fetch',
-  'calculator',
 ]);
 
 const INTERNAL_TOOLS = new Set(['ask_user', 'finish', 'set_result', 'store']);
@@ -47,6 +46,7 @@ export function registerLocalRuntimeTools(
   options: {
     workspacePath: string;
     shell: ShellManager;
+    signal?: AbortSignal;
   },
 ): void {
   sdk.registerTool('web_search', {
@@ -64,6 +64,7 @@ export function registerLocalRuntimeTools(
       query: String(args.query ?? args.arg1 ?? ''),
       count: typeof args.count === 'number' ? args.count : 10,
       freshness: typeof args.freshness === 'string' ? args.freshness : undefined,
+      signal: options.signal,
     }),
   });
 
@@ -82,6 +83,7 @@ export function registerLocalRuntimeTools(
       query: String(args.query ?? args.arg1 ?? ''),
       count: typeof args.count === 'number' ? args.count : 10,
       freshness: typeof args.freshness === 'string' ? args.freshness : undefined,
+      signal: options.signal,
     }),
   });
 
@@ -96,7 +98,7 @@ export function registerLocalRuntimeTools(
       },
       required: ['url'],
     },
-    execute: async (args) => urlFetch(options.workspacePath, args),
+    execute: async (args) => urlFetch(options.workspacePath, args, options.signal),
   });
 
   sdk.registerTool('bash', {
@@ -108,7 +110,7 @@ export function registerLocalRuntimeTools(
       },
       required: ['command'],
     },
-    execute: async (args) => options.shell.exec(String(args.command ?? args.arg1 ?? '')),
+    execute: async (args) => options.shell.exec(String(args.command ?? args.arg1 ?? ''), options.signal),
   });
 
   sdk.registerTool('vm_exec', {
@@ -120,25 +122,14 @@ export function registerLocalRuntimeTools(
       },
       required: ['command'],
     },
-    execute: async (args) => options.shell.exec(String(args.command ?? args.arg1 ?? '')),
-  });
-
-  sdk.registerTool('calculator', {
-    description: 'Evaluate an arithmetic expression.',
-    parameters: {
-      type: 'object',
-      properties: {
-        expression: { type: 'string', description: 'Arithmetic expression.' },
-      },
-      required: ['expression'],
-    },
-    execute: async (args) => calculateExpression(String(args.expression ?? args.arg1 ?? '')),
+    execute: async (args) => options.shell.exec(String(args.command ?? args.arg1 ?? ''), options.signal),
   });
 }
 
 export async function urlFetch(
   workspacePath: string,
   args: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const url = String(args.url ?? '');
   if (!url) {
@@ -146,7 +137,7 @@ export async function urlFetch(
   }
 
   const headers = isStringRecord(args.headers) ? args.headers : undefined;
-  const response = await fetch(url, { headers });
+  const response = await fetch(url, { headers, signal });
   const responseHeaders = Object.fromEntries(response.headers.entries());
 
   if (typeof args.save_to === 'string' && args.save_to.trim()) {
@@ -180,14 +171,6 @@ export function resolveWorkspacePath(workspacePath: string, filePath: string): s
     throw new Error(`Path must stay inside workspace: ${filePath}`);
   }
   return resolved;
-}
-
-export function calculateExpression(expression: string): { result: string } {
-  if (!/^[0-9+\-*/().,%\s^<>=!&|]+$/.test(expression)) {
-    throw new Error('Unsupported calculator expression');
-  }
-  const result = Function(`"use strict"; return (${expression});`)();
-  return { result: String(result) };
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {

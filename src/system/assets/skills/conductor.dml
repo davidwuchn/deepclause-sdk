@@ -34,9 +34,6 @@ tool(run_bash(Command, Output), "Run a shell command in the workspace.") :-
 tool(create_new_skill(Spec, Result), "Create and deploy a new reusable skill from a natural language spec.") :-
     exec(create_skill(spec: Spec), Result).
 
-tool(calculate(Expression, Result), "Evaluate a math expression.") :-
-    exec(calculator(expression: Expression), Result).
-
 tool(ask_user(Prompt, Response), "Ask the user a clarifying question and get their response.") :-
     exec(ask_user(prompt: Prompt), Result),
     get_dict(user_response, Result, Response).

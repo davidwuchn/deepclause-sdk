@@ -63,18 +63,6 @@ const AGENTVM_TOOLS: Tool[] = [
       },
       required: ['url']
     }
-  },
-  {
-    name: 'calculator',
-    description: 'Evaluate a basic arithmetic expression.',
-    provider: 'agentvm',
-    schema: {
-      type: 'object',
-      properties: {
-        expression: { type: 'string', description: 'Arithmetic expression to evaluate' }
-      },
-      required: ['expression']
-    }
   }
 ];
 
