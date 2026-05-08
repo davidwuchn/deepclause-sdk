@@ -45,16 +45,19 @@ type BuiltinSlashCommand = (typeof BUILTIN_SLASH_COMMANDS)[number];
 type Keypress = { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean; sequence?: string };
 type PaneKind = 'sessions' | 'messages' | 'process' | 'context';
 
-interface DisplayMessage {
+export interface DisplayMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   pending?: boolean;
   error?: boolean;
+  tag?: string;
+  kind?: 'output' | 'question';
 }
 
 interface RunningPreview {
   sessionId: string;
   kind: 'task' | 'skill';
+  rootTag?: string;
   entries: DisplayMessage[];
 }
 
@@ -81,7 +84,7 @@ export class LiveExecutionPrinter {
   handle(logEvent: ConductorLogEvent): void {
     const { event } = logEvent;
 
-    if (event.type === 'usage' || event.type === 'finished' || event.type === 'input_required') {
+    if (event.type === 'usage' || event.type === 'finished') {
       return;
     }
 
@@ -121,6 +124,12 @@ export class LiveExecutionPrinter {
       case 'log':
         if (event.content) {
           this.writeLine(`${formatEventPrefix(logEvent)}log ${event.content}`);
+        }
+        break;
+
+      case 'input_required':
+        if (event.prompt) {
+          this.writeLine(`${formatEventPrefix(logEvent)}clarify ${event.prompt}`);
         }
         break;
     }
@@ -169,7 +178,7 @@ class ActivityBuffer {
   handle(logEvent: ConductorLogEvent): void {
     const { event } = logEvent;
 
-    if (event.type === 'usage' || event.type === 'finished' || event.type === 'input_required') {
+    if (event.type === 'usage' || event.type === 'finished') {
       return;
     }
 
@@ -209,6 +218,12 @@ class ActivityBuffer {
       case 'log':
         if (event.content) {
           this.pushLine(`${formatEventPrefix(logEvent)}log ${event.content}`);
+        }
+        break;
+
+      case 'input_required':
+        if (event.prompt) {
+          this.pushLine(`${formatEventPrefix(logEvent)}clarify ${event.prompt}`);
         }
         break;
     }
@@ -598,7 +613,7 @@ class FullscreenTui {
     this.focusedPane = 'messages';
     this.paneScroll.messages = 0;
     this.paneScroll.process = 0;
-    this.beginExecutionPreview(sessionId, 'skill', { role: 'system', content: commandText });
+    this.beginExecutionPreview(sessionId, 'skill', { role: 'system', content: commandText }, skillName);
     activity.pushLine(`skill /${skillName}${args.length > 0 ? ` ${args.join(' ')}` : ''}`);
     this.busy = true;
     this.currentAbortController = new AbortController();
@@ -610,7 +625,7 @@ class FullscreenTui {
       const result = await runSkillCommand(this.workspaceRoot, skillName, args, {
         sandbox: this.options.sandbox,
         signal: this.currentAbortController.signal,
-        onUserInput: (question) => this.requestClarification(`[${skillName}] ${question}`),
+        onUserInput: (question) => this.requestClarification(question),
         onEvent: (event) => {
           activity.handle(event);
           this.updatePreviewFromEvent(event);
@@ -644,7 +659,7 @@ class FullscreenTui {
   }
 
   private async requestClarification(promptText: string): Promise<string> {
-    this.currentProcessActivity().pushLine(`clarify ${condenseWhitespace(promptText)}`);
+    this.ensureClarificationVisible(promptText);
     this.inputValue = '';
     this.cursor = 0;
     this.statusLine = 'Awaiting clarification...';
@@ -654,6 +669,25 @@ class FullscreenTui {
       this.pendingQuestion = { prompt: promptText, resolve };
       this.requestRender();
     });
+  }
+
+  private ensureClarificationVisible(promptText: string): void {
+    if (!this.currentPreview) {
+      return;
+    }
+
+    const entry = previewQuestionMessage(promptText);
+    const entries = this.currentPreview.entries;
+    const pendingAssistantIndex = entries.length > 0 && entries[entries.length - 1].role === 'assistant'
+      ? entries.length - 1
+      : entries.length;
+    const previous = pendingAssistantIndex > 0 ? entries[pendingAssistantIndex - 1] : undefined;
+
+    if (sameDisplayMessage(previous, entry)) {
+      return;
+    }
+
+    this.insertPreviewMessage(entry);
   }
 
   private async applyCompletion(): Promise<void> {
@@ -702,10 +736,11 @@ class FullscreenTui {
     this.requestRender();
   }
 
-  private beginExecutionPreview(sessionId: string, kind: 'task' | 'skill', lead: DisplayMessage): void {
+  private beginExecutionPreview(sessionId: string, kind: 'task' | 'skill', lead: DisplayMessage, rootTag?: string): void {
     this.currentPreview = {
       sessionId,
       kind,
+      rootTag,
       entries: [lead, { role: 'assistant', content: '', pending: true }],
     };
   }
@@ -715,7 +750,12 @@ class FullscreenTui {
       return;
     }
 
-    if (this.currentPreview.kind === 'task' && logEvent.scope !== 'main') {
+    const previewMessage = previewMessageFromEvent(logEvent);
+    if (previewMessage) {
+      this.insertPreviewMessage(previewMessage);
+    }
+
+    if (!this.isPrimaryPreviewEvent(logEvent)) {
       return;
     }
 
@@ -744,6 +784,33 @@ class FullscreenTui {
       default:
         break;
     }
+  }
+
+  private isPrimaryPreviewEvent(logEvent: ConductorLogEvent): boolean {
+    if (!this.currentPreview) {
+      return false;
+    }
+
+    if (this.currentPreview.kind === 'task') {
+      return logEvent.scope === 'main';
+    }
+
+    return logEvent.scope === 'child' && logEvent.childSlug === this.currentPreview.rootTag;
+  }
+
+  private insertPreviewMessage(entry: DisplayMessage): void {
+    if (!this.currentPreview) {
+      return;
+    }
+
+    const entries = this.currentPreview.entries;
+    const last = entries[entries.length - 1];
+    if (last && last.role === 'assistant' && last.pending && !last.content) {
+      entries.splice(entries.length - 1, 0, entry);
+      return;
+    }
+
+    entries.push(entry);
   }
 
   private ensurePreviewAssistantMessage(): DisplayMessage {
@@ -1267,7 +1334,7 @@ class FullscreenTui {
       case 'assistant':
         return entry.error ? '[Assistant Error]' : `[Assistant${spinner}]`;
       case 'system':
-        return `[System${spinner}]`;
+        return formatSystemMessageHeader(entry, spinner);
     }
   }
 
@@ -1470,9 +1537,44 @@ async function runSkillCommand(
     signal: options.signal,
     onUserInput: options.onUserInput,
     onEvent: (event: DMLEvent) => options.onEvent?.({ scope: 'child', childSlug: skillName, event }),
+    onChildEvent: (childSlug, event) => options.onEvent?.({ scope: 'child', childSlug, event }),
   });
 
   return result;
+}
+
+export function previewMessageFromEvent(logEvent: ConductorLogEvent): DisplayMessage | null {
+  switch (logEvent.event.type) {
+    case 'output':
+      if (!logEvent.event.content) {
+        return null;
+      }
+      return {
+        role: 'system',
+        kind: 'output',
+        tag: logEvent.scope === 'child' ? logEvent.childSlug : undefined,
+        content: logEvent.event.content,
+      };
+
+    case 'input_required':
+      if (!logEvent.event.prompt) {
+        return null;
+      }
+      return previewQuestionMessage(logEvent.event.prompt, logEvent.scope === 'child' ? logEvent.childSlug : undefined);
+
+    default:
+      return null;
+  }
+}
+
+export function previewQuestionMessage(promptText: string, explicitTag?: string): DisplayMessage {
+  const parsed = explicitTag ? { tag: explicitTag, content: promptText } : parseTaggedPrompt(promptText);
+  return {
+    role: 'system',
+    kind: 'question',
+    tag: parsed.tag,
+    content: parsed.content,
+  };
 }
 
 export function parseCommandArgs(rawArgs: string): string[] {
@@ -1682,6 +1784,38 @@ function formatEventPrefix(logEvent: ConductorLogEvent): string {
   return logEvent.scope === 'child'
     ? `[${logEvent.childSlug ?? '?'}] `
     : '';
+}
+
+function parseTaggedPrompt(promptText: string): { tag?: string; content: string } {
+  const match = promptText.match(/^\[([^\]]+)\]\s*(.*)$/);
+  if (!match) {
+    return { content: promptText };
+  }
+
+  return {
+    tag: match[1],
+    content: match[2] || promptText,
+  };
+}
+
+function sameDisplayMessage(left: DisplayMessage | undefined, right: DisplayMessage): boolean {
+  return !!left
+    && left.role === right.role
+    && left.kind === right.kind
+    && left.tag === right.tag
+    && left.content === right.content;
+}
+
+function formatSystemMessageHeader(entry: DisplayMessage, spinner: string): string {
+  const base = entry.kind === 'output'
+    ? 'Output'
+    : entry.kind === 'question'
+      ? 'Question'
+      : 'System';
+
+  return entry.tag
+    ? `[${base}: ${entry.tag}${spinner}]`
+    : `[${base}${spinner}]`;
 }
 
 function formatToolArgs(args: Record<string, unknown> | undefined): string {

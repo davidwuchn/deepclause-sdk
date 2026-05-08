@@ -800,6 +800,7 @@ describe('Output Events', () => {
       const outputs = events.filter(e => e.type === 'output');
       expect(outputs[0].content).toBe('30');
     });
+
   });
 });
 

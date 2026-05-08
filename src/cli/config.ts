@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { writeDefaultSkillSeeds } from './default-skills.js';
 import {
   DEFAULT_MODEL_IDS,
   DEFAULT_TEMPERATURES,
@@ -167,6 +168,8 @@ export async function initConfig(
 # !tools/*.dml
 `;
   await fs.writeFile(gitignorePath, gitignoreContent);
+
+  await writeDefaultSkillSeeds(toolsDir, initialModelId);
 }
 
 /**
@@ -445,6 +448,15 @@ function serializeConfig(config: Config): string {
 export async function configExists(workspaceRoot: string): Promise<boolean> {
   try {
     await fs.access(getConfigPath(workspaceRoot));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function deepClauseDirExists(workspaceRoot: string): Promise<boolean> {
+  try {
+    await fs.access(getConfigDir(workspaceRoot));
     return true;
   } catch {
     return false;

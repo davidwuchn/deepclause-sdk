@@ -6,7 +6,7 @@
  */
 
 import { Command } from 'commander';
-import { initConfig, setModel, showModel } from './config.js';
+import { deepClauseDirExists, initConfig, setModel, showModel } from './config.js';
 import { compile, compileAll } from './compile.js';
 import { run } from './run.js';
 import { listTools } from './tools.js';
@@ -329,6 +329,12 @@ async function main(): Promise<void> {
   const rootPrompt = readRootPrompt(argv);
   const rootSandbox = hasRootSandbox(argv);
 
+  if (requiresInitializedWorkspace(argv) && !await deepClauseDirExists(process.cwd())) {
+    console.warn('⚠️  No .deepclause directory found in this workspace.');
+    console.warn("   Run 'deepclause init' first.");
+    process.exit(1);
+  }
+
   if (rootPrompt && !hasSubcommand(argv)) {
     await runPromptHeadless(rootPrompt, process.cwd(), { sandbox: rootSandbox });
     return;
@@ -367,6 +373,19 @@ function readRootPrompt(argv: string[]): string | undefined {
 
 function hasRootSandbox(argv: string[]): boolean {
   return argv.includes('--sandbox');
+}
+
+function requiresInitializedWorkspace(argv: string[]): boolean {
+  if (argv.includes('-h') || argv.includes('--help') || argv.includes('-V') || argv.includes('--version')) {
+    return false;
+  }
+
+  const firstPositional = argv.find((arg) => !arg.startsWith('-'));
+  if (!firstPositional) {
+    return true;
+  }
+
+  return firstPositional !== 'init' && firstPositional !== 'help';
 }
 
 main().catch((error) => {

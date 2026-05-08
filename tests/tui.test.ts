@@ -37,6 +37,8 @@ import {
   completeSlashCommand,
   parseCommandArgs,
   parseSlashInput,
+  previewMessageFromEvent,
+  previewQuestionMessage,
   runPromptHeadless,
 } from '../src/cli/tui.js';
 
@@ -56,13 +58,50 @@ describe('LiveExecutionPrinter', () => {
     printer.handle({ scope: 'child', childSlug: 'research', event: { type: 'stream', content: 'Child', done: true } });
     printer.handle({ scope: 'main', event: { type: 'tool_call', toolName: 'web_search', toolArgs: { query: 'alpha' } } });
     printer.handle({ scope: 'child', childSlug: 'research', event: { type: 'output', content: 'done' } });
+    printer.handle({ scope: 'child', childSlug: 'research', event: { type: 'input_required', prompt: 'Need a date range?' } });
     printer.finish();
 
     expect(writes.join('')).toBe('llm Hello world\n[research] llm Child\n');
     expect(lines).toEqual([
       'tool web_search(query=alpha)',
       '[research] output done',
+      '[research] clarify Need a date range?',
     ]);
+  });
+});
+
+describe('previewMessageFromEvent', () => {
+  it('maps child output and questions into tagged message entries', () => {
+    expect(previewMessageFromEvent({
+      scope: 'child',
+      childSlug: 'research-search-reader',
+      event: { type: 'output', content: 'Gathering sources...' },
+    })).toEqual({
+      role: 'system',
+      kind: 'output',
+      tag: 'research-search-reader',
+      content: 'Gathering sources...',
+    });
+
+    expect(previewMessageFromEvent({
+      scope: 'child',
+      childSlug: 'research-search-reader',
+      event: { type: 'input_required', prompt: 'Which papers matter most?' },
+    })).toEqual({
+      role: 'system',
+      kind: 'question',
+      tag: 'research-search-reader',
+      content: 'Which papers matter most?',
+    });
+  });
+
+  it('parses tagged clarification prompts from callbacks', () => {
+    expect(previewQuestionMessage('[research-search-reader] Need a date range?')).toEqual({
+      role: 'system',
+      kind: 'question',
+      tag: 'research-search-reader',
+      content: 'Need a date range?',
+    });
   });
 });
 

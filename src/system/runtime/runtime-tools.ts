@@ -11,6 +11,8 @@ const BUILT_IN_RUNTIME_TOOLS = new Set([
   'web_search',
   'news_search',
   'url_fetch',
+  'list_skills',
+  'run_skill',
 ]);
 
 const INTERNAL_TOOLS = new Set(['ask_user', 'finish', 'set_result', 'store']);
@@ -47,6 +49,10 @@ export function registerLocalRuntimeTools(
     workspacePath: string;
     shell: ShellManager;
     signal?: AbortSignal;
+    skillCatalog?: {
+      listSkills: () => Promise<unknown>;
+      runSkill: (args: Record<string, unknown>) => Promise<unknown>;
+    };
   },
 ): void {
   sdk.registerTool('web_search', {
@@ -124,6 +130,30 @@ export function registerLocalRuntimeTools(
     },
     execute: async (args) => options.shell.exec(String(args.command ?? args.arg1 ?? ''), options.signal),
   });
+
+  if (options.skillCatalog) {
+    sdk.registerTool('list_skills', {
+      description: 'List available local skills from the current workspace catalog.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async () => options.skillCatalog?.listSkills(),
+    });
+
+    sdk.registerTool('run_skill', {
+      description: 'Run a local compiled skill from the current workspace catalog.',
+      parameters: {
+        type: 'object',
+        properties: {
+          slug: { type: 'string', description: 'Skill slug from the local tools directory.' },
+          args: { type: 'array', description: 'Optional array of string arguments.' },
+        },
+        required: ['slug'],
+      },
+      execute: async (args) => options.skillCatalog?.runSkill(args),
+    });
+  }
 }
 
 export async function urlFetch(

@@ -10,7 +10,6 @@ import {
   type Config,
 } from '../../cli/config.js';
 import { promptUser } from '../../cli/interactive.js';
-import { run } from '../../cli/run.js';
 import type { DMLEvent, DeepClauseSDK } from '../../types.js';
 import { readSystemPromptAsset, readSystemSkillAsset } from '../assets/index.js';
 import { executeDml, type DmlExecutionContext } from './dml-executor.js';
@@ -216,6 +215,16 @@ export async function runConductorTurn(
     signal: options.signal,
     onUserInput,
     initialMessages: session.messages,
+    skillCatalog: {
+      workspaceRoot,
+      currentSkillSlug: '_conductor',
+      onChildEvent: (childSlug, event) => emitLogEvent({
+        scope: 'child',
+        childSlug,
+        modelId: gatewaySelection.id,
+        event,
+      }),
+    },
     onEvent: (event) => emitLogEvent({ scope: 'main', modelId: gatewaySelection.id, event }),
     registerAdditionalTools: async (sdk, context) => registerConductorTools(sdk, context, {
       workspaceRoot,
@@ -278,30 +287,6 @@ async function registerConductorTools(
     onEvent?: (event: ConductorLogEvent) => void;
   },
 ): Promise<void> {
-  sdk.registerTool('run_skill', {
-    description: 'Run an existing local CLI skill from the .deepclause/tools catalog.',
-    parameters: {
-      type: 'object',
-      properties: {
-        slug: { type: 'string', description: 'Skill slug from the local tools directory.' },
-        args: { type: 'array', description: 'Optional array of string arguments.' },
-      },
-      required: ['slug'],
-    },
-    execute: async (args) => runCatalogSkill(
-      options.workspaceRoot,
-      options.workspacePath,
-      options.runSelection.id,
-      options.stream,
-      options.verbose,
-      options.sandbox,
-      options.signal,
-      options.onUserInput,
-      options.onEvent,
-      args,
-    ),
-  });
-
   sdk.registerTool('create_skill', {
     description: 'Create and publish a new local CLI skill into .deepclause/tools.',
     parameters: {
@@ -338,49 +323,6 @@ async function registerConductorTools(
     },
     execute: async (args) => updateTaskMemory(options.session.paths.taskMemoryPath, String(args.content ?? '')),
   });
-}
-
-async function runCatalogSkill(
-  workspaceRoot: string,
-  workspacePath: string,
-  modelId: string,
-  stream: boolean,
-  verbose: boolean | undefined,
-  sandbox: boolean,
-  signal: AbortSignal | undefined,
-  onUserInput: (prompt: string) => Promise<string>,
-  onEvent: ((event: ConductorLogEvent) => void) | undefined,
-  args: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  const slug = String(args.slug ?? '');
-  if (!slug) {
-    throw new Error('slug is required');
-  }
-  if (slug === 'conductor' || slug === '_conductor') {
-    throw new Error('run_skill cannot recursively invoke the conductor');
-  }
-
-  const skillPath = path.join(getToolsDir(workspaceRoot), slug);
-  const skillArgs = normalizeStringArray(args.args);
-  const result = await run(skillPath, skillArgs, {
-    configRoot: workspaceRoot,
-    workspace: workspacePath,
-    headless: true,
-    stream,
-    verbose,
-    model: modelId,
-    sandbox,
-    signal,
-    onUserInput,
-    onEvent: (event) => onEvent?.({ scope: 'child', childSlug: slug, modelId, event }),
-  });
-
-  return {
-    success: !result.error,
-    answer: result.answer,
-    output: result.output,
-    error: result.error,
-  };
 }
 
 async function createLocalSkill(options: {
@@ -617,24 +559,6 @@ async function maybeUpdateSessionTitle(workspaceRoot: string, metadata: SessionM
   metadata.title = nextTitle;
   metadata.updatedAt = new Date().toISOString();
   await fs.writeFile(paths.metadataPath, JSON.stringify(metadata, null, 2) + '\n', 'utf8');
-}
-
-function normalizeStringArray(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value.map((entry) => String(entry));
-  }
-  if (typeof value === 'string' && value.trim()) {
-    try {
-      const parsed = JSON.parse(value);
-      if (Array.isArray(parsed)) {
-        return parsed.map((entry) => String(entry));
-      }
-    } catch {
-      return [value];
-    }
-    return [value];
-  }
-  return [];
 }
 
 function deriveSkillSlug(spec: string): string {

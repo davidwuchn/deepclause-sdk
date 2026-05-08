@@ -517,6 +517,11 @@ export class DMLRunner {
             return { error: 'No prompt provided to ask_user' };
           }
           try {
+            streamQueue.push({ type: 'input_required', prompt });
+            if (streamResolve) {
+              streamResolve();
+              streamResolve = null;
+            }
             const response = await options.onInputRequired(prompt);
             return { user_response: response };
           } catch (err) {

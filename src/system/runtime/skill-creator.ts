@@ -9,7 +9,9 @@ import type { Config } from '../../cli/config.js';
 import type { MetaFile } from '../../cli/compile.js';
 import type { ResolvedModelConfig } from '../config/model-slots.js';
 import { readSystemPromptAsset, readSystemSkillAsset } from '../assets/index.js';
+import { listLocalSkillCatalog } from './catalog-skills.js';
 import { withCapturedConsole } from './console-capture.js';
+import { executeDml } from './dml-executor.js';
 import { createShellManager, type ShellManager } from './shell-manager.js';
 import { recordTokenUsage, type TokenUsageByModel } from './token-usage.js';
 
@@ -48,6 +50,7 @@ export interface SkillCreatorCompileResult {
 }
 
 const CREATOR_TOOL_CATALOG = [
+  { name: 'list_skills', description: 'List reusable local CLI skills that the new skill could compose.' },
   { name: 'web_search', description: 'Search the web for information.' },
   { name: 'news_search', description: 'Search recent news articles.' },
   { name: 'url_fetch', description: 'Fetch a URL and return its content.' },
@@ -111,14 +114,17 @@ async function compileWithSkillCreatorInternal(
       markdown,
       outputDir,
       baseName: options.baseName,
+      workspaceRoot: path.resolve(options.workspaceRoot ?? workspacePath),
       workspacePath,
       shell,
+      config: options.config,
       compileSelection: options.compileSelection,
       runSelection: options.runSelection,
       validateOnly: options.validateOnly ?? false,
       onPublish: (result) => {
         published = result;
       },
+      sandbox: options.sandbox,
       signal: options.signal,
     });
 
@@ -195,15 +201,27 @@ function registerSkillCreatorTools(
     markdown: string;
     outputDir: string;
     baseName: string;
+    workspaceRoot: string;
     workspacePath: string;
     shell: ShellManager;
+    config: Config;
     compileSelection: ResolvedModelConfig;
     runSelection: ResolvedModelConfig;
     validateOnly: boolean;
     onPublish: (result: PublishResult) => void;
+    sandbox?: boolean;
     signal?: AbortSignal;
   },
 ): void {
+  sdk.registerTool('list_skills', {
+    description: 'List reusable local CLI skills from the current workspace catalog.',
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+    execute: async () => listLocalSkillCatalog(context.workspaceRoot, { detailed: true }),
+  });
+
   sdk.registerTool('web_search', {
     description: 'Search the web for information.',
     parameters: {
@@ -372,8 +390,8 @@ async function buildSkillCreatorSystemPrompt(
 
 ## Your Workflow
 1. **Understand**: Read the specification carefully. If anything is unclear, use ask_user to ask for clarification.
-2. **Research**: If the skill needs external APIs or domain knowledge, use search.
-3. **Plan**: Create a step-by-step plan for the DML program.
+2. **Research**: If the skill needs external APIs or domain knowledge, use search. If an existing local skill might already cover part of the task, call list_skills before re-implementing it.
+3. **Plan**: Create a step-by-step plan for the DML program, including any local skill reuse.
 4. **Prepare environment**: Use bash to install ALL packages the skill will need (pip install, apt-get install, npm install). Do this BEFORE writing any DML code. The skill itself must NOT install packages.
 5. **Write**: Use write_file(path='my-skill.dml', content='...') to create or overwrite the DML file.
 6. **Validate**: Use validate_dml(dml_file='my-skill.dml') and fix errors by rewriting the file.
@@ -382,6 +400,11 @@ async function buildSkillCreatorSystemPrompt(
 
 ## File-Based DML Only
 validate_dml, test_dml, and deploy_skill only accept file paths. Write the DML to disk first.
+
+## Reusing Existing Skills
+- Call list_skills when the requested functionality overlaps with an existing local skill.
+- Prefer narrow wrapper tool predicates that internally call exec(run_skill(...)) for one specific child skill.
+- Do NOT expose a generic tool(run_skill(...)) predicate unless the user explicitly asked for a router or orchestration skill.
 
 ${runtimeSection}${attemptSection}`;
 }
@@ -445,10 +468,13 @@ async function validateWorkspaceDml(
 
 async function runLocalTestDml(
   context: {
+    workspaceRoot: string;
     workspacePath: string;
-    shell: ShellManager;
+    config: Config;
     compileSelection: ResolvedModelConfig;
     runSelection: ResolvedModelConfig;
+    sandbox?: boolean;
+    signal?: AbortSignal;
   },
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
@@ -467,123 +493,38 @@ async function runLocalTestDml(
     testArgs = [String(args.test_input ?? 'test')];
   }
 
-  const sdk = await createDeepClause({
-    model: context.runSelection.model,
-    provider: context.runSelection.provider,
-    apiKey: context.runSelection.apiKey,
-    baseUrl: context.runSelection.baseUrl,
-    temperature: context.runSelection.temperature,
-    debug: false,
+  const result = await executeDml({
+    dmlCode,
+    config: context.config,
+    workspacePath: context.workspacePath,
+    selection: context.runSelection,
+    args: testArgs,
+    gasLimit: 120,
+    headless: true,
+    stream: false,
     trace: true,
-    streaming: false,
-    maxTokens: 65536,
-  });
-
-  try {
-    registerGeneralRuntimeTools(sdk, context.workspacePath, context.shell);
-
-    const outputs: string[] = [];
-    const errors: string[] = [];
-    const trace: unknown[] = [];
-    const toolCalls: Array<{ tool: string; args?: unknown }> = [];
-    let answer = '';
-
-    for await (const event of sdk.runDML(dmlCode, {
-      args: testArgs,
-      workspacePath: context.workspacePath,
-      gasLimit: 120,
-      onUserInput: async () => '(simulated test input - no interactive user during test_dml)',
-    })) {
-      if (event.type === 'output' && event.content) {
-        outputs.push(event.content);
-      }
-      if (event.type === 'error' && event.content) {
-        errors.push(event.content);
-      }
-      if (event.type === 'answer' && event.content) {
-        answer = event.content;
-      }
-      if (event.type === 'tool_call') {
-        toolCalls.push({ tool: event.toolName ?? '?', args: event.toolArgs });
-      }
-      if (event.type === 'finished' && event.trace) {
-        trace.push(...event.trace);
-      }
-    }
-
-    return {
-      success: errors.length === 0 && answer.length > 0,
-      status: errors.length > 0 ? 'error' : (answer ? 'ok' : 'completed_no_answer'),
-      answer: answer || undefined,
-      outputs: outputs.length > 0 ? outputs : undefined,
-      errors: errors.length > 0 ? errors : undefined,
-      trace: trace.length > 0 ? trace : undefined,
-      tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-    };
-  } finally {
-    await sdk.dispose();
-  }
-}
-
-function registerGeneralRuntimeTools(
-  sdk: DeepClauseSDK,
-  workspacePath: string,
-  shell: ShellManager,
-  signal?: AbortSignal,
-): void {
-  sdk.registerTool('web_search', {
-    description: 'Search the web for information.',
-    parameters: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Search query.' },
-        count: { type: 'number', description: 'Maximum result count.' },
-      },
-      required: ['query'],
+    sandbox: context.sandbox,
+    signal: context.signal,
+    onUserInput: async () => '(simulated test input - no interactive user during test_dml)',
+    skillCatalog: {
+      workspaceRoot: context.workspaceRoot,
     },
-    execute: async (args) => webSearch({
-      query: String(args.query ?? ''),
-      count: typeof args.count === 'number' ? args.count : 10,
-      signal,
-    }),
   });
 
-  sdk.registerTool('news_search', {
-    description: 'Search recent news.',
-    parameters: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Search query.' },
-      },
-      required: ['query'],
-    },
-    execute: async (args) => newsSearch({ query: String(args.query ?? ''), count: 10, signal }),
-  });
+  const toolCalls = result.events
+    .filter((event) => event.type === 'tool_call')
+    .map((event) => ({ tool: event.toolName ?? '?', args: event.toolArgs }));
+  const trace = Array.isArray(result.trace) ? result.trace : undefined;
 
-  sdk.registerTool('url_fetch', {
-    description: 'Fetch a URL or save it to a workspace file.',
-    parameters: {
-      type: 'object',
-      properties: {
-        url: { type: 'string', description: 'Absolute URL to fetch.' },
-        save_to: { type: 'string', description: 'Optional file path inside the workspace.' },
-      },
-      required: ['url'],
-    },
-    execute: async (args) => urlFetch(workspacePath, args, signal),
-  });
-
-  sdk.registerTool('bash', {
-    description: 'Run a shell command in the active workspace shell.',
-    parameters: {
-      type: 'object',
-      properties: {
-        command: { type: 'string', description: 'Shell command to execute.' },
-      },
-      required: ['command'],
-    },
-    execute: async (args) => shell.exec(String(args.command ?? ''), signal),
-  });
+  return {
+    success: !result.error && !!result.answer,
+    status: result.error ? 'error' : (result.answer ? 'ok' : 'completed_no_answer'),
+    answer: result.answer || undefined,
+    outputs: result.output.length > 0 ? result.output : undefined,
+    errors: result.error ? [result.error] : undefined,
+    trace,
+    tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+  };
 }
 
 async function publishSkill(

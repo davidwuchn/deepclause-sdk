@@ -402,6 +402,20 @@ DO NOT use Python for: simple file writing - use Prolog open/3, write/2, close/1
 DO NOT use Prolog for: complex data analysis - use Python via bash.
 </when_to_use_what>
 
+<skill_reuse>
+REUSING EXISTING SKILLS
+
+- Call list_skills when the requested behavior may overlap with an existing local skill.
+- Prefer narrow wrapper predicates that internally call exec(run_skill(...)) for one specific child skill.
+- Do NOT expose a generic tool(run_skill(...)) predicate unless the user explicitly asked for a router or orchestration skill.
+
+EXAMPLE WRAPPER:
+  tool(search_arxiv_via_skill(Query, Result),
+       "Search arXiv by delegating to the existing search-arxiv skill.") :-
+      exec(run_skill(slug: "search-arxiv", args: [Query]), Raw),
+      get_dict(answer, Raw, Result).
+</skill_reuse>
+
 <runtime_environment>
 RUNTIME ENVIRONMENT - the skill runs inside the active DeepClause runtime shell.
 

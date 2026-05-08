@@ -2,6 +2,10 @@ import { createDeepClause } from '../../sdk.js';
 import type { Config } from '../../cli/config.js';
 import { applyResolvedModelConfig } from '../../cli/config.js';
 import type { DMLEvent, DeepClauseSDK } from '../../types.js';
+import {
+  createLocalSkillCatalogRuntime,
+  type ExecuteNestedSkillRequest,
+} from './catalog-skills.js';
 import type { ResolvedModelConfig } from '../config/model-slots.js';
 import { withCapturedConsole } from './console-capture.js';
 import { registerLocalRuntimeTools } from './runtime-tools.js';
@@ -31,6 +35,14 @@ export interface ExecuteDmlOptions {
   onUserInput?: (prompt: string) => Promise<string>;
   initialMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
   onEvent?: (event: DMLEvent) => void;
+  skillCatalog?: {
+    workspaceRoot: string;
+    currentSkillSlug?: string;
+    invocationStack?: string[];
+    maxDepth?: number;
+    includeSystemSkillsInList?: boolean;
+    onChildEvent?: (slug: string, event: DMLEvent) => void;
+  };
   registerAdditionalTools?: (sdk: DeepClauseSDK, context: DmlExecutionContext) => Promise<void> | void;
 }
 
@@ -83,10 +95,25 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
   };
 
   try {
+    const skillCatalog = options.skillCatalog
+      ? createLocalSkillCatalogRuntime({
+        workspaceRoot: options.skillCatalog.workspaceRoot,
+        workspacePath: options.workspacePath,
+        config: options.config,
+        selection: options.selection,
+        currentSkillSlug: options.skillCatalog.currentSkillSlug,
+        invocationStack: options.skillCatalog.invocationStack,
+        maxDepth: options.skillCatalog.maxDepth,
+        includeSystemSkillsInList: options.skillCatalog.includeSystemSkillsInList,
+        executeNestedSkill: (child) => executeNestedSkill(options, child),
+      })
+      : undefined;
+
     registerLocalRuntimeTools(sdk, {
       workspacePath: options.workspacePath,
       shell,
       signal: options.signal,
+      skillCatalog,
     });
 
     await options.registerAdditionalTools?.(sdk, {
@@ -180,6 +207,43 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
     await sdk.dispose();
     await shell.dispose();
   }
+}
+
+function executeNestedSkill(
+  parentOptions: ExecuteDmlOptions,
+  child: ExecuteNestedSkillRequest,
+): Promise<ExecuteDmlResult> {
+  return executeDml({
+    dmlCode: child.dmlCode,
+    config: parentOptions.config,
+    workspacePath: parentOptions.workspacePath,
+    selection: parentOptions.selection,
+    args: child.args,
+    params: child.params,
+    gasLimit: parentOptions.gasLimit,
+    stream: parentOptions.stream,
+    trace: parentOptions.trace,
+    verbose: parentOptions.verbose,
+    headless: true,
+    sandbox: parentOptions.sandbox,
+    signal: parentOptions.signal,
+    onUserInput: parentOptions.onUserInput
+      ? (prompt) => parentOptions.onUserInput!(`[${child.slug}] ${prompt}`)
+      : undefined,
+    onEvent: parentOptions.skillCatalog?.onChildEvent
+      ? (event) => parentOptions.skillCatalog?.onChildEvent?.(child.slug, event)
+      : undefined,
+    skillCatalog: parentOptions.skillCatalog
+      ? {
+        workspaceRoot: parentOptions.skillCatalog.workspaceRoot,
+        currentSkillSlug: child.currentSkillSlug,
+        invocationStack: child.invocationStack,
+        maxDepth: parentOptions.skillCatalog.maxDepth,
+        includeSystemSkillsInList: parentOptions.skillCatalog.includeSystemSkillsInList,
+        onChildEvent: parentOptions.skillCatalog.onChildEvent,
+      }
+      : undefined,
+  });
 }
 
 function formatToolArgs(args: Record<string, unknown> | undefined): string {

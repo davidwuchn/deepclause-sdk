@@ -9,6 +9,7 @@ import * as path from 'path';
 import {
   applyResolvedModelConfig,
   buildModelOverride,
+  getToolsDir,
   loadConfig,
   resolveModelSlot,
   type Provider,
@@ -18,6 +19,7 @@ import { promptUser } from './interactive.js';
 import { compilePrompt } from './compile.js';
 import type { DMLEvent } from '../types.js';
 import { executeDml } from '../system/runtime/dml-executor.js';
+import { buildDmlParams } from '../system/runtime/dml-params.js';
 import { verifyRuntimeToolsAvailable } from '../system/runtime/runtime-tools.js';
 
 // =============================================================================
@@ -42,6 +44,7 @@ export interface RunOptions {
   prompt?: string;
   onUserInput?: (prompt: string) => Promise<string>;
   onEvent?: (event: DMLEvent) => void;
+  onChildEvent?: (childSlug: string, event: DMLEvent) => void;
 }
 
 export interface RunResult {
@@ -149,7 +152,7 @@ export async function run(
 
   // Dry run mode - show what would be executed
   if (options.dryRun) {
-    const params = buildParams(args, options.params, meta);
+    const params = buildDmlParams(args, options.params, meta);
     return {
       output: [],
       dryRun: true,
@@ -167,7 +170,8 @@ export async function run(
   }
 
   // Build params from args and options
-  const params = buildParams(args, options.params, meta);
+  const params = buildDmlParams(args, options.params, meta);
+  const currentSkillSlug = absolutePath ? resolveCatalogSkillSlug(configRoot, absolutePath) : undefined;
 
   const result = await executeDml({
     dmlCode,
@@ -184,6 +188,11 @@ export async function run(
     sandbox: options.sandbox,
     signal: options.signal,
     onEvent: options.onEvent,
+    skillCatalog: {
+      workspaceRoot: configRoot,
+      currentSkillSlug,
+      onChildEvent: options.onChildEvent,
+    },
     onUserInput: options.onUserInput ?? (options.headless
       ? async () => ''
       : promptUser),
@@ -200,78 +209,6 @@ export async function run(
   return result;
 }
 
-// =============================================================================
-// Parameter Building
-// =============================================================================
-
-/**
- * Build params dict from positional args, named params, and meta info
- */
-function buildParams(
-  args: string[],
-  namedParams: Record<string, string> | undefined,
-  meta: MetaFile | null
-): Record<string, unknown> {
-  const params: Record<string, unknown> = {};
-
-  // Always store raw args for fallback (use 'args' not '_args' - underscore is special in Prolog)
-  if (args.length > 0) {
-    params['args'] = args.map(parseArgValue);
-  }
-
-  // If we have meta info with parameters, map positional args by name
-  if (meta?.parameters && args.length > 0) {
-    // Parameters are sorted by position in meta
-    const sortedParams = [...meta.parameters].sort((a, b) => a.position - b.position);
-    
-    for (let i = 0; i < args.length && i < sortedParams.length; i++) {
-      const param = sortedParams[i];
-      params[param.name] = parseArgValue(args[i]);
-    }
-    
-    // If more args than meta params, add them with generic names
-    for (let i = sortedParams.length; i < args.length; i++) {
-      params[`arg${i + 1}`] = parseArgValue(args[i]);
-    }
-  }
-
-  // Add named params (override positional)
-  if (namedParams) {
-    for (const [key, value] of Object.entries(namedParams)) {
-      params[key] = parseArgValue(value);
-    }
-  }
-
-  return params;
-}
-
-/**
- * Parse argument value - try to convert to appropriate type
- */
-function parseArgValue(value: string): unknown {
-  // Try number
-  const num = Number(value);
-  if (!isNaN(num) && value.trim() !== '') {
-    return num;
-  }
-
-  // Try boolean
-  if (value.toLowerCase() === 'true') return true;
-  if (value.toLowerCase() === 'false') return false;
-
-  // Try JSON
-  if ((value.startsWith('{') && value.endsWith('}')) ||
-      (value.startsWith('[') && value.endsWith(']'))) {
-    try {
-      return JSON.parse(value);
-    } catch {
-      // Not valid JSON, return as string
-    }
-  }
-
-  return value;
-}
-
 async function resolveDmlPath(file: string, configRoot: string): Promise<string> {
   const candidate = path.resolve(configRoot, file);
   if (await fileExists(candidate)) {
@@ -281,6 +218,15 @@ async function resolveDmlPath(file: string, configRoot: string): Promise<string>
     return `${candidate}.dml`;
   }
   return candidate;
+}
+
+function resolveCatalogSkillSlug(configRoot: string, absolutePath: string): string | undefined {
+  const toolsDir = path.resolve(getToolsDir(configRoot));
+  const fileDir = path.dirname(path.resolve(absolutePath));
+  if (fileDir !== toolsDir) {
+    return undefined;
+  }
+  return path.basename(absolutePath, '.dml');
 }
 
 async function fileExists(filePath: string): Promise<boolean> {

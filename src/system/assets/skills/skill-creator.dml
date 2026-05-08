@@ -34,6 +34,10 @@ tool(fetch(Url, Content),
     exec(url_fetch(url: Url), Result),
     get_dict(body, Result, Content).
 
+tool(list_skills(Skills),
+    "List reusable local skills in the current workspace catalog. Use this before re-implementing a capability that might already exist.") :-
+    exec(list_skills(), Skills).
+
 tool(shell(Command, Result),
      "Run a shell command on the VM. Returns dict with: success (boolean), stdout (string), stderr (string), exitCode (integer), summary (string). Use for package installation, environment checks, and helper script creation/testing. Always check the 'success' field.") :-
     exec(bash(command: Command), Result).
@@ -73,7 +77,7 @@ agent_main(SpecMarkdown) :-
     % -- Phase 1: Understand & Research --------------------------------------
     output("Phase 1/4: Understanding requirements and researching dependencies..."),
     format(string(ResearchTask),
-        "You are starting to build a DML skill from the specification below.\n\nYour job in this phase:\n1. Read the specification carefully. If anything is ambiguous or missing, use ask_user to clarify before proceeding.\n2. Identify all external dependencies (Python packages, Node modules, system tools, APIs, CLI tools).\n3. For each dependency, use search or fetch to look up installation instructions, API docs, or usage examples if you are not already familiar with them.\n4. Summarise: what the skill does, its inputs/outputs, all dependencies found, and any tricky parts.\n\nSpecification:\n---\n~w\n---\n\nStore your findings in ResearchSummary.",
+        "You are starting to build a DML skill from the specification below.\n\nYour job in this phase:\n1. Read the specification carefully. If anything is ambiguous or missing, use ask_user to clarify before proceeding.\n2. Call list_skills if an existing local skill might already cover part of the requested functionality.\n3. Identify all external dependencies (Python packages, Node modules, system tools, APIs, CLI tools).\n4. For each dependency, use search or fetch to look up installation instructions, API docs, or usage examples if you are not already familiar with them.\n5. Summarise: what the skill does, whether any existing skills should be reused, its inputs/outputs, all dependencies found, and any tricky parts.\n\nSpecification:\n---\n~w\n---\n\nStore your findings in ResearchSummary.",
         [SpecMarkdown]),
     task(ResearchTask, string(ResearchSummary)),
     output(ResearchSummary),
@@ -89,7 +93,7 @@ agent_main(SpecMarkdown) :-
     % -- Phase 3: Implement, Validate, Test ----------------------------------
     output("Phase 3/4: Writing DML, validating, and testing..."),
     format(string(ImplTask),
-        "Write, validate, and test the DML skill.\n\nBackground:\n- Research: ~w\n- Environment: ~w\n- Original specification: ~w\n\nYour job in this phase:\n1. Write a complete DML implementation plan (tool definitions, agent_main structure, fallback clause).\n2. Write the full DML code to a .dml file using write(). NEVER use bash heredocs for DML - they mangle backslashes and special Prolog characters. NEVER pass DML as an inline string to validate or test_run.\n3. Call validate('my-skill.dml') - if there are syntax errors, fix the code using write() and re-validate until valid.\n4. Call test_run('my-skill.dml', ...) with a realistic test input - if it fails, analyse the error/trace, fix the code with write(), and re-test until passing.\n5. Keep iterating on validate -> test until the skill works correctly.\n\nStore the final .dml file path in FinalDML.",
+        "Write, validate, and test the DML skill.\n\nBackground:\n- Research: ~w\n- Environment: ~w\n- Original specification: ~w\n\nYour job in this phase:\n1. Write a complete DML implementation plan (tool definitions, agent_main structure, fallback clause).\n2. If you reuse an existing local skill, prefer a narrow wrapper tool predicate that internally calls exec(run_skill(...)) for that specific child skill. Do NOT expose a generic tool(run_skill(...)) predicate unless the user explicitly asked for an orchestration skill.\n3. Write the full DML code to a .dml file using write(). NEVER use bash heredocs for DML - they mangle backslashes and special Prolog characters. NEVER pass DML as an inline string to validate or test_run.\n4. Call validate('my-skill.dml') - if there are syntax errors, fix the code using write() and re-validate until valid.\n5. Call test_run('my-skill.dml', ...) with a realistic test input - if it fails, analyse the error/trace, fix the code with write(), and re-test until passing.\n6. Keep iterating on validate -> test until the skill works correctly.\n\nStore the final .dml file path in FinalDML.",
         [ResearchSummary, EnvSummary, SpecMarkdown]),
     task(ImplTask, string(FinalDML)),
     output("✅ DML implementation ready."),
