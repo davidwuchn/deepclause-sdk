@@ -16,14 +16,15 @@ DeepClause takes a different approach: **compile task descriptions into DML prog
 Markdown description  →  compile  →  Logic program  →  run  →  Output
 ```
 
-## Sandboxed by Default
+## Runtime Model
 
-Everything runs in WebAssembly—no native code execution, no container setup required:
+DeepClause executes DML in a local CLI runtime:
 
-- **[AgentVM](https://github.com/deepclause/agentvm)**: A lightweight WASM-based Linux environment for shell commands, file operations, and Python/Node execution
-- **Prolog runtime**: The logic engine itself runs in WASM (SWI-Prolog compiled to WebAssembly)
+- **Prolog runtime in WASM**: The DML logic engine runs in SWI-Prolog compiled to WebAssembly.
+- **Host shell by default**: Shell tools run in the active local workspace shell.
+- **AgentVM on demand**: Pass `--sandbox` when you want shell tools to run inside [AgentVM](https://github.com/deepclause/agentvm) instead.
 
-This means that DML tools and agents can execute arbitrary shell commands with minimal chance of escaping to your host system.
+This keeps the default workflow simple for local development while still supporting an isolated shell backend when needed.
 
 ## Beyond Markdown: Why Logic Programming?
 
@@ -99,8 +100,11 @@ export OPENAI_API_KEY="sk-..."
 # Initialize in your project
 deepclause init
 
-# Configure the model for compilation
-deepclause set-model openai/gpt-4o
+# Configure all model slots
+deepclause set-model openai:gpt-4o
+
+# Start the interactive conductor TUI
+deepclause
 
 # Create a task description
 cat > .deepclause/tools/explain.md << 'EOF'
@@ -122,7 +126,21 @@ deepclause compile .deepclause/tools/explain.md
 
 # Run it
 deepclause run .deepclause/tools/explain.dml "function fib(n) { return n < 2 ? n : fib(n-1) + fib(n-2) }"
+
+# Or run the conductor headlessly for a single prompt
+deepclause -p "Summarize the repository architecture"
 ```
+
+## CLI Modes
+
+`deepclause` with no subcommand starts the fullscreen conductor TUI.
+
+- Session list on the left
+- Messages in the center
+- Execution log and context summary on the right
+- Slash commands such as `/new`, `/sessions`, `/cancel`, and `/<skill> [args]`
+
+For non-interactive use, `deepclause -p "..."` runs a single headless conductor turn with a fresh session.
 
 ## Use Cases
 
@@ -233,10 +251,14 @@ Skills can use these built-in tools:
 |------|-------------|
 | `web_search` | Search the web (requires `BRAVE_API_KEY`) |
 | `news_search` | Search recent news |
-| `vm_exec` | Run shell commands in a sandbox |
+| `url_fetch` | Fetch a URL or save it into the workspace |
+| `bash` | Run shell commands in the active workspace shell |
+| `vm_exec` | Alias of `bash`; with `--sandbox`, runs in AgentVM |
 | `ask_user` | Prompt the user for input |
 
-Configure tools in `.deepclause/config.json`.
+Additional tools can come from configured MCP servers.
+
+Configure runtime behavior in `.deepclause/config.json`.
 
 MCP support is on the roadmap.
 
@@ -247,19 +269,23 @@ deepclause init                    # Set up .deepclause/ folder
 deepclause compile <file.md>       # Compile Markdown to DML
 deepclause compile-all <dir>       # Compile all .md files in directory
 deepclause run <file.dml> [args]   # Execute a compiled skill
+deepclause                         # Start the interactive conductor TUI
+deepclause -p <text>               # Run one headless conductor turn
 deepclause list-commands           # List available compiled skills
 deepclause list-tools              # Show available tools
-deepclause set-model <model>       # Change default model
+deepclause show-model              # Show gateway/run/compile slots
+deepclause set-model <model>       # Change all slots or one slot with --slot
 ```
 
 ### Run Options
 
 ```bash
 deepclause run skill.dml "input" \
-  --model google/gemini-2.5-flash \   # Override model (e.g. use cheaper model for execution, SOTA model for planning/compilation)
+    --model google/gemini-2.5-flash \   # Override the run model for this execution
   --stream \                           # Stream output
   --verbose \                          # Show tool calls
-  --workspace ./data                   # Set working directory
+    --workspace ./data \                 # Set working directory
+    --sandbox                            # Use AgentVM instead of the local shell
 ```
 
 ## Configuration
@@ -267,26 +293,52 @@ deepclause run skill.dml "input" \
 `.deepclause/config.json`:
 ```json
 {
-  "model": "gpt-4o",
-  "provider": "openai",
+    "models": {
+        "gateway": "openai:gpt-4o",
+        "run": "openai:gpt-4o",
+        "compile": "openai:gpt-4o"
+    },
+    "temperatures": {
+        "gateway": 0.7,
+        "run": 0.7,
+        "compile": 0.4
+    },
   "agentvm": { "network": true }
 }
 ```
 
+### System Overrides
+
+If you place system DML files in `.deepclause/system`, the CLI runtime will prefer them over the packaged defaults.
+
+- `.deepclause/system/conductor.dml`
+- `.deepclause/system/skill-creator.dml`
+
 ### Model at Compile Time vs Run Time
 
-The model specified in `config.json` (or via `--model`) is used during **compilation** to generate the DML program. At **run time**, you can use a different model:
+DeepClause separates model selection into three slots:
+
+- `gateway`: conductor and orchestration turns
+- `run`: compiled skill execution
+- `compile`: skill compilation
+
+At execution time, you can still override the run model for a single command:
 
 ```bash
-# Compile with GPT-4o (better at understanding intent)
-deepclause set-model openai/gpt-4o
+# Set all slots
+deepclause set-model openai:gpt-4o
+
+# Or tune a single slot
+deepclause set-model anthropic:claude-sonnet-4-20250514 --slot compile
+
+# Compile with the compile slot
 deepclause compile research.md
 
-# Run with a faster/cheaper model
+# Run with a different one-off model override
 deepclause run research.dml "quantum computing" --model google/gemini-2.5-flash
 ```
 
-This lets you use a more capable model for the one-time compilation step, then execute with a faster or cheaper model for repeated runs.
+This lets you keep different defaults for orchestration, skill execution, and compilation without constantly editing prompts or code.
 
 ### Supported Models
 
