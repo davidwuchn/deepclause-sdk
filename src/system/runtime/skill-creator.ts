@@ -100,7 +100,7 @@ async function compileWithSkillCreatorInternal(
     temperature: options.compileSelection.temperature,
     debug: options.verbose,
     trace: options.verbose,
-    streaming: false,
+    streaming: !!options.onEvent,
     maxTokens: 65536,
   });
 
@@ -126,6 +126,7 @@ async function compileWithSkillCreatorInternal(
       },
       sandbox: options.sandbox,
       signal: options.signal,
+        onEvent: options.onEvent,
     });
 
     const skillCreatorDml = await readSystemSkillAsset('skill-creator', {
@@ -211,6 +212,7 @@ function registerSkillCreatorTools(
     onPublish: (result: PublishResult) => void;
     sandbox?: boolean;
     signal?: AbortSignal;
+    onEvent?: (event: DMLEvent) => void;
   },
 ): void {
   sdk.registerTool('list_skills', {
@@ -475,6 +477,7 @@ async function runLocalTestDml(
     runSelection: ResolvedModelConfig;
     sandbox?: boolean;
     signal?: AbortSignal;
+    onEvent?: (event: DMLEvent) => void;
   },
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
@@ -505,6 +508,7 @@ async function runLocalTestDml(
     trace: true,
     sandbox: context.sandbox,
     signal: context.signal,
+    onEvent: context.onEvent,
     onUserInput: async () => '(simulated test input - no interactive user during test_dml)',
     skillCatalog: {
       workspaceRoot: context.workspaceRoot,

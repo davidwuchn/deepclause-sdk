@@ -48,4 +48,11 @@ describe('system skill assets', () => {
 
     expect(content).toBe(packaged);
   });
+
+  it('uses atom syntax for zero-argument list_skills exec calls in the packaged skill creator', async () => {
+    const content = await readSystemSkillAsset('skill-creator');
+
+    expect(content).toContain('exec(list_skills, Skills).');
+    expect(content).not.toContain('exec(list_skills(), Skills).');
+  });
 });

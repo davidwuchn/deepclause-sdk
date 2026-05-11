@@ -325,7 +325,7 @@ async function registerConductorTools(
   });
 }
 
-async function createLocalSkill(options: {
+export async function createLocalSkill(options: {
   spec: string;
   workspaceRoot: string;
   workspacePath: string;

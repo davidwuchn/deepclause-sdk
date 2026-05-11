@@ -1,9 +1,14 @@
+import type { Dirent } from 'fs';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 import { emitKeypressEvents } from 'readline';
 import { createInterface, type Interface } from 'readline/promises';
 import { stdin as input, stdout as output } from 'process';
 import { listCommands, type CommandInfo } from './commands.js';
+import { getConfigPath, loadConfig, resolveModelSlot } from './config.js';
 import { run, type RunResult as CliRunResult } from './run.js';
 import {
+  createLocalSkill,
   createConductorSession,
   getConductorSessionDetail,
   listConductorSessions,
@@ -15,12 +20,42 @@ import {
 import type { DMLEvent } from '../types.js';
 
 const IGNORED_LIVE_LOG_TOOLS = new Set(['set_result', 'update_memory']);
-const BUILTIN_SLASH_COMMANDS = ['new', 'sessions', 'help', 'cancel', 'exit', 'quit'] as const;
+const BUILTIN_SLASH_COMMANDS = ['new', 'sessions', 'help', 'compile', 'skill-creator', 'cancel', 'exit', 'quit'] as const;
+const CHILD_EVENT_INDENT = '\t';
+const CHILD_EVENT_TAB_WIDTH = 4;
 const MAX_ACTIVITY_LINES = 400;
 const SPINNER_FRAMES = ['|', '/', '-', '\\'] as const;
 const IDLE_RENDER_INTERVAL_MS = 16;
 const BUSY_RENDER_INTERVAL_MS = 40;
 const TYPING_RENDER_INTERVAL_MS = 90;
+const COMBINING_MARK_RE = /\p{Mark}/u;
+const EXTENDED_PICTOGRAPHIC_RE = /\p{Extended_Pictographic}/u;
+const TEXT_FILE_EXTENSIONS = new Set([
+  '.dml', '.md', '.txt', '.json', '.yaml', '.yml', '.toml', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
+  '.css', '.scss', '.html', '.sql', '.py', '.sh', '.bash', '.zsh', '.pro', '.pl', '.csv', '.env', '.example',
+]);
+const TEXT_FILE_BASENAMES = new Set(['README', 'README.md', 'AGENTS.md', 'SPEC.md', 'ARCHITECTURE.md', 'CMD_LINE.md']);
+const IGNORED_WORKSPACE_DIRS = new Set(['.git', 'node_modules', 'dist', '.next', 'coverage', 'agentvm-cache']);
+
+interface GraphemeSegment {
+  segment: string;
+}
+
+interface GraphemeSegmenter {
+  segment(text: string): Iterable<GraphemeSegment>;
+}
+
+type IntlWithSegmenter = typeof Intl & {
+  Segmenter?: new (
+    locales?: string | string[],
+    options?: { granularity: 'grapheme' },
+  ) => GraphemeSegmenter;
+};
+
+const graphemeSegmenter = (() => {
+  const Segmenter = (Intl as IntlWithSegmenter).Segmenter;
+  return Segmenter ? new Segmenter(undefined, { granularity: 'grapheme' }) : null;
+})();
 
 const ANSI = {
   reset: '\u001b[0m',
@@ -44,6 +79,135 @@ const ANSI = {
 type BuiltinSlashCommand = (typeof BUILTIN_SLASH_COMMANDS)[number];
 type Keypress = { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean; sequence?: string };
 type PaneKind = 'sessions' | 'messages' | 'process' | 'context';
+type RenderPaneKind = PaneKind | 'workspace';
+type UiMode = 'command' | 'menu' | 'palette' | 'picker' | 'viewer' | 'editor';
+type MenuId = 'session' | 'skills' | 'files' | 'run' | 'view' | 'help';
+type MenuActionId =
+  | 'session.new'
+  | 'session.refresh'
+  | 'session.next'
+  | 'session.previous'
+  | 'session.quit'
+  | 'skills.browse'
+  | 'skills.run'
+  | 'skills.inspect'
+  | 'skills.edit'
+  | 'skills.meta'
+  | 'skills.source'
+  | 'files.open'
+  | 'files.recent'
+  | 'files.newMarkdown'
+  | 'files.save'
+  | 'files.saveAs'
+  | 'files.readme'
+  | 'files.config'
+  | 'run.prompt'
+  | 'run.repeat'
+  | 'run.cancel'
+  | 'run.clear'
+  | 'run.refreshSkills'
+  | 'view.focus.sessions'
+  | 'view.focus.messages'
+  | 'view.focus.process'
+  | 'view.focus.context'
+  | 'view.follow'
+  | 'view.palette'
+  | 'help.shortcuts'
+  | 'help.slash'
+  | 'help.about';
+
+interface MenuItem {
+  id: MenuActionId;
+  label: string;
+  description: string;
+  shortcut?: string;
+  enabled?: boolean;
+}
+
+interface MenuDefinition {
+  id: MenuId;
+  label: string;
+  items: MenuItem[];
+}
+
+interface MenuState {
+  activeIndex: number;
+  selectedIndex: number;
+  typeahead: string;
+  typeaheadAt: number;
+}
+
+type HotkeyHint = readonly [string, string];
+type PendingPromptKind = 'clarify' | 'input';
+type PickerMode =
+  | 'palette'
+  | 'skills.browse'
+  | 'skills.run'
+  | 'skills.inspect'
+  | 'skills.edit'
+  | 'skills.meta'
+  | 'skills.source'
+  | 'files.inspect'
+  | 'files.edit'
+  | 'files.recent';
+
+interface PendingPrompt {
+  kind: PendingPromptKind;
+  prompt: string;
+  resolve: (value: string) => void;
+}
+
+interface PickerItem {
+  id: string;
+  label: string;
+  description: string;
+  detail?: string;
+  path?: string;
+  skillName?: string;
+  metaPath?: string;
+  sourcePath?: string;
+  actionId?: MenuActionId;
+}
+
+interface PickerState {
+  mode: PickerMode;
+  title: string;
+  emptyText: string;
+  items: PickerItem[];
+  filteredItems: PickerItem[];
+  selectedIndex: number;
+  scrollTop: number;
+}
+
+interface ViewerState {
+  title: string;
+  content: string;
+  path?: string;
+  canEdit: boolean;
+  scrollTop: number;
+  skillName?: string;
+  metaPath?: string;
+  sourcePath?: string;
+  preferredExtension?: string;
+}
+
+interface EditorState {
+  title: string;
+  path?: string;
+  lines: string[];
+  cursorLine: number;
+  cursorColumn: number;
+  scrollTop: number;
+  scrollLeft: number;
+  dirty: boolean;
+  preferredExtension: string;
+  discardPending: boolean;
+}
+
+interface WorkspacePaneView {
+  lines: string[];
+  cursor?: { row: number; column: number };
+}
 
 export interface DisplayMessage {
   role: 'user' | 'assistant' | 'system';
@@ -58,6 +222,7 @@ interface RunningPreview {
   sessionId: string;
   kind: 'task' | 'skill';
   rootTag?: string;
+  activeChildTag?: string;
   entries: DisplayMessage[];
 }
 
@@ -242,6 +407,12 @@ class ActivityBuffer {
     this.flushStream();
   }
 
+  clear(): void {
+    this.lines.length = 0;
+    this.activeStreamKey = null;
+    this.activeStreamLine = '';
+  }
+
   snapshot(): string[] {
     return this.activeStreamLine
       ? [...this.lines, this.activeStreamLine]
@@ -293,6 +464,14 @@ class FullscreenTui {
   private readonly activityBySessionId = new Map<string, ActivityBuffer>();
   private readonly ephemeralMessagesBySessionId = new Map<string, DisplayMessage[]>();
   private focusedPane: PaneKind = 'messages';
+  private uiMode: UiMode = 'command';
+  private menuReturnMode: Exclude<UiMode, 'menu'> = 'command';
+  private readonly menuState: MenuState = {
+    activeIndex: 0,
+    selectedIndex: 0,
+    typeahead: '',
+    typeaheadAt: 0,
+  };
   private readonly paneScroll = {
     sessions: 0,
     messages: 0,
@@ -306,7 +485,12 @@ class FullscreenTui {
   private busy = false;
   private exitRequested = false;
   private statusLine = 'Loading...';
-  private pendingQuestion: { prompt: string; resolve: (value: string) => void } | null = null;
+  private pendingPrompt: PendingPrompt | null = null;
+  private pickerState: PickerState | null = null;
+  private viewerState: ViewerState | null = null;
+  private editorState: EditorState | null = null;
+  private readonly recentFiles: string[] = [];
+  private lastSubmittedInput: ParsedTuiInput | null = null;
   private renderTimer: ReturnType<typeof setTimeout> | null = null;
   private animationTimer: ReturnType<typeof setInterval> | null = null;
   private closeResolver: (() => void) | null = null;
@@ -323,7 +507,7 @@ class FullscreenTui {
     try {
       await this.refreshCommands();
       await this.refreshSessions({ createIfMissing: true });
-      this.statusLine = 'Ready. Left/right changes pane. Up/down and PgUp/PgDn scroll the focused pane when input is empty.';
+      this.statusLine = 'Ready. F10 or Ctrl+G opens menus. Left/right changes pane when the menu is closed.';
 
       emitKeypressEvents(input);
       if (input.isTTY) {
@@ -360,16 +544,31 @@ class FullscreenTui {
   };
 
   private async handleKeypress(text: string, key: Keypress): Promise<void> {
+    if ((key.ctrl && key.name === 'g') || key.name === 'f10') {
+      this.toggleMenuMode();
+      return;
+    }
+
+    if (key.ctrl && key.name === 'p' && !this.pendingPrompt && !this.busy) {
+      this.openActionPalette();
+      return;
+    }
+
     if (key.ctrl && key.name === 'w') {
       this.cyclePaneFocus(1);
       return;
     }
 
     if (key.ctrl && key.name === 'c') {
-      if (this.pendingQuestion) {
-        const pending = this.pendingQuestion;
-        this.pendingQuestion = null;
+      if (this.pendingPrompt) {
+        const pending = this.pendingPrompt;
+        this.pendingPrompt = null;
         pending.resolve('');
+        if (!this.busy) {
+          this.statusLine = 'Input cancelled.';
+          this.requestRender();
+          return;
+        }
       }
       if (this.busy) {
         this.exitRequested = true;
@@ -377,6 +576,26 @@ class FullscreenTui {
         return;
       }
       this.close();
+      return;
+    }
+
+    if (this.uiMode === 'menu') {
+      await this.handleMenuKeypress(text, key);
+      return;
+    }
+
+    if (this.uiMode === 'picker' || this.uiMode === 'palette') {
+      await this.handlePickerKeypress(text, key);
+      return;
+    }
+
+    if (this.uiMode === 'viewer') {
+      await this.handleViewerKeypress(key);
+      return;
+    }
+
+    if (this.uiMode === 'editor') {
+      await this.handleEditorKeypress(text, key);
       return;
     }
 
@@ -476,17 +695,331 @@ class FullscreenTui {
     this.requestRender();
   }
 
+  private async handleMenuKeypress(text: string, key: Keypress): Promise<void> {
+    const menus = this.getMenuDefinitions();
+    const activeMenu = menus[this.menuState.activeIndex];
+    const activeItems = activeMenu?.items ?? [];
+
+    if (key.name === 'escape') {
+      this.closeMenuMode();
+      return;
+    }
+
+    if (key.name && /^[1-6]$/.test(key.name)) {
+      this.selectMenu(Number.parseInt(key.name, 10) - 1);
+      return;
+    }
+
+    switch (key.name) {
+      case 'left':
+        this.moveMenu(-1);
+        return;
+
+      case 'right':
+        this.moveMenu(1);
+        return;
+
+      case 'up':
+        this.moveMenuItem(-1, activeItems.length);
+        return;
+
+      case 'down':
+        this.moveMenuItem(1, activeItems.length);
+        return;
+
+      case 'home':
+        this.menuState.selectedIndex = 0;
+        this.statusLine = `${activeMenu?.label ?? 'Menu'} menu.`;
+        this.requestRender();
+        return;
+
+      case 'end':
+        this.menuState.selectedIndex = Math.max(0, activeItems.length - 1);
+        this.statusLine = `${activeMenu?.label ?? 'Menu'} menu.`;
+        this.requestRender();
+        return;
+
+      case 'return':
+      case 'space': {
+        const selected = activeItems[this.menuState.selectedIndex];
+        if (selected) {
+          if (selected.enabled === false) {
+            this.statusLine = `${selected.label} is not available right now.`;
+            this.requestRender();
+            return;
+          }
+          await this.runMenuAction(selected.id);
+        }
+        return;
+      }
+
+      case 'backspace':
+        if (this.menuState.typeahead) {
+          this.menuState.typeahead = this.menuState.typeahead.slice(0, -1);
+          this.menuState.typeaheadAt = Date.now();
+          this.requestRender();
+        }
+        return;
+
+      default:
+        break;
+    }
+
+    if (text && !key.ctrl && !key.meta && /\S/.test(text)) {
+      const now = Date.now();
+      this.menuState.typeahead = now - this.menuState.typeaheadAt > 900
+        ? text.toLowerCase()
+        : `${this.menuState.typeahead}${text.toLowerCase()}`;
+      this.menuState.typeaheadAt = now;
+      this.menuState.selectedIndex = selectMenuItemByTypeahead(activeItems, this.menuState.typeahead, this.menuState.selectedIndex);
+      this.requestRender();
+    }
+  }
+
+  private async handlePickerKeypress(text: string, key: Keypress): Promise<void> {
+    const picker = this.pickerState;
+    if (!picker) {
+      this.closeWorkspaceMode();
+      return;
+    }
+
+    switch (key.name) {
+      case 'escape':
+        this.closeWorkspaceMode();
+        return;
+
+      case 'return':
+        await this.activatePickerSelection();
+        return;
+
+      case 'up':
+        this.movePickerSelection(-1);
+        return;
+
+      case 'down':
+        this.movePickerSelection(1);
+        return;
+
+      case 'pageup':
+        this.movePickerSelection(-Math.max(3, Math.floor(this.workspaceViewportLines() / 2)));
+        return;
+
+      case 'pagedown':
+        this.movePickerSelection(Math.max(3, Math.floor(this.workspaceViewportLines() / 2)));
+        return;
+
+      case 'home':
+        picker.selectedIndex = 0;
+        this.ensurePickerSelectionVisible();
+        this.requestRender();
+        return;
+
+      case 'end':
+        picker.selectedIndex = Math.max(0, picker.filteredItems.length - 1);
+        this.ensurePickerSelectionVisible();
+        this.requestRender();
+        return;
+
+      case 'backspace':
+        this.deleteBackward();
+        this.refreshPickerFilter();
+        return;
+
+      case 'delete':
+        this.deleteForward();
+        this.refreshPickerFilter();
+        return;
+
+      case 'left':
+        if (this.cursor > 0) {
+          this.cursor -= 1;
+          this.requestRender();
+        }
+        return;
+
+      case 'right':
+        if (this.cursor < this.inputValue.length) {
+          this.cursor += 1;
+          this.requestRender();
+        }
+        return;
+
+      default:
+        break;
+    }
+
+    if (key.ctrl && key.name === 'e') {
+      await this.activatePickerSelection('edit');
+      return;
+    }
+
+    if (key.ctrl && key.name === 'r') {
+      await this.activatePickerSelection('run');
+      return;
+    }
+
+    if (key.ctrl && key.name === 'm') {
+      await this.activatePickerSelection('meta');
+      return;
+    }
+
+    if (key.ctrl && key.name === 's') {
+      await this.activatePickerSelection('source');
+      return;
+    }
+
+    if (text && !key.ctrl && !key.meta) {
+      this.insertText(text);
+      this.refreshPickerFilter();
+    }
+  }
+
+  private async handleViewerKeypress(key: Keypress): Promise<void> {
+    if (!this.viewerState) {
+      this.closeWorkspaceMode();
+      return;
+    }
+
+    if (key.ctrl && key.name === 'e' && this.viewerState.canEdit && this.viewerState.path) {
+      await this.openEditorForFile(this.viewerState.path, { title: this.viewerState.title, preferredExtension: this.viewerState.preferredExtension });
+      return;
+    }
+
+    if (key.ctrl && key.name === 'r' && this.viewerState.skillName) {
+      this.closeWorkspaceMode();
+      await this.executeSkill(this.viewerState.skillName, []);
+      return;
+    }
+
+    switch (key.name) {
+      case 'escape':
+        this.closeWorkspaceMode();
+        return;
+
+      case 'up':
+        this.viewerState.scrollTop = Math.max(0, this.viewerState.scrollTop - 1);
+        this.requestRender();
+        return;
+
+      case 'down':
+        this.viewerState.scrollTop += 1;
+        this.requestRender();
+        return;
+
+      case 'pageup':
+        this.viewerState.scrollTop = Math.max(0, this.viewerState.scrollTop - this.workspaceViewportLines());
+        this.requestRender();
+        return;
+
+      case 'pagedown':
+        this.viewerState.scrollTop += this.workspaceViewportLines();
+        this.requestRender();
+        return;
+
+      case 'home':
+        this.viewerState.scrollTop = 0;
+        this.requestRender();
+        return;
+
+      default:
+        return;
+    }
+  }
+
+  private async handleEditorKeypress(text: string, key: Keypress): Promise<void> {
+    if (!this.editorState) {
+      this.closeWorkspaceMode();
+      return;
+    }
+
+    if (key.ctrl && key.name === 's') {
+      await this.saveCurrentEditor(false);
+      return;
+    }
+
+    switch (key.name) {
+      case 'escape':
+        if (this.editorState.dirty && !this.editorState.discardPending) {
+          this.editorState.discardPending = true;
+          this.statusLine = 'Unsaved changes. Press Esc again to discard or Ctrl+S to save.';
+          this.requestRender();
+          return;
+        }
+        this.closeWorkspaceMode(true);
+        return;
+
+      case 'return':
+        this.splitEditorLine();
+        return;
+
+      case 'backspace':
+        this.deleteEditorBackward();
+        return;
+
+      case 'delete':
+        this.deleteEditorForward();
+        return;
+
+      case 'left':
+        this.moveEditorCursor('left');
+        return;
+
+      case 'right':
+        this.moveEditorCursor('right');
+        return;
+
+      case 'up':
+        this.moveEditorCursor('up');
+        return;
+
+      case 'down':
+        this.moveEditorCursor('down');
+        return;
+
+      case 'pageup':
+        this.pageEditorCursor(-1);
+        return;
+
+      case 'pagedown':
+        this.pageEditorCursor(1);
+        return;
+
+      case 'home':
+        this.editorState.cursorColumn = 0;
+        this.ensureEditorCursorVisible();
+        this.requestRender();
+        return;
+
+      case 'end':
+        this.editorState.cursorColumn = this.currentEditorLine().length;
+        this.ensureEditorCursorVisible();
+        this.requestRender();
+        return;
+
+      case 'tab':
+        this.insertEditorText('  ');
+        return;
+
+      default:
+        break;
+    }
+
+    if (text && !key.ctrl && !key.meta) {
+      this.insertEditorText(text);
+    }
+  }
+
   private async submitInput(): Promise<void> {
     const rawInput = this.inputValue;
     const trimmedInput = rawInput.trim();
     this.inputValue = '';
     this.cursor = 0;
 
-    if (this.pendingQuestion) {
-      const pending = this.pendingQuestion;
-      this.pendingQuestion = null;
+    if (this.pendingPrompt) {
+      const pending = this.pendingPrompt;
+      this.pendingPrompt = null;
       pending.resolve(trimmedInput);
-      this.statusLine = 'Continuing...';
+      this.statusLine = pending.kind === 'clarify' ? 'Continuing...' : 'Working...';
       this.requestRender();
       return;
     }
@@ -497,7 +1030,7 @@ class FullscreenTui {
     }
 
     const parsed = parseSlashInput(trimmedInput);
-    if (this.busy && !this.pendingQuestion && !canSubmitParsedInputWhileBusy(parsed)) {
+    if (this.busy && !this.pendingPrompt && !canSubmitParsedInputWhileBusy(parsed)) {
       this.statusLine = 'Execution is still running. Use /cancel or Ctrl+C to stop it.';
       this.requestRender();
       return;
@@ -536,6 +1069,11 @@ class FullscreenTui {
         return;
       }
 
+      case 'compile':
+      case 'skill-creator':
+        await this.executeSkillCreator(parsed.name, parsed.rawArgs);
+        return;
+
       case 'sessions':
         await this.refreshSessions({ createIfMissing: true, selectedSessionId: this.selectedSessionId });
         await this.refreshCommands();
@@ -556,6 +1094,7 @@ class FullscreenTui {
   private async executeTask(promptText: string): Promise<void> {
     const sessionId = this.selectedSessionId;
     const activity = this.activityFor(sessionId);
+    this.lastSubmittedInput = { kind: 'text', prompt: promptText };
     this.focusedPane = 'messages';
     this.paneScroll.messages = 0;
     this.paneScroll.process = 0;
@@ -610,6 +1149,7 @@ class FullscreenTui {
     const sessionId = this.selectedSessionId || 'global';
     const activity = this.activityFor(sessionId);
     const commandText = `/${skillName}${args.length > 0 ? ` ${args.join(' ')}` : ''}`;
+    this.lastSubmittedInput = { kind: 'skill', name: skillName, rawArgs: args.join(' '), args: [...args] };
     this.focusedPane = 'messages';
     this.paneScroll.messages = 0;
     this.paneScroll.process = 0;
@@ -658,15 +1198,78 @@ class FullscreenTui {
     }
   }
 
+  private async executeSkillCreator(commandName: 'compile' | 'skill-creator', specText: string): Promise<void> {
+    const trimmedSpec = specText.trim();
+    if (!trimmedSpec) {
+      this.statusLine = `Provide a skill specification after /${commandName}.`;
+      this.requestRender();
+      return;
+    }
+
+    const sessionId = this.selectedSessionId;
+    const activity = this.activityFor(sessionId);
+    const commandText = `/${commandName} ${trimmedSpec}`;
+    this.lastSubmittedInput = { kind: 'builtin', name: commandName, rawArgs: trimmedSpec, args: [trimmedSpec] };
+    this.focusedPane = 'messages';
+    this.paneScroll.messages = 0;
+    this.paneScroll.process = 0;
+    this.beginExecutionPreview(sessionId, 'skill', { role: 'system', content: commandText }, 'skill-creator');
+    activity.pushLine(`skill ${commandText}`);
+    this.busy = true;
+    this.currentAbortController = new AbortController();
+    this.startAnimation();
+    this.statusLine = `Running /${commandName}...`;
+    this.requestRender();
+
+    try {
+      const result = await runSkillCreatorCommand(this.workspaceRoot, sessionId, trimmedSpec, {
+        sandbox: this.options.sandbox,
+        signal: this.currentAbortController.signal,
+        onUserInput: (question) => this.requestClarification(question),
+        onEvent: (event) => {
+          activity.handle(event);
+          this.updatePreviewFromEvent(event);
+          this.requestRender();
+        },
+      });
+      activity.finish();
+      await this.refreshCommands();
+      this.finishExecutionPreview({
+        persist: true,
+        finalText: formatSkillCreatorSummary(this.workspaceRoot, result),
+      });
+      this.statusLine = `/${commandName} finished.`;
+    } catch (error) {
+      activity.finish();
+      const message = (error as Error).message;
+      activity.pushLine(`[skill-creator] error ${message}`);
+      this.finishExecutionPreview({ persist: true, error: message });
+      this.statusLine = `/${commandName} failed.`;
+    } finally {
+      this.busy = false;
+      this.currentAbortController = null;
+      this.stopAnimation();
+      if (this.exitRequested) {
+        this.close();
+      } else {
+        this.requestRender();
+      }
+    }
+  }
+
   private async requestClarification(promptText: string): Promise<string> {
     this.ensureClarificationVisible(promptText);
+    return this.promptForValue(promptText, 'clarify');
+  }
+
+  private async promptForValue(promptText: string, kind: PendingPromptKind = 'input'): Promise<string> {
     this.inputValue = '';
     this.cursor = 0;
-    this.statusLine = 'Awaiting clarification...';
+    this.statusLine = kind === 'clarify' ? 'Awaiting clarification...' : promptText;
     this.requestRender();
 
     return new Promise<string>((resolve) => {
-      this.pendingQuestion = { prompt: promptText, resolve };
+      this.pendingPrompt = { kind, prompt: promptText, resolve };
       this.requestRender();
     });
   }
@@ -736,11 +1339,967 @@ class FullscreenTui {
     this.requestRender();
   }
 
+  private toggleMenuMode(): void {
+    if (this.pendingPrompt) {
+      this.statusLine = this.pendingPrompt.kind === 'clarify'
+        ? 'Finish the clarification prompt before opening menus.'
+        : 'Finish the current input prompt before opening menus.';
+      this.requestRender();
+      return;
+    }
+
+    if (this.uiMode === 'menu') {
+      this.closeMenuMode();
+      return;
+    }
+
+    this.menuReturnMode = this.uiMode;
+    this.uiMode = 'menu';
+    this.menuState.typeahead = '';
+    this.menuState.typeaheadAt = 0;
+    this.menuState.selectedIndex = 0;
+    this.statusLine = `${this.getMenuDefinitions()[this.menuState.activeIndex]?.label ?? 'Menu'} menu.`;
+    this.requestRender();
+  }
+
+  private closeMenuMode(): void {
+    if (this.uiMode !== 'menu') {
+      return;
+    }
+
+    this.uiMode = this.menuReturnMode;
+    this.menuState.typeahead = '';
+    this.menuState.typeaheadAt = 0;
+    this.statusLine = `Focus: ${paneDisplayName(this.focusedPane)}. F10 or Ctrl+G reopens the menu bar.`;
+    this.requestRender();
+  }
+
+  private moveMenu(direction: -1 | 1): void {
+    const menus = this.getMenuDefinitions();
+    this.menuState.activeIndex = nextWrappedIndex(this.menuState.activeIndex, direction, menus.length);
+    this.menuState.selectedIndex = 0;
+    this.menuState.typeahead = '';
+    this.menuState.typeaheadAt = 0;
+    this.statusLine = `${menus[this.menuState.activeIndex]?.label ?? 'Menu'} menu.`;
+    this.requestRender();
+  }
+
+  private selectMenu(index: number): void {
+    const menus = this.getMenuDefinitions();
+    if (index < 0 || index >= menus.length) {
+      return;
+    }
+
+    this.menuState.activeIndex = index;
+    this.menuState.selectedIndex = 0;
+    this.menuState.typeahead = '';
+    this.menuState.typeaheadAt = 0;
+    this.statusLine = `${menus[index]?.label ?? 'Menu'} menu.`;
+    this.requestRender();
+  }
+
+  private moveMenuItem(direction: -1 | 1, itemCount: number): void {
+    this.menuState.selectedIndex = nextWrappedIndex(this.menuState.selectedIndex, direction, itemCount);
+    this.menuState.typeahead = '';
+    this.menuState.typeaheadAt = 0;
+    this.requestRender();
+  }
+
+  private getMenuDefinitions(): MenuDefinition[] {
+    const busy = this.busy || !!this.pendingPrompt;
+
+    const menus: MenuDefinition[] = [
+      {
+        id: 'session',
+        label: 'Session',
+        items: [
+          { id: 'session.new', label: 'New Session', description: 'Create and switch to a fresh conductor session.', shortcut: 'Enter' },
+          { id: 'session.refresh', label: 'Refresh Sessions', description: 'Reload the session list and command catalog.' },
+          { id: 'session.next', label: 'Next Session', description: 'Move to the next session in the left pane.', shortcut: 'Down' },
+          { id: 'session.previous', label: 'Previous Session', description: 'Move to the previous session in the left pane.', shortcut: 'Up' },
+          { id: 'session.quit', label: 'Quit', description: 'Leave the fullscreen TUI.', shortcut: 'Ctrl+C' },
+        ],
+      },
+      {
+        id: 'skills',
+        label: 'Skills',
+        items: [
+          { id: 'skills.browse', label: 'Browse All Skills', description: 'Open a searchable catalog of compiled skills.', shortcut: 'Enter' },
+          { id: 'skills.run', label: 'Run Skill…', description: 'Pick a skill and execute it from the menu bar.' },
+          { id: 'skills.inspect', label: 'Inspect Skill Code', description: 'View the compiled DML for a skill.' },
+          { id: 'skills.edit', label: 'Edit Skill Code', description: 'Open a skill in the inline editor.' },
+          { id: 'skills.meta', label: 'Inspect Skill Metadata', description: 'View the metadata JSON for a compiled skill.' },
+          { id: 'skills.source', label: 'Open Skill Source Spec', description: 'Jump from a compiled skill back to its source Markdown.' },
+        ],
+      },
+      {
+        id: 'files',
+        label: 'Files',
+        items: [
+          { id: 'files.open', label: 'Open Text File…', description: 'Browse workspace text files in a searchable picker.', shortcut: 'Enter' },
+          { id: 'files.recent', label: 'Recent Files', description: 'Reopen a recently inspected or edited file.' },
+          { id: 'files.newMarkdown', label: 'New Markdown Note', description: 'Create a new Markdown buffer inside the workspace.' },
+          { id: 'files.save', label: 'Save', description: 'Save the current editor buffer.', shortcut: 'Ctrl+S', enabled: !!this.editorState },
+          { id: 'files.saveAs', label: 'Save As…', description: 'Save the current editor buffer to a new path.', enabled: !!this.editorState },
+          { id: 'files.readme', label: 'Open Workspace README', description: 'Inspect the top-level README.md.' },
+          { id: 'files.config', label: 'Open .deepclause Config', description: 'Inspect the local DeepClause config file.' },
+        ],
+      },
+      {
+        id: 'run',
+        label: 'Run',
+        items: [
+          { id: 'run.prompt', label: 'Send Prompt…', description: 'Return to the command bar and enter a freeform prompt.', shortcut: 'Enter' },
+          { id: 'run.repeat', label: 'Repeat Last Command', description: 'Re-run the last prompt or skill invocation.', enabled: !!this.lastSubmittedInput },
+          { id: 'run.cancel', label: 'Cancel Current Execution', description: 'Abort the running task or skill.', shortcut: '/cancel', enabled: this.busy },
+          { id: 'run.clear', label: 'Clear Execution Pane', description: 'Discard the current session execution log.' },
+          { id: 'run.refreshSkills', label: 'Refresh Skill Catalog', description: 'Re-scan the workspace for compiled skills.' },
+        ],
+      },
+      {
+        id: 'view',
+        label: 'View',
+        items: [
+          { id: 'view.focus.sessions', label: 'Focus Sessions Pane', description: 'Focus the session list pane.' },
+          { id: 'view.focus.messages', label: 'Focus Messages Pane', description: 'Focus the conversation history pane.' },
+          { id: 'view.focus.process', label: 'Focus Execution Pane', description: 'Focus the live execution log pane.' },
+          { id: 'view.focus.context', label: 'Focus Context Pane', description: 'Focus the session context and token usage pane.' },
+          { id: 'view.follow', label: 'Follow Focused Pane', description: 'Jump back to the newest visible content in the active pane.' },
+          { id: 'view.palette', label: 'Open Action Palette', description: 'Search all menu actions from one picker.', shortcut: 'Ctrl+P' },
+        ],
+      },
+      {
+        id: 'help',
+        label: 'Help',
+        items: [
+          { id: 'help.shortcuts', label: 'Keyboard Shortcuts', description: 'Show the fullscreen keyboard map.' },
+          { id: 'help.slash', label: 'Slash Commands', description: 'Show available slash commands and direct skill invocation.' },
+          { id: 'help.about', label: 'About This TUI', description: 'Show a short explanation of the fullscreen workspace.' },
+        ],
+      },
+    ];
+
+    return menus.map((menu): MenuDefinition => ({
+      ...menu,
+      items: menu.items.map((item): MenuItem => ({
+        ...item,
+        enabled: item.enabled ?? (!busy || item.id === 'run.cancel'),
+      })),
+    }));
+  }
+
+  private async runMenuAction(actionId: MenuActionId): Promise<void> {
+    switch (actionId) {
+      case 'session.new': {
+        const created = await createConductorSession(this.workspaceRoot);
+        await this.refreshSessions({ createIfMissing: true, selectedSessionId: created.id });
+        this.closeMenuMode();
+        this.statusLine = `Created session ${created.title}.`;
+        return;
+      }
+
+      case 'session.refresh':
+        await this.refreshSessions({ createIfMissing: true, selectedSessionId: this.selectedSessionId });
+        await this.refreshCommands();
+        this.closeMenuMode();
+        this.statusLine = `Loaded ${this.sessions.length} session${this.sessions.length === 1 ? '' : 's'}.`;
+        return;
+
+      case 'session.next':
+        await this.moveSession(1);
+        return;
+
+      case 'session.previous':
+        await this.moveSession(-1);
+        return;
+
+      case 'session.quit':
+        this.close();
+        return;
+
+      case 'skills.browse':
+        await this.openSkillPicker('skills.browse');
+        return;
+
+      case 'skills.run':
+        await this.openSkillPicker('skills.run');
+        return;
+
+      case 'skills.inspect':
+        await this.openSkillPicker('skills.inspect');
+        return;
+
+      case 'skills.edit':
+        await this.openSkillPicker('skills.edit');
+        return;
+
+      case 'skills.meta':
+        await this.openSkillPicker('skills.meta');
+        return;
+
+      case 'skills.source':
+        await this.openSkillPicker('skills.source');
+        return;
+
+      case 'files.open':
+        await this.openFilePicker('files.inspect');
+        return;
+
+      case 'files.recent':
+        await this.openFilePicker('files.recent');
+        return;
+
+      case 'files.newMarkdown':
+        this.openEditorBuffer('', { title: 'New Markdown Note', preferredExtension: '.md' });
+        return;
+
+      case 'files.save':
+        await this.saveCurrentEditor(false);
+        return;
+
+      case 'files.saveAs':
+        await this.saveCurrentEditor(true);
+        return;
+
+      case 'files.readme':
+        await this.openFileViewer(path.join(this.workspaceRoot, 'README.md'), { title: 'README.md' });
+        return;
+
+      case 'files.config':
+        await this.openFileViewer(getConfigPath(this.workspaceRoot), { title: '.deepclause/config.json' });
+        return;
+
+      case 'run.prompt':
+        this.closeMenuMode();
+        this.statusLine = 'Command bar ready.';
+        return;
+
+      case 'run.repeat':
+        await this.repeatLastCommand();
+        return;
+
+      case 'run.cancel':
+        this.closeMenuMode();
+        this.cancelCurrentExecution('Cancellation requested.');
+        return;
+
+      case 'run.clear':
+        this.currentProcessActivity().clear();
+        this.closeMenuMode();
+        this.statusLine = 'Execution pane cleared.';
+        return;
+
+      case 'run.refreshSkills':
+        await this.refreshCommands();
+        this.closeMenuMode();
+        this.statusLine = `Loaded ${this.commands.length} skill${this.commands.length === 1 ? '' : 's'}.`;
+        return;
+
+      case 'view.focus.sessions':
+      case 'view.focus.messages':
+      case 'view.focus.process':
+      case 'view.focus.context': {
+        const pane = actionId.slice('view.focus.'.length) as PaneKind;
+        this.focusedPane = pane;
+        this.closeMenuMode();
+        this.statusLine = `Focus: ${paneDisplayName(this.focusedPane)}.`;
+        return;
+      }
+
+      case 'view.follow':
+        if (this.focusedPane !== 'sessions') {
+          this.paneScroll[this.focusedPane] = 0;
+        }
+        this.closeMenuMode();
+        this.statusLine = `${paneDisplayName(this.focusedPane)} following newest content.`;
+        return;
+
+      case 'view.palette':
+        this.openActionPalette();
+        return;
+
+      case 'help.shortcuts':
+        this.openTextViewer('Keyboard Shortcuts', getShortcutHelpLines().join('\n'), { preferredExtension: '.txt' });
+        return;
+
+      case 'help.slash':
+        this.openTextViewer('Slash Commands', getSlashHelpLines().join('\n'), { preferredExtension: '.txt' });
+        return;
+
+      case 'help.about':
+        this.openTextViewer(
+          'About This TUI',
+          [
+            'DeepClause fullscreen TUI',
+            '',
+            'Use F10 or Ctrl+G for the menu bar, Ctrl+W to cycle panes, and /cancel to stop a running execution.',
+            'The Skills and Files menus open searchable pickers, and Ctrl+P opens the action palette directly.',
+          ].join('\n'),
+          { preferredExtension: '.txt' },
+        );
+        return;
+
+      default:
+        this.closeMenuMode();
+        this.statusLine = 'This menu action is being wired up next.';
+        return;
+    }
+  }
+
+  private closeWorkspaceMode(force = false): boolean {
+    if (!force && !this.canReplaceWorkspaceSurface()) {
+      return false;
+    }
+
+    this.uiMode = 'command';
+    this.pickerState = null;
+    this.viewerState = null;
+    this.editorState = null;
+    this.inputValue = '';
+    this.cursor = 0;
+    this.requestRender();
+    return true;
+  }
+
+  private canReplaceWorkspaceSurface(): boolean {
+    if (this.editorState?.dirty) {
+      this.statusLine = 'Save the current editor with Ctrl+S or press Esc again in the editor to discard changes.';
+      this.requestRender();
+      return false;
+    }
+
+    return true;
+  }
+
+  private workspaceViewportLines(): number {
+    return Math.max(1, (output.rows ?? 40) - 5);
+  }
+
+  private openActionPalette(): void {
+    if (!this.canReplaceWorkspaceSurface()) {
+      return;
+    }
+
+    const items = this.getMenuDefinitions()
+      .flatMap((menu) => menu.items)
+      .filter((item) => item.enabled !== false)
+      .map((item) => ({
+        id: item.id,
+        label: item.label,
+        description: item.description,
+        detail: item.shortcut,
+        actionId: item.id,
+      } satisfies PickerItem));
+
+    this.openPicker({
+      mode: 'palette',
+      title: 'Action Palette',
+      emptyText: 'No actions match the current query.',
+      items,
+      filteredItems: items,
+      selectedIndex: 0,
+      scrollTop: 0,
+    });
+  }
+
+  private async openSkillPicker(mode: Extract<PickerMode, `skills.${string}`>): Promise<void> {
+    if (!this.canReplaceWorkspaceSurface()) {
+      return;
+    }
+
+    await this.refreshCommands();
+    const items = await Promise.all(this.commands.map(async (command) => {
+      const skillPath = this.resolveCommandDmlPath(command);
+      const metaPath = this.resolveCommandMetaPath(command);
+      let sourcePath: string | undefined;
+
+      try {
+        const meta = JSON.parse(await fs.readFile(metaPath, 'utf8')) as { source?: string };
+        if (meta.source) {
+          sourcePath = path.resolve(this.workspaceRoot, meta.source);
+        }
+      } catch {
+        // Metadata is optional while browsing.
+      }
+
+      return {
+        id: command.name,
+        label: command.name,
+        description: command.description,
+        detail: command.path,
+        path: skillPath,
+        skillName: command.name,
+        metaPath,
+        sourcePath,
+      } satisfies PickerItem;
+    }));
+
+    const titles: Record<Extract<PickerMode, `skills.${string}`>, string> = {
+      'skills.browse': 'Browse Skills',
+      'skills.run': 'Run Skill',
+      'skills.inspect': 'Inspect Skill Code',
+      'skills.edit': 'Edit Skill Code',
+      'skills.meta': 'Inspect Skill Metadata',
+      'skills.source': 'Open Skill Source Spec',
+    };
+
+    this.openPicker({
+      mode,
+      title: titles[mode],
+      emptyText: 'No skills match the current query.',
+      items,
+      filteredItems: items,
+      selectedIndex: 0,
+      scrollTop: 0,
+    });
+  }
+
+  private async openFilePicker(mode: Extract<PickerMode, `files.${string}`>): Promise<void> {
+    if (!this.canReplaceWorkspaceSurface()) {
+      return;
+    }
+
+    const relativePaths = mode === 'files.recent'
+      ? [...this.recentFiles]
+      : await listWorkspaceTextFiles(this.workspaceRoot);
+    const items = relativePaths.map((relativePath) => ({
+      id: relativePath,
+      label: path.basename(relativePath),
+      description: relativePath,
+      detail: path.extname(relativePath) || 'text',
+      path: path.join(this.workspaceRoot, relativePath),
+    } satisfies PickerItem));
+
+    const titles: Record<Extract<PickerMode, `files.${string}`>, string> = {
+      'files.inspect': 'Open Text File',
+      'files.edit': 'Edit Text File',
+      'files.recent': 'Recent Files',
+    };
+
+    this.openPicker({
+      mode,
+      title: titles[mode],
+      emptyText: mode === 'files.recent'
+        ? 'No recent files yet. Open or edit a file first.'
+        : 'No text files match the current query.',
+      items,
+      filteredItems: items,
+      selectedIndex: 0,
+      scrollTop: 0,
+    });
+  }
+
+  private openPicker(state: PickerState): void {
+    this.closeMenuMode();
+    this.uiMode = state.mode === 'palette' ? 'palette' : 'picker';
+    this.pickerState = state;
+    this.viewerState = null;
+    this.editorState = null;
+    this.inputValue = '';
+    this.cursor = 0;
+    this.ensurePickerSelectionVisible();
+    this.statusLine = `${state.title}.`;
+    this.requestRender();
+  }
+
+  private refreshPickerFilter(): void {
+    if (!this.pickerState) {
+      return;
+    }
+
+    this.pickerState.filteredItems = filterPickerItems(this.pickerState.items, this.inputValue);
+    this.pickerState.selectedIndex = clamp(this.pickerState.selectedIndex, 0, Math.max(0, this.pickerState.filteredItems.length - 1));
+    this.pickerState.scrollTop = 0;
+    this.ensurePickerSelectionVisible();
+    this.requestRender();
+  }
+
+  private movePickerSelection(delta: number): void {
+    if (!this.pickerState || this.pickerState.filteredItems.length === 0) {
+      return;
+    }
+
+    this.pickerState.selectedIndex = clamp(
+      this.pickerState.selectedIndex + delta,
+      0,
+      Math.max(0, this.pickerState.filteredItems.length - 1),
+    );
+    this.ensurePickerSelectionVisible();
+    this.requestRender();
+  }
+
+  private ensurePickerSelectionVisible(): void {
+    if (!this.pickerState) {
+      return;
+    }
+
+    const targetLine = 3 + (this.pickerState.selectedIndex * 3);
+    const viewport = this.workspaceViewportLines();
+    if (targetLine < this.pickerState.scrollTop) {
+      this.pickerState.scrollTop = targetLine;
+      return;
+    }
+
+    if (targetLine >= this.pickerState.scrollTop + viewport) {
+      this.pickerState.scrollTop = Math.max(0, targetLine - viewport + 1);
+    }
+  }
+
+  private async activatePickerSelection(override?: 'edit' | 'run' | 'meta' | 'source'): Promise<void> {
+    const picker = this.pickerState;
+    const item = picker?.filteredItems[picker.selectedIndex];
+    if (!picker || !item) {
+      return;
+    }
+
+    if (picker.mode === 'palette') {
+      await this.runMenuAction(item.actionId ?? 'help.about');
+      return;
+    }
+
+    const action = override ?? picker.mode;
+    switch (action) {
+      case 'skills.browse':
+      case 'skills.inspect':
+        await this.openSkillViewer(item, 'dml');
+        return;
+
+      case 'skills.run': {
+        this.closeWorkspaceMode();
+        const rawArgs = await this.promptForValue(`Arguments for /${item.skillName} (optional):`);
+        await this.executeSkill(item.skillName ?? item.label, parseCommandArgs(rawArgs));
+        return;
+      }
+
+      case 'run':
+        if (item.skillName) {
+          this.closeWorkspaceMode();
+          const rawArgs = await this.promptForValue(`Arguments for /${item.skillName} (optional):`);
+          await this.executeSkill(item.skillName, parseCommandArgs(rawArgs));
+        }
+        return;
+
+      case 'edit':
+      case 'skills.edit':
+      case 'files.edit':
+        if (item.path) {
+          await this.openEditorForFile(item.path, { title: item.description || item.label });
+        }
+        return;
+
+      case 'meta':
+      case 'skills.meta':
+        if (item.metaPath) {
+          await this.openSkillViewer(item, 'meta');
+        }
+        return;
+
+      case 'source':
+      case 'skills.source':
+        if (item.sourcePath) {
+          await this.openSkillViewer(item, 'source');
+        } else {
+          this.statusLine = `No source spec recorded for ${item.label}.`;
+          this.requestRender();
+        }
+        return;
+
+      case 'files.inspect':
+      case 'files.recent':
+        if (item.path) {
+          await this.openFileViewer(item.path, { title: item.description || item.label });
+        }
+        return;
+    }
+  }
+
+  private async openSkillViewer(item: PickerItem, target: 'dml' | 'meta' | 'source'): Promise<void> {
+    const filePath = target === 'dml' ? item.path : target === 'meta' ? item.metaPath : item.sourcePath;
+    if (!filePath) {
+      this.statusLine = `No ${target} file available for ${item.label}.`;
+      this.requestRender();
+      return;
+    }
+
+    const title = target === 'dml'
+      ? `Skill: ${item.label}`
+      : target === 'meta'
+        ? `Metadata: ${item.label}`
+        : `Source Spec: ${item.label}`;
+    await this.openFileViewer(filePath, {
+      title,
+      skillName: item.skillName,
+      canEdit: target !== 'meta',
+      preferredExtension: target === 'meta' ? '.json' : path.extname(filePath) || '.txt',
+    });
+  }
+
+  private openTextViewer(
+    title: string,
+    content: string,
+    options: {
+      path?: string;
+      canEdit?: boolean;
+      skillName?: string;
+      metaPath?: string;
+      sourcePath?: string;
+      preferredExtension?: string;
+    } = {},
+  ): void {
+    if (!this.canReplaceWorkspaceSurface()) {
+      return;
+    }
+
+    this.closeMenuMode();
+    this.uiMode = 'viewer';
+    this.pickerState = null;
+    this.editorState = null;
+    this.viewerState = {
+      title,
+      content,
+      path: options.path,
+      canEdit: options.canEdit ?? false,
+      scrollTop: 0,
+      skillName: options.skillName,
+      metaPath: options.metaPath,
+      sourcePath: options.sourcePath,
+      preferredExtension: options.preferredExtension,
+    };
+    this.inputValue = '';
+    this.cursor = 0;
+    if (options.path) {
+      this.pushRecentFile(options.path);
+    }
+    this.statusLine = `Viewing ${title}.`;
+    this.requestRender();
+  }
+
+  private async openFileViewer(
+    filePath: string,
+    options: {
+      title?: string;
+      canEdit?: boolean;
+      skillName?: string;
+      preferredExtension?: string;
+    } = {},
+  ): Promise<void> {
+    try {
+      const content = await fs.readFile(filePath, 'utf8');
+      this.openTextViewer(options.title ?? path.relative(this.workspaceRoot, filePath), content, {
+        path: filePath,
+        canEdit: options.canEdit ?? isEditableTextFile(filePath),
+        skillName: options.skillName,
+        preferredExtension: options.preferredExtension ?? (path.extname(filePath) || '.txt'),
+      });
+    } catch (error) {
+      this.closeMenuMode();
+      this.statusLine = `Unable to open ${path.relative(this.workspaceRoot, filePath)}: ${(error as Error).message}`;
+      this.requestRender();
+    }
+  }
+
+  private async openEditorForFile(
+    filePath: string,
+    options: { title?: string; preferredExtension?: string } = {},
+  ): Promise<void> {
+    try {
+      const content = await fs.readFile(filePath, 'utf8');
+      this.openEditorBuffer(content, {
+        title: options.title ?? path.relative(this.workspaceRoot, filePath),
+        path: filePath,
+        preferredExtension: options.preferredExtension ?? (path.extname(filePath) || '.txt'),
+      });
+    } catch (error) {
+      this.statusLine = `Unable to edit ${path.relative(this.workspaceRoot, filePath)}: ${(error as Error).message}`;
+      this.requestRender();
+    }
+  }
+
+  private openEditorBuffer(
+    content: string,
+    options: { title: string; path?: string; preferredExtension?: string },
+  ): void {
+    if (!this.canReplaceWorkspaceSurface()) {
+      return;
+    }
+
+    this.closeMenuMode();
+    this.uiMode = 'editor';
+    this.pickerState = null;
+    this.viewerState = null;
+    this.editorState = {
+      title: options.title,
+      path: options.path,
+      lines: splitEditorContent(content),
+      cursorLine: 0,
+      cursorColumn: 0,
+      scrollTop: 0,
+      scrollLeft: 0,
+      dirty: false,
+      preferredExtension: options.preferredExtension ?? '.txt',
+      discardPending: false,
+    };
+    this.inputValue = '';
+    this.cursor = 0;
+    if (options.path) {
+      this.pushRecentFile(options.path);
+    }
+    this.ensureEditorCursorVisible();
+    this.statusLine = `Editing ${options.title}.`;
+    this.requestRender();
+  }
+
+  private currentEditorLine(): string {
+    return this.editorState?.lines[this.editorState.cursorLine] ?? '';
+  }
+
+  private updateCurrentEditorLine(nextLine: string): void {
+    if (!this.editorState) {
+      return;
+    }
+
+    this.editorState.lines[this.editorState.cursorLine] = nextLine;
+    this.editorState.dirty = true;
+    this.editorState.discardPending = false;
+  }
+
+  private insertEditorText(text: string): void {
+    if (!this.editorState) {
+      return;
+    }
+
+    const line = this.currentEditorLine();
+    this.updateCurrentEditorLine(`${line.slice(0, this.editorState.cursorColumn)}${text}${line.slice(this.editorState.cursorColumn)}`);
+    this.editorState.cursorColumn += text.length;
+    this.ensureEditorCursorVisible();
+    this.requestRender();
+  }
+
+  private splitEditorLine(): void {
+    if (!this.editorState) {
+      return;
+    }
+
+    const line = this.currentEditorLine();
+    const before = line.slice(0, this.editorState.cursorColumn);
+    const after = line.slice(this.editorState.cursorColumn);
+    this.editorState.lines.splice(this.editorState.cursorLine, 1, before, after);
+    this.editorState.cursorLine += 1;
+    this.editorState.cursorColumn = 0;
+    this.editorState.dirty = true;
+    this.editorState.discardPending = false;
+    this.ensureEditorCursorVisible();
+    this.requestRender();
+  }
+
+  private deleteEditorBackward(): void {
+    if (!this.editorState) {
+      return;
+    }
+
+    if (this.editorState.cursorColumn > 0) {
+      const line = this.currentEditorLine();
+      this.updateCurrentEditorLine(`${line.slice(0, this.editorState.cursorColumn - 1)}${line.slice(this.editorState.cursorColumn)}`);
+      this.editorState.cursorColumn -= 1;
+    } else if (this.editorState.cursorLine > 0) {
+      const previous = this.editorState.lines[this.editorState.cursorLine - 1] ?? '';
+      const current = this.currentEditorLine();
+      this.editorState.lines.splice(this.editorState.cursorLine - 1, 2, `${previous}${current}`);
+      this.editorState.cursorLine -= 1;
+      this.editorState.cursorColumn = previous.length;
+      this.editorState.dirty = true;
+      this.editorState.discardPending = false;
+    }
+
+    this.ensureEditorCursorVisible();
+    this.requestRender();
+  }
+
+  private deleteEditorForward(): void {
+    if (!this.editorState) {
+      return;
+    }
+
+    const line = this.currentEditorLine();
+    if (this.editorState.cursorColumn < line.length) {
+      this.updateCurrentEditorLine(`${line.slice(0, this.editorState.cursorColumn)}${line.slice(this.editorState.cursorColumn + 1)}`);
+    } else if (this.editorState.cursorLine < this.editorState.lines.length - 1) {
+      const next = this.editorState.lines[this.editorState.cursorLine + 1] ?? '';
+      this.editorState.lines.splice(this.editorState.cursorLine, 2, `${line}${next}`);
+      this.editorState.dirty = true;
+      this.editorState.discardPending = false;
+    }
+
+    this.ensureEditorCursorVisible();
+    this.requestRender();
+  }
+
+  private moveEditorCursor(direction: 'left' | 'right' | 'up' | 'down'): void {
+    if (!this.editorState) {
+      return;
+    }
+
+    switch (direction) {
+      case 'left':
+        if (this.editorState.cursorColumn > 0) {
+          this.editorState.cursorColumn -= 1;
+        } else if (this.editorState.cursorLine > 0) {
+          this.editorState.cursorLine -= 1;
+          this.editorState.cursorColumn = this.currentEditorLine().length;
+        }
+        break;
+
+      case 'right':
+        if (this.editorState.cursorColumn < this.currentEditorLine().length) {
+          this.editorState.cursorColumn += 1;
+        } else if (this.editorState.cursorLine < this.editorState.lines.length - 1) {
+          this.editorState.cursorLine += 1;
+          this.editorState.cursorColumn = 0;
+        }
+        break;
+
+      case 'up':
+        if (this.editorState.cursorLine > 0) {
+          this.editorState.cursorLine -= 1;
+          this.editorState.cursorColumn = Math.min(this.editorState.cursorColumn, this.currentEditorLine().length);
+        }
+        break;
+
+      case 'down':
+        if (this.editorState.cursorLine < this.editorState.lines.length - 1) {
+          this.editorState.cursorLine += 1;
+          this.editorState.cursorColumn = Math.min(this.editorState.cursorColumn, this.currentEditorLine().length);
+        }
+        break;
+    }
+
+    this.ensureEditorCursorVisible();
+    this.requestRender();
+  }
+
+  private pageEditorCursor(direction: -1 | 1): void {
+    if (!this.editorState) {
+      return;
+    }
+
+    const nextLine = clamp(
+      this.editorState.cursorLine + (direction * this.workspaceViewportLines()),
+      0,
+      Math.max(0, this.editorState.lines.length - 1),
+    );
+    this.editorState.cursorLine = nextLine;
+    this.editorState.cursorColumn = Math.min(this.editorState.cursorColumn, this.currentEditorLine().length);
+    this.ensureEditorCursorVisible();
+    this.requestRender();
+  }
+
+  private ensureEditorCursorVisible(): void {
+    if (!this.editorState) {
+      return;
+    }
+
+    const viewportLines = this.workspaceViewportLines();
+    if (this.editorState.cursorLine < this.editorState.scrollTop) {
+      this.editorState.scrollTop = this.editorState.cursorLine;
+    } else if (this.editorState.cursorLine >= this.editorState.scrollTop + viewportLines) {
+      this.editorState.scrollTop = Math.max(0, this.editorState.cursorLine - viewportLines + 1);
+    }
+
+    const width = output.columns ?? 120;
+    const innerWidth = Math.max(1, width - 2);
+    const lineNumberWidth = Math.max(2, String(Math.max(1, this.editorState.lines.length)).length);
+    const prefixWidth = 2 + lineNumberWidth + 3;
+    const contentWidth = Math.max(1, innerWidth - prefixWidth);
+    if (this.editorState.cursorColumn < this.editorState.scrollLeft) {
+      this.editorState.scrollLeft = this.editorState.cursorColumn;
+    } else if (this.editorState.cursorColumn >= this.editorState.scrollLeft + contentWidth) {
+      this.editorState.scrollLeft = Math.max(0, this.editorState.cursorColumn - contentWidth + 1);
+    }
+  }
+
+  private async saveCurrentEditor(saveAs: boolean): Promise<void> {
+    if (!this.editorState) {
+      this.closeMenuMode();
+      this.statusLine = 'No editor buffer is active.';
+      this.requestRender();
+      return;
+    }
+
+    let targetPath = this.editorState.path;
+    if (saveAs || !targetPath) {
+      const suggested = this.editorState.path
+        ? path.relative(this.workspaceRoot, this.editorState.path)
+        : `notes/${Date.now()}.${this.editorState.preferredExtension.replace(/^\./, '')}`;
+      const requestedPath = (await this.promptForValue(`Save file as (relative path) [${suggested}]:`)).trim() || suggested;
+      targetPath = resolveWorkspaceTextPath(this.workspaceRoot, requestedPath);
+    }
+
+    try {
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, this.editorState.lines.join('\n'), 'utf8');
+      this.editorState.path = targetPath;
+      this.editorState.title = path.relative(this.workspaceRoot, targetPath);
+      this.editorState.dirty = false;
+      this.editorState.discardPending = false;
+      this.pushRecentFile(targetPath);
+      this.statusLine = `Saved ${path.relative(this.workspaceRoot, targetPath)}.`;
+      this.requestRender();
+    } catch (error) {
+      this.statusLine = `Unable to save file: ${(error as Error).message}`;
+      this.requestRender();
+    }
+  }
+
+  private pushRecentFile(filePath: string): void {
+    const relativePath = path.relative(this.workspaceRoot, filePath).replace(/\\/g, '/');
+    const existingIndex = this.recentFiles.indexOf(relativePath);
+    if (existingIndex >= 0) {
+      this.recentFiles.splice(existingIndex, 1);
+    }
+    this.recentFiles.unshift(relativePath);
+    if (this.recentFiles.length > 20) {
+      this.recentFiles.length = 20;
+    }
+  }
+
+  private async repeatLastCommand(): Promise<void> {
+    if (!this.lastSubmittedInput) {
+      this.closeMenuMode();
+      this.statusLine = 'No previous prompt or skill to repeat yet.';
+      this.requestRender();
+      return;
+    }
+
+    if (!this.closeWorkspaceMode()) {
+      return;
+    }
+    if (this.lastSubmittedInput.kind === 'text') {
+      await this.executeTask(this.lastSubmittedInput.prompt);
+      return;
+    }
+    if (this.lastSubmittedInput.kind === 'skill') {
+      await this.executeSkill(this.lastSubmittedInput.name, this.lastSubmittedInput.args);
+      return;
+    }
+    if (this.lastSubmittedInput.kind === 'builtin') {
+      await this.executeBuiltin(this.lastSubmittedInput);
+    }
+  }
+
+  private resolveCommandDmlPath(command: CommandInfo): string {
+    return path.join(this.workspaceRoot, `${command.path}.dml`);
+  }
+
+  private resolveCommandMetaPath(command: CommandInfo): string {
+    return path.join(this.workspaceRoot, `${command.path}.meta.json`);
+  }
+
   private beginExecutionPreview(sessionId: string, kind: 'task' | 'skill', lead: DisplayMessage, rootTag?: string): void {
     this.currentPreview = {
       sessionId,
       kind,
       rootTag,
+      activeChildTag: kind === 'skill' ? rootTag : undefined,
       entries: [lead, { role: 'assistant', content: '', pending: true }],
     };
   }
@@ -749,6 +2308,8 @@ class FullscreenTui {
     if (!this.currentPreview) {
       return;
     }
+
+    this.updatePreviewChildState(logEvent);
 
     const previewMessage = previewMessageFromEvent(logEvent);
     if (previewMessage) {
@@ -813,17 +2374,47 @@ class FullscreenTui {
     entries.push(entry);
   }
 
+  private updatePreviewChildState(logEvent: ConductorLogEvent): void {
+    if (!this.currentPreview || this.currentPreview.kind !== 'task') {
+      return;
+    }
+
+    if (logEvent.scope === 'child' && logEvent.childSlug) {
+      this.currentPreview.activeChildTag = logEvent.childSlug;
+      this.ensurePreviewChildSkillMessage(logEvent.childSlug);
+      return;
+    }
+
+    if (logEvent.scope === 'main' && (logEvent.event.type === 'stream' || logEvent.event.type === 'answer' || logEvent.event.type === 'error')) {
+      this.currentPreview.activeChildTag = undefined;
+    }
+  }
+
+  private ensurePreviewChildSkillMessage(childSlug: string): void {
+    if (!this.currentPreview) {
+      return;
+    }
+
+    const message = previewChildSkillActivityMessage(childSlug);
+    const exists = this.currentPreview.entries.some((entry) => sameDisplayMessage(entry, message));
+    if (!exists) {
+      this.insertPreviewMessage(message);
+    }
+  }
+
   private ensurePreviewAssistantMessage(): DisplayMessage {
     if (!this.currentPreview) {
       return { role: 'assistant', content: '', pending: false };
     }
 
+    const desiredTag = this.currentPreview.rootTag ?? this.currentPreview.activeChildTag;
     const last = this.currentPreview.entries[this.currentPreview.entries.length - 1];
     if (last && last.role === 'assistant') {
+      last.tag = desiredTag;
       return last;
     }
 
-    const created: DisplayMessage = { role: 'assistant', content: '', pending: true };
+    const created: DisplayMessage = { role: 'assistant', content: '', pending: true, tag: desiredTag };
     this.currentPreview.entries.push(created);
     return created;
   }
@@ -833,6 +2424,7 @@ class FullscreenTui {
       return;
     }
 
+    this.currentPreview.activeChildTag = undefined;
     const assistant = this.ensurePreviewAssistantMessage();
     if (typeof options.finalText === 'string' && options.finalText.trim()) {
       assistant.content = options.finalText;
@@ -1048,24 +2640,37 @@ class FullscreenTui {
     const messagesPane = this.buildPaneView('messages', 'Messages', widths.center, contentHeight);
     const processPane = this.buildPaneView('process', 'Execution', widths.right, rightHeights.process);
     const contextPane = this.buildPaneView('context', 'Context', widths.right, rightHeights.context);
+    const workspaceView = this.uiMode === 'command'
+      ? null
+      : this.buildWorkspacePaneView(columns, contentHeight);
 
-    const header = renderMenuBar(this.buildHeaderLine(), columns);
-    const status = renderStatusBar(this.buildStatusLine(), columns, this.focusedPane);
-    const inputPrefix = this.pendingQuestion ? ' Clarify ? ' : ' Command > ';
-    const inputLine = renderCommandBar(inputPrefix, this.inputValue, columns);
+    const header = renderMenuBar(this.buildHeaderLine(), columns, this.uiMode === 'menu' ? this.menuState.activeIndex : null);
+    const status = renderStatusBar(this.buildStatusLine(), columns, this.buildHotkeys());
+    const inputPrefix = this.buildInputPrefix();
+    const inputValue = this.buildInputValue();
+    const inputLine = renderCommandBar(inputPrefix, inputValue, columns);
     const gap = paint(' ', ANSI.bgBlue);
 
     const lines = [header];
-    for (let index = 0; index < contentHeight; index += 1) {
-      const rightLine = index < rightHeights.process
-        ? processPane[index]
-        : contextPane[index - rightHeights.process];
-      lines.push(`${sessionsPane[index]}${gap}${messagesPane[index]}${gap}${rightLine}`);
+    if (workspaceView) {
+      lines.push(...workspaceView.lines);
+    } else {
+      for (let index = 0; index < contentHeight; index += 1) {
+        const rightLine = index < rightHeights.process
+          ? processPane[index]
+          : contextPane[index - rightHeights.process];
+        lines.push(`${sessionsPane[index]}${gap}${messagesPane[index]}${gap}${rightLine}`);
+      }
     }
     lines.push(status);
     lines.push(inputLine);
 
     this.paintFrame(lines, { columns, rows });
+    if (workspaceView?.cursor && !this.pendingPrompt) {
+      output.write(`\u001b[${workspaceView.cursor.row};${workspaceView.cursor.column}H`);
+      return;
+    }
+
     const cursorColumn = Math.min(columns, inputPrefix.length + this.cursor + 1);
     output.write(`\u001b[${rows};${cursorColumn}H`);
   }
@@ -1099,19 +2704,72 @@ class FullscreenTui {
       : 'no skills';
     const mode = this.busy ? '[Running]' : '[Idle]';
 
-    return ` DeepClause  Session  Skills  Run  Help   ${sessionLabel}   ${mode}   ${skillLabel}`;
+    return `${sessionLabel}   ${mode}   ${skillLabel}`;
   }
 
   private buildStatusLine(): string {
+    if (this.uiMode === 'menu') {
+      const menu = this.getMenuDefinitions()[this.menuState.activeIndex];
+      return `Menu ${menu?.label ?? ''} | ${menu?.items[this.menuState.selectedIndex]?.description ?? 'Choose an action.'}`;
+    }
+
+    if ((this.uiMode === 'picker' || this.uiMode === 'palette') && this.pickerState) {
+      const selected = this.pickerState.filteredItems[this.pickerState.selectedIndex];
+      return `${this.pickerState.title} | ${selected?.description ?? this.pickerState.emptyText}`;
+    }
+
+    if (this.uiMode === 'viewer' && this.viewerState) {
+      return `${this.viewerState.title} | ${this.viewerState.path ? path.relative(this.workspaceRoot, this.viewerState.path) : 'read-only view'}`;
+    }
+
+    if (this.uiMode === 'editor' && this.editorState) {
+      const dirty = this.editorState.dirty ? 'modified' : 'saved';
+      return `${this.editorState.title} | ${dirty} | Ln ${this.editorState.cursorLine + 1}, Col ${this.editorState.cursorColumn + 1}`;
+    }
+
     const focus = paneDisplayName(this.focusedPane);
-    if (!this.pendingQuestion && this.focusedPane !== 'sessions') {
+    if (!this.pendingPrompt && this.focusedPane !== 'sessions') {
       const follow = this.paneScroll[this.focusedPane] === 0 ? 'follow' : `scroll ${this.paneScroll[this.focusedPane]}`;
       return `${this.statusLine} | Focus ${focus} | ${follow}`;
     }
-    if (this.pendingQuestion) {
-      return `Clarify: ${condenseWhitespace(this.pendingQuestion.prompt)} | Focus ${focus}`;
+    if (this.pendingPrompt) {
+      return this.pendingPrompt.kind === 'clarify'
+        ? `Clarify: ${condenseWhitespace(this.pendingPrompt.prompt)} | Focus ${focus}`
+        : `Input: ${condenseWhitespace(this.pendingPrompt.prompt)} | Focus ${focus}`;
     }
     return `${this.statusLine} | Focus ${focus}`;
+  }
+
+  private buildInputPrefix(): string {
+    if (this.uiMode === 'menu') {
+      return ' Menu > ';
+    }
+    if (this.uiMode === 'picker' || this.uiMode === 'palette') {
+      return ' Search > ';
+    }
+    if (this.pendingPrompt?.kind === 'clarify') {
+      return ' Clarify ? ';
+    }
+    if (this.pendingPrompt) {
+      return ' Input > ';
+    }
+    if (this.uiMode === 'editor') {
+      return ' Editor > ';
+    }
+    if (this.uiMode === 'viewer') {
+      return ' Viewer > ';
+    }
+    return ' Command > ';
+  }
+
+  private buildInputValue(): string {
+    if (this.uiMode === 'editor') {
+      return 'Ctrl+S save  Esc close  arrows move';
+    }
+    if (this.uiMode === 'viewer') {
+      return this.viewerState?.canEdit ? 'Ctrl+E edit  Esc close  PgUp/PgDn scroll' : 'Esc close  PgUp/PgDn scroll';
+    }
+    return this.inputValue;
   }
 
   private buildSessionPaneBody(): string[] {
@@ -1250,6 +2908,168 @@ class FullscreenTui {
     );
   }
 
+  private buildWorkspacePaneView(width: number, height: number): WorkspacePaneView {
+    if (this.uiMode === 'editor' && this.editorState) {
+      return this.buildEditorPaneView(width, height, this.editorState);
+    }
+
+    if ((this.uiMode === 'picker' || this.uiMode === 'palette') && this.pickerState) {
+      return {
+        lines: buildPane(this.pickerState.title, this.buildPickerPaneBody(this.pickerState), width, height, 'workspace', true),
+      };
+    }
+
+    if (this.uiMode === 'viewer' && this.viewerState) {
+      return {
+        lines: buildPane(this.viewerState.title, this.buildViewerPaneBody(this.viewerState), width, height, 'workspace', true),
+      };
+    }
+
+    const menu = this.getMenuDefinitions()[this.menuState.activeIndex];
+    return {
+      lines: buildPane(`Menu: ${menu?.label ?? 'Menu'}`, this.buildMenuPaneBody(menu), width, height, 'workspace', true),
+    };
+  }
+
+  private buildMenuPaneBody(menu: MenuDefinition | undefined): string[] {
+    if (!menu) {
+      return ['No menu available.'];
+    }
+
+    const lines = [
+      'Use Left/Right or 1-6 to move across the menu bar, Up/Down to choose an item, and Enter to run it.',
+      '',
+    ];
+
+    menu.items.forEach((item, index) => {
+      const prefix = index === this.menuState.selectedIndex ? '>' : ' ';
+      const suffix = item.enabled === false ? ' [disabled]' : item.shortcut ? ` [${item.shortcut}]` : '';
+      lines.push(`${prefix} ${item.label}${suffix}`);
+      lines.push(`  ${item.description}`);
+      lines.push('');
+    });
+
+    return lines;
+  }
+
+  private buildPickerPaneBody(state: PickerState): string[] {
+    const lines = [
+      `Search: ${this.inputValue || '(type to filter)'}`,
+      `Results: ${state.filteredItems.length}/${state.items.length}`,
+      '',
+    ];
+
+    if (state.filteredItems.length === 0) {
+      lines.push(state.emptyText);
+      return lines;
+    }
+
+    state.filteredItems.forEach((item, index) => {
+      const prefix = index === state.selectedIndex ? '>' : ' ';
+      lines.push(`${prefix} ${item.label}${item.detail ? `  ${item.detail}` : ''}`);
+      lines.push(`  ${item.description}`);
+      lines.push('');
+    });
+
+    return lines.slice(state.scrollTop);
+  }
+
+  private buildViewerPaneBody(state: ViewerState): string[] {
+    const lines = [
+      state.path ? `Path: ${path.relative(this.workspaceRoot, state.path)}` : 'Read-only view',
+      state.canEdit ? 'Ctrl+E opens the editor for this file.' : 'Read-only content.',
+      '',
+      ...state.content.split(/\r?\n/).map((line, index) => `${String(index + 1).padStart(4, ' ')} | ${line}`),
+    ];
+
+    return lines.slice(state.scrollTop);
+  }
+
+  private buildEditorPaneView(width: number, height: number, state: EditorState): WorkspacePaneView {
+    const innerWidth = Math.max(1, width - 2);
+    const viewportLines = Math.max(0, height - 2);
+    const lineNumberWidth = Math.max(2, String(Math.max(1, state.lines.length)).length);
+    const prefixWidth = 2 + lineNumberWidth + 3;
+    const contentWidth = Math.max(1, innerWidth - prefixWidth);
+    const maxStart = Math.max(0, state.lines.length - viewportLines);
+    state.scrollTop = clamp(state.scrollTop, 0, maxStart);
+
+    const lines: string[] = [renderWindowTop(`${state.title}${state.dirty ? ' [modified]' : ''}`, innerWidth, true)];
+    for (let offset = 0; offset < viewportLines; offset += 1) {
+      const lineIndex = state.scrollTop + offset;
+      const lineNumber = String(lineIndex + 1).padStart(lineNumberWidth, ' ');
+      const content = state.lines[lineIndex] ?? '';
+      const visibleContent = content.slice(state.scrollLeft, state.scrollLeft + contentWidth);
+      const prefix = lineIndex === state.cursorLine ? '> ' : '  ';
+      const rowText = `${prefix}${lineNumber} | ${visibleContent}`;
+      lines.push(renderWindowBody(padRight(rowText, innerWidth), innerWidth, 'workspace'));
+    }
+
+    if (height >= 2) {
+      lines.push(renderWindowBottom(innerWidth, true));
+    }
+
+    const cursorRow = Math.min(2 + viewportLines, 3 + Math.max(0, state.cursorLine - state.scrollTop));
+    const cursorColumn = Math.min(
+      width,
+      2 + prefixWidth + Math.max(0, state.cursorColumn - state.scrollLeft),
+    );
+
+    return {
+      lines: lines.slice(0, height),
+      cursor: { row: cursorRow, column: cursorColumn },
+    };
+  }
+
+  private buildHotkeys(): HotkeyHint[] {
+    if (this.uiMode === 'menu') {
+      return [
+        ['1-6', 'Menu'],
+        ['<- ->', 'Switch'],
+        ['Up/Down', 'Item'],
+        ['Enter', 'Run'],
+        ['Esc', 'Close'],
+      ];
+    }
+
+    if (this.uiMode === 'picker' || this.uiMode === 'palette') {
+      return [
+        ['type', 'Filter'],
+        ['Up/Down', 'Pick'],
+        ['Enter', 'Open'],
+        ['Ctrl+E', 'Edit'],
+        ['Esc', 'Close'],
+      ];
+    }
+
+    if (this.uiMode === 'viewer') {
+      return [
+        ['PgUp/PgDn', 'Scroll'],
+        ['Ctrl+E', 'Edit'],
+        ['Ctrl+R', 'Run'],
+        ['Esc', 'Close'],
+      ];
+    }
+
+    if (this.uiMode === 'editor') {
+      return [
+        ['Arrows', 'Move'],
+        ['Enter', 'Split'],
+        ['Ctrl+S', 'Save'],
+        ['Esc', 'Close'],
+      ];
+    }
+
+    return [
+      ['F10', 'Menu'],
+      ['Ctrl+P', 'Palette'],
+      ['<- ->', 'Pane'],
+      [this.focusedPane === 'sessions' ? 'Up/Down' : 'PgUp/PgDn', this.focusedPane === 'sessions' ? 'Select' : 'Scroll'],
+      ['End', this.focusedPane === 'sessions' ? 'Bottom' : 'Follow'],
+      ['/cancel', 'Stop'],
+    ];
+  }
+
   private buildPaneTitle(
     title: string,
     kind: PaneKind,
@@ -1328,14 +3148,7 @@ class FullscreenTui {
 
   private formatMessageHeader(entry: DisplayMessage): string {
     const spinner = entry.pending ? ` ${currentSpinnerFrame()}` : '';
-    switch (entry.role) {
-      case 'user':
-        return '[You]';
-      case 'assistant':
-        return entry.error ? '[Assistant Error]' : `[Assistant${spinner}]`;
-      case 'system':
-        return formatSystemMessageHeader(entry, spinner);
-    }
+    return formatDisplayMessageHeader(entry, spinner);
   }
 
   private close(): void {
@@ -1348,7 +3161,7 @@ class FullscreenTui {
   }
 
   private isEditingInput(): boolean {
-    return !this.pendingQuestion && this.inputValue.length > 0;
+    return this.uiMode !== 'editor' && this.inputValue.length > 0;
   }
 }
 
@@ -1412,6 +3225,43 @@ async function startLineTui(
             for (const helpLine of buildHelpLines()) {
               console.log(helpLine);
             }
+            continue;
+
+          case 'compile':
+          case 'skill-creator':
+            if (!parsed.rawArgs.trim()) {
+              console.log(`Provide a skill specification after /${parsed.name}.`);
+              continue;
+            }
+
+            console.log(divider('-'));
+            console.log(`${paint('skill', ANSI.dim)} /${parsed.name} ${parsed.rawArgs}`);
+            console.log(divider('-'));
+
+            {
+              const printer = new LiveExecutionPrinter();
+
+              try {
+                const result = await runSkillCreatorCommand(workspaceRoot, session.id, parsed.rawArgs, {
+                  sandbox: options.sandbox,
+                  onUserInput: async (question) => {
+                    printer.finish();
+                    console.log(`${paint('clarify', ANSI.yellow)} ${question}`);
+                    return (await rl.question('> ')).trim();
+                  },
+                  onEvent: (event) => printer.handle(event),
+                });
+                printer.finish();
+                console.log(formatSkillCreatorSummary(workspaceRoot, result));
+              } catch (error) {
+                printer.finish();
+                console.log(`${paint('error', ANSI.red)} ${(error as Error).message}`);
+              }
+            }
+
+            console.log('');
+            console.log(divider('-'));
+            console.log('');
             continue;
         }
       }
@@ -1543,6 +3393,52 @@ async function runSkillCommand(
   return result;
 }
 
+async function runSkillCreatorCommand(
+  workspaceRoot: string,
+  sessionId: string,
+  spec: string,
+  options: {
+    sandbox?: boolean;
+    signal?: AbortSignal;
+    onUserInput?: (prompt: string) => Promise<string>;
+    onEvent?: (event: ConductorLogEvent) => void;
+  } = {},
+): Promise<Record<string, unknown>> {
+  const trimmedSpec = spec.trim();
+  if (!trimmedSpec) {
+    throw new Error('spec is required');
+  }
+
+  const config = await loadConfig(workspaceRoot);
+  const compileSelection = resolveModelSlot(config, 'compile');
+  const runSelection = resolveModelSlot(config, 'run');
+
+  return createLocalSkill({
+    spec: trimmedSpec,
+    workspaceRoot,
+    workspacePath: path.resolve(workspaceRoot, config.workspace || './workspace'),
+    config,
+    compileSelection,
+    runSelection,
+    sessionId,
+    sandbox: options.sandbox ?? false,
+    signal: options.signal,
+    onUserInput: options.onUserInput ?? (async () => ''),
+    onEvent: options.onEvent,
+  });
+}
+
+function formatSkillCreatorSummary(workspaceRoot: string, result: Record<string, unknown>): string {
+  const slug = typeof result.slug === 'string' ? result.slug : 'unknown-skill';
+  const outputPath = typeof result.output_path === 'string' ? result.output_path : '';
+  if (!outputPath) {
+    return `Published /${slug}.`;
+  }
+
+  const relativeOutputPath = path.relative(workspaceRoot, outputPath);
+  return `Published /${slug} to ${relativeOutputPath || outputPath}.`;
+}
+
 export function previewMessageFromEvent(logEvent: ConductorLogEvent): DisplayMessage | null {
   switch (logEvent.event.type) {
     case 'output':
@@ -1565,6 +3461,15 @@ export function previewMessageFromEvent(logEvent: ConductorLogEvent): DisplayMes
     default:
       return null;
   }
+}
+
+export function previewChildSkillActivityMessage(childSlug: string): DisplayMessage {
+  return {
+    role: 'system',
+    kind: 'output',
+    tag: childSlug,
+    content: 'Running child skill...',
+  };
 }
 
 export function previewQuestionMessage(promptText: string, explicitTag?: string): DisplayMessage {
@@ -1647,11 +3552,14 @@ export function parseSlashInput(line: string): ParsedTuiInput {
   const name = match[1];
   const rawArgs = (match[2] ?? '').trim();
   if ((BUILTIN_SLASH_COMMANDS as readonly string[]).includes(name)) {
+    const passthroughRawArgBuiltins = new Set<BuiltinSlashCommand>(['new', 'compile', 'skill-creator']);
     return {
       kind: 'builtin',
       name: name as BuiltinSlashCommand,
       rawArgs,
-      args: name === 'new' && rawArgs ? [rawArgs] : parseCommandArgs(rawArgs),
+      args: passthroughRawArgBuiltins.has(name as BuiltinSlashCommand) && rawArgs
+        ? [rawArgs]
+        : parseCommandArgs(rawArgs),
     };
   }
 
@@ -1768,7 +3676,7 @@ async function createSessionInteractive(rl: Interface, workspaceRoot: string): P
 function renderHeader(session: ConductorSessionSummary): void {
   console.log(divider('='));
   console.log(`${paint('DeepClause', ANSI.bold, ANSI.cyan)} ${paint('interactive conductor', ANSI.dim)}`);
-  console.log(`${paint('commands', ANSI.dim)} /new  /sessions  /help  /exit  /skill args`);
+  console.log(`${paint('commands', ANSI.dim)} /compile <spec>  /new  /sessions  /help  /exit  /skill args`);
   console.log(`${paint('session', ANSI.dim)}  ${paint(session.id, ANSI.cyan)}`);
   console.log(divider('='));
   console.log('');
@@ -1776,13 +3684,13 @@ function renderHeader(session: ConductorSessionSummary): void {
 
 function streamLabel(logEvent: ConductorLogEvent): string {
   return logEvent.scope === 'child'
-    ? `[${logEvent.childSlug ?? '?'}] llm`
+    ? `${CHILD_EVENT_INDENT}[${logEvent.childSlug ?? '?'}] llm`
     : 'llm';
 }
 
 function formatEventPrefix(logEvent: ConductorLogEvent): string {
   return logEvent.scope === 'child'
-    ? `[${logEvent.childSlug ?? '?'}] `
+    ? `${CHILD_EVENT_INDENT}[${logEvent.childSlug ?? '?'}] `
     : '';
 }
 
@@ -1818,6 +3726,23 @@ function formatSystemMessageHeader(entry: DisplayMessage, spinner: string): stri
     : `[${base}${spinner}]`;
 }
 
+export function formatDisplayMessageHeader(entry: DisplayMessage, spinner = ''): string {
+  switch (entry.role) {
+    case 'user':
+      return '[You]';
+
+    case 'assistant': {
+      const base = entry.error ? 'Assistant Error' : 'Assistant';
+      return entry.tag
+        ? `[${base}: ${entry.tag}${spinner}]`
+        : `[${base}${spinner}]`;
+    }
+
+    case 'system':
+      return formatSystemMessageHeader(entry, spinner);
+  }
+}
+
 function formatToolArgs(args: Record<string, unknown> | undefined): string {
   if (!args) {
     return '';
@@ -1840,17 +3765,33 @@ function buildHelpLines(): string[] {
     'commands',
     '/new [title]    create a new conductor session',
     '/sessions       refresh or choose sessions',
+    '/compile <spec> compile and publish a new local skill',
+    '/skill-creator <spec> alias for /compile',
     '/cancel         abort the current execution',
     '/help           show this help',
     '/quit           exit the TUI',
     '/<skill> [args] run a compiled skill directly',
     'keys',
+    'F10 / Ctrl+G    open the menu bar',
+    'Ctrl+P          open the action palette',
     'Left/Right      change focused pane',
     'Up/Down         select session or scroll focused pane',
     'PgUp/PgDn       page-scroll the focused pane',
     'End             jump to bottom or re-enable follow mode',
     'Tab             autocomplete /commands and /skills',
   ];
+}
+
+function getSlashHelpLines(): string[] {
+  const lines = buildHelpLines();
+  const keysIndex = lines.indexOf('keys');
+  return keysIndex === -1 ? lines : lines.slice(0, keysIndex);
+}
+
+function getShortcutHelpLines(): string[] {
+  const lines = buildHelpLines();
+  const keysIndex = lines.indexOf('keys');
+  return keysIndex === -1 ? [] : lines.slice(keysIndex);
 }
 
 function computePaneWidths(columns: number): { left: number; center: number; right: number } {
@@ -1897,7 +3838,7 @@ function buildPane(
   body: string[],
   width: number,
   height: number,
-  kind: PaneKind,
+  kind: RenderPaneKind,
   active = false,
 ): string[] {
   if (height <= 0) {
@@ -1928,29 +3869,30 @@ function buildPane(
   return lines.slice(0, height);
 }
 
-function wrapPlainText(text: string, width: number): string[] {
+export function wrapPlainText(text: string, width: number): string[] {
   if (width <= 0) {
     return [''];
   }
 
   const result: string[] = [];
   for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine || '';
+    const line = expandTabs(rawLine || '', CHILD_EVENT_TAB_WIDTH);
     if (!line) {
       result.push('');
       continue;
     }
 
     let remaining = line;
-    while (remaining.length > width) {
-      const slice = remaining.slice(0, width);
+    while (measureDisplayWidth(remaining) > width) {
+      const { head: slice, tail } = splitByDisplayWidth(remaining, width, { forceOne: true });
       const breakIndex = slice.lastIndexOf(' ');
-      if (breakIndex > Math.floor(width * 0.4)) {
-        result.push(slice.slice(0, breakIndex));
+      const breakSlice = breakIndex === -1 ? '' : slice.slice(0, breakIndex);
+      if (breakIndex > 0 && measureDisplayWidth(breakSlice) > Math.floor(width * 0.4)) {
+        result.push(breakSlice);
         remaining = remaining.slice(breakIndex + 1);
       } else {
         result.push(slice);
-        remaining = remaining.slice(width);
+        remaining = tail;
       }
     }
     result.push(remaining);
@@ -1959,18 +3901,141 @@ function wrapPlainText(text: string, width: number): string[] {
   return result;
 }
 
-function padRight(text: string, width: number): string {
-  return text.length >= width ? text : `${text}${' '.repeat(width - text.length)}`;
+function expandTabs(text: string, tabWidth: number): string {
+  if (!text.includes('\t')) {
+    return text;
+  }
+
+  return text.replace(/\t/g, ' '.repeat(tabWidth));
 }
 
-function ellipsize(text: string, width: number): string {
-  if (text.length <= width) {
+export function measureDisplayWidth(text: string): number {
+  return splitGraphemes(text).reduce((total, grapheme) => total + graphemeDisplayWidth(grapheme), 0);
+}
+
+export function padRight(text: string, width: number): string {
+  const visibleWidth = measureDisplayWidth(text);
+  return visibleWidth >= width ? text : `${text}${' '.repeat(width - visibleWidth)}`;
+}
+
+export function ellipsize(text: string, width: number): string {
+  if (measureDisplayWidth(text) <= width) {
     return text;
   }
   if (width <= 3) {
-    return text.slice(0, width);
+    return splitByDisplayWidth(text, width).head;
   }
-  return `${text.slice(0, width - 3)}...`;
+  return `${splitByDisplayWidth(text, width - 3).head}...`;
+}
+
+function splitGraphemes(text: string): string[] {
+  if (!text) {
+    return [];
+  }
+
+  if (!graphemeSegmenter) {
+    return Array.from(text);
+  }
+
+  return Array.from(graphemeSegmenter.segment(text), (entry) => entry.segment);
+}
+
+function splitByDisplayWidth(
+  text: string,
+  width: number,
+  options: { forceOne?: boolean } = {},
+): { head: string; tail: string } {
+  if (width <= 0) {
+    return { head: '', tail: text };
+  }
+
+  const graphemes = splitGraphemes(text);
+  let consumedWidth = 0;
+  let index = 0;
+
+  while (index < graphemes.length) {
+    const nextWidth = graphemeDisplayWidth(graphemes[index]);
+    if (consumedWidth + nextWidth > width) {
+      if (index === 0 && options.forceOne) {
+        index = 1;
+      }
+      break;
+    }
+
+    consumedWidth += nextWidth;
+    index += 1;
+  }
+
+  return {
+    head: graphemes.slice(0, index).join(''),
+    tail: graphemes.slice(index).join(''),
+  };
+}
+
+function graphemeDisplayWidth(grapheme: string): number {
+  if (!grapheme) {
+    return 0;
+  }
+
+  if (isEmojiGrapheme(grapheme)) {
+    return 2;
+  }
+
+  let width = 0;
+  for (const symbol of Array.from(grapheme)) {
+    const codePoint = symbol.codePointAt(0);
+    if (codePoint === undefined || isZeroWidthCodePoint(codePoint, symbol)) {
+      continue;
+    }
+    width = Math.max(width, isFullWidthCodePoint(codePoint) ? 2 : 1);
+  }
+
+  return width;
+}
+
+function isEmojiGrapheme(grapheme: string): boolean {
+  if (EXTENDED_PICTOGRAPHIC_RE.test(grapheme) || grapheme.includes('\u200D') || grapheme.includes('\uFE0F') || grapheme.includes('\u20E3')) {
+    return true;
+  }
+
+  return Array.from(grapheme).some((symbol) => {
+    const codePoint = symbol.codePointAt(0);
+    return codePoint !== undefined && isRegionalIndicatorCodePoint(codePoint);
+  });
+}
+
+function isZeroWidthCodePoint(codePoint: number, symbol: string): boolean {
+  return COMBINING_MARK_RE.test(symbol)
+    || codePoint === 0x200D
+    || (codePoint >= 0xFE00 && codePoint <= 0xFE0F)
+    || (codePoint >= 0xE0100 && codePoint <= 0xE01EF)
+    || (codePoint >= 0x1F3FB && codePoint <= 0x1F3FF);
+}
+
+function isRegionalIndicatorCodePoint(codePoint: number): boolean {
+  return codePoint >= 0x1F1E6 && codePoint <= 0x1F1FF;
+}
+
+function isFullWidthCodePoint(codePoint: number): boolean {
+  if (codePoint < 0x1100) {
+    return false;
+  }
+
+  return codePoint <= 0x115F
+    || codePoint === 0x2329
+    || codePoint === 0x232A
+    || (codePoint >= 0x2E80 && codePoint <= 0x3247 && codePoint !== 0x303F)
+    || (codePoint >= 0x3250 && codePoint <= 0x4DBF)
+    || (codePoint >= 0x4E00 && codePoint <= 0xA4C6)
+    || (codePoint >= 0xA960 && codePoint <= 0xA97C)
+    || (codePoint >= 0xAC00 && codePoint <= 0xD7A3)
+    || (codePoint >= 0xF900 && codePoint <= 0xFAFF)
+    || (codePoint >= 0xFE10 && codePoint <= 0xFE19)
+    || (codePoint >= 0xFE30 && codePoint <= 0xFE6B)
+    || (codePoint >= 0xFF01 && codePoint <= 0xFF60)
+    || (codePoint >= 0xFFE0 && codePoint <= 0xFFE6)
+    || (codePoint >= 0x1F200 && codePoint <= 0x1F251)
+    || (codePoint >= 0x20000 && codePoint <= 0x3FFFD);
 }
 
 function condenseWhitespace(text: string): string {
@@ -2058,23 +4123,27 @@ function longestCommonPrefix(values: string[]): string {
   return prefix;
 }
 
-function renderMenuBar(text: string, columns: number): string {
-  return paint(padRight(ellipsize(text, columns), columns), ANSI.black, ANSI.bgWhite, ANSI.bold);
+function renderMenuBar(text: string, columns: number, activeMenuIndex: number | null): string {
+  const labels = ['Session', 'Skills', 'Files', 'Run', 'View', 'Help'];
+  let rendered = paint(' DeepClause ', ANSI.black, ANSI.bgWhite, ANSI.bold);
+  let usedWidth = measureDisplayWidth(' DeepClause ');
+
+  labels.forEach((label, index) => {
+    const raw = ` [${index + 1}] ${label} `;
+    usedWidth += measureDisplayWidth(raw);
+    rendered += paint(raw, ANSI.black, activeMenuIndex === index ? ANSI.bgCyan : ANSI.bgWhite, ANSI.bold);
+  });
+
+  const trailingWidth = Math.max(0, columns - usedWidth);
+  rendered += paint(padRight(ellipsize(` ${text}`, trailingWidth), trailingWidth), ANSI.black, ANSI.bgWhite);
+  return rendered;
 }
 
-function renderStatusBar(status: string, columns: number, focusedPane: PaneKind): string {
-  const hotkeys = [
-    ['<- ->', 'Pane'],
-    [focusedPane === 'sessions' ? 'Up/Down' : 'PgUp/PgDn', focusedPane === 'sessions' ? 'Select' : 'Scroll'],
-    ['End', focusedPane === 'sessions' ? 'Bottom' : 'Follow'],
-    ['/cancel', 'Stop'],
-    ['^C', 'Quit'],
-  ] as const;
-
+function renderStatusBar(status: string, columns: number, hotkeys: ReadonlyArray<HotkeyHint>): string {
   let hotkeyWidth = 0;
-  const selected: Array<(typeof hotkeys)[number]> = [];
+  const selected: HotkeyHint[] = [];
   for (const hotkey of hotkeys) {
-    const width = hotkey[0].length + hotkey[1].length + 4;
+    const width = measureDisplayWidth(hotkey[0]) + measureDisplayWidth(hotkey[1]) + 4;
     if (hotkeyWidth + width > Math.max(0, columns - 12)) {
       break;
     }
@@ -2092,14 +4161,14 @@ function renderStatusBar(status: string, columns: number, focusedPane: PaneKind)
 
 function renderCommandBar(prefix: string, value: string, columns: number): string {
   const prefixPart = paint(prefix, ANSI.black, ANSI.bgWhite, ANSI.bold);
-  const remainingWidth = Math.max(0, columns - prefix.length);
+  const remainingWidth = Math.max(0, columns - measureDisplayWidth(prefix));
   const valuePart = paint(padRight(ellipsize(value, remainingWidth), remainingWidth), ANSI.brightWhite, ANSI.bgBlue);
   return `${prefixPart}${valuePart}`;
 }
 
 function renderWindowTop(title: string, innerWidth: number, active: boolean): string {
   const safeLabel = ` ${ellipsize(title, Math.max(1, innerWidth - 2))} `;
-  const fillWidth = Math.max(0, innerWidth - safeLabel.length);
+  const fillWidth = Math.max(0, innerWidth - measureDisplayWidth(safeLabel));
   const leftFill = Math.floor(fillWidth / 2);
   const rightFill = fillWidth - leftFill;
   return [
@@ -2113,10 +4182,14 @@ function renderWindowBottom(innerWidth: number, _active: boolean): string {
   return paint(`╚${'═'.repeat(innerWidth)}╝`, ANSI.brightCyan, ANSI.bgBlue);
 }
 
-function renderWindowBody(text: string, innerWidth: number, kind: PaneKind): string {
+function renderWindowBody(text: string, innerWidth: number, kind: RenderPaneKind): string {
   const normalized = text.trim().toLowerCase();
   const content = padRight(ellipsize(text, innerWidth), innerWidth);
   const border = paint('║', ANSI.brightCyan, ANSI.bgBlue);
+
+  if (kind === 'workspace' && text.startsWith('> ')) {
+    return `${border}${paint(content, ANSI.black, ANSI.bgCyan, ANSI.bold)}${border}`;
+  }
 
   if (kind === 'sessions' && text.startsWith('> ')) {
     return `${border}${paint(content, ANSI.black, ANSI.bgCyan, ANSI.bold)}${border}`;
@@ -2209,12 +4282,113 @@ function paneDimensionsForKind(kind: PaneKind, columns: number, rows: number): {
   }
 }
 
+
+export function nextWrappedIndex(currentIndex: number, delta: -1 | 1, length: number): number {
+  if (length <= 0) {
+    return 0;
+  }
+
+  return (currentIndex + delta + length) % length;
+}
+
+export function selectMenuItemByTypeahead(
+  items: ReadonlyArray<{ label: string }>,
+  query: string,
+  currentIndex = -1,
+): number {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized || items.length === 0) {
+    return Math.max(0, currentIndex);
+  }
+
+  const matches = items
+    .map((item, index) => ({ label: item.label.toLowerCase(), index }))
+    .filter((item) => item.label.startsWith(normalized))
+    .map((item) => item.index);
+
+  if (matches.length === 0) {
+    return Math.max(0, currentIndex);
+  }
+
+  const next = matches.find((index) => index > currentIndex);
+  return next ?? matches[0];
+}
 function wrapBodyLines(body: string[], innerWidth: number): string[] {
   const lines: string[] = [];
   for (const line of body) {
     lines.push(...wrapPlainText(line, innerWidth));
   }
   return lines;
+}
+
+async function listWorkspaceTextFiles(workspaceRoot: string): Promise<string[]> {
+  const results: string[] = [];
+
+  const visit = async (relativeDir: string): Promise<void> => {
+    const absoluteDir = relativeDir ? path.join(workspaceRoot, relativeDir) : workspaceRoot;
+    let entries: Dirent[];
+
+    try {
+      entries = await fs.readdir(absoluteDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const relativePath = relativeDir ? path.join(relativeDir, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        if (IGNORED_WORKSPACE_DIRS.has(entry.name)) {
+          continue;
+        }
+        await visit(relativePath);
+        continue;
+      }
+
+      if (entry.isFile() && isEditableTextFile(relativePath)) {
+        results.push(relativePath.replace(/\\/g, '/'));
+      }
+    }
+  };
+
+  await visit('');
+  results.sort((left, right) => left.localeCompare(right));
+  return results;
+}
+
+function isEditableTextFile(filePath: string): boolean {
+  const basename = path.basename(filePath);
+  const extension = path.extname(filePath).toLowerCase();
+  return TEXT_FILE_EXTENSIONS.has(extension) || TEXT_FILE_BASENAMES.has(basename);
+}
+
+function splitEditorContent(content: string): string[] {
+  const lines = content.split(/\r?\n/);
+  return lines.length > 0 ? lines : [''];
+}
+
+function resolveWorkspaceTextPath(workspaceRoot: string, requestedPath: string): string {
+  const absolutePath = path.resolve(workspaceRoot, requestedPath);
+  const resolvedRoot = path.resolve(workspaceRoot);
+  if (absolutePath === resolvedRoot || absolutePath.startsWith(`${resolvedRoot}${path.sep}`)) {
+    return absolutePath;
+  }
+  return path.join(resolvedRoot, path.basename(requestedPath));
+}
+
+export function filterPickerItems<T extends { label: string; description: string; detail?: string }>(
+  items: ReadonlyArray<T>,
+  query: string,
+): T[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) {
+    return [...items];
+  }
+
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  return [...items].filter((item) => {
+    const haystack = `${item.label} ${item.description} ${item.detail ?? ''}`.toLowerCase();
+    return tokens.every((token) => haystack.includes(token));
+  });
 }
 
 function clamp(value: number, min: number, max: number): number {

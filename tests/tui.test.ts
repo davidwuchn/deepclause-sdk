@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const conductorMocks = vi.hoisted(() => ({
+  createLocalSkill: vi.fn(),
   createConductorSession: vi.fn(),
   getConductorSessionDetail: vi.fn(),
   listConductorSessions: vi.fn(),
@@ -16,6 +17,7 @@ const runMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/system/runtime/conductor.js', () => ({
+  createLocalSkill: conductorMocks.createLocalSkill,
   createConductorSession: conductorMocks.createConductorSession,
   getConductorSessionDetail: conductorMocks.getConductorSessionDetail,
   listConductorSessions: conductorMocks.listConductorSessions,
@@ -33,13 +35,22 @@ vi.mock('../src/cli/run.js', () => ({
 import {
   canSubmitParsedInputWhileBusy,
   computeFramePatch,
+  ellipsize,
+  filterPickerItems,
+  formatDisplayMessageHeader,
   LiveExecutionPrinter,
+  measureDisplayWidth,
   completeSlashCommand,
+  nextWrappedIndex,
+  padRight,
   parseCommandArgs,
   parseSlashInput,
+  previewChildSkillActivityMessage,
   previewMessageFromEvent,
   previewQuestionMessage,
   runPromptHeadless,
+  selectMenuItemByTypeahead,
+  wrapPlainText,
 } from '../src/cli/tui.js';
 
 describe('LiveExecutionPrinter', () => {
@@ -61,11 +72,11 @@ describe('LiveExecutionPrinter', () => {
     printer.handle({ scope: 'child', childSlug: 'research', event: { type: 'input_required', prompt: 'Need a date range?' } });
     printer.finish();
 
-    expect(writes.join('')).toBe('llm Hello world\n[research] llm Child\n');
+    expect(writes.join('')).toBe('llm Hello world\n\t[research] llm Child\n');
     expect(lines).toEqual([
       'tool web_search(query=alpha)',
-      '[research] output done',
-      '[research] clarify Need a date range?',
+      '\t[research] output done',
+      '\t[research] clarify Need a date range?',
     ]);
   });
 });
@@ -102,6 +113,36 @@ describe('previewMessageFromEvent', () => {
       tag: 'research-search-reader',
       content: 'Need a date range?',
     });
+  });
+
+  it('creates a child-skill activity marker for the messages pane', () => {
+    expect(previewChildSkillActivityMessage('skill-creator')).toEqual({
+      role: 'system',
+      kind: 'output',
+      tag: 'skill-creator',
+      content: 'Running child skill...',
+    });
+  });
+});
+
+describe('formatDisplayMessageHeader', () => {
+  it('renders child skill tags on assistant headers', () => {
+    expect(formatDisplayMessageHeader({
+      role: 'assistant',
+      content: '',
+      pending: true,
+      tag: 'skill-creator',
+    }, ' /')).toBe('[Assistant: skill-creator /]');
+  });
+});
+
+describe('display-width helpers', () => {
+  it('measure, wrap, ellipsize, and pad using terminal cell width', () => {
+    expect(measureDisplayWidth('你好🙂')).toBe(6);
+    expect(wrapPlainText('你好世界abc', 6)).toEqual(['你好世', '界abc']);
+    expect(wrapPlainText('🙂🙂a', 4)).toEqual(['🙂🙂', 'a']);
+    expect(ellipsize('你好世界', 5)).toBe('你...');
+    expect(padRight('🙂好', 6)).toBe('🙂好  ');
   });
 });
 
@@ -176,6 +217,18 @@ describe('slash command parsing', () => {
       rawArgs: 'Planning Session',
       args: ['Planning Session'],
     });
+    expect(parseSlashInput('/compile build a release-note skill')).toEqual({
+      kind: 'builtin',
+      name: 'compile',
+      rawArgs: 'build a release-note skill',
+      args: ['build a release-note skill'],
+    });
+    expect(parseSlashInput('/skill-creator draft a benchmark helper')).toEqual({
+      kind: 'builtin',
+      name: 'skill-creator',
+      rawArgs: 'draft a benchmark helper',
+      args: ['draft a benchmark helper'],
+    });
     expect(parseSlashInput('summarize this')).toEqual({ kind: 'text', prompt: 'summarize this' });
   });
 
@@ -220,5 +273,29 @@ describe('slash command parsing', () => {
       fullRender: true,
       changedRows: [],
     });
+  });
+
+  it('wraps menu indexes and cycles typeahead matches', () => {
+    expect(nextWrappedIndex(0, -1, 6)).toBe(5);
+    expect(nextWrappedIndex(5, 1, 6)).toBe(0);
+
+    const items = [
+      { label: 'Browse All Skills' },
+      { label: 'Run Skill…' },
+      { label: 'Refresh Skill Catalog' },
+    ];
+
+    expect(selectMenuItemByTypeahead(items, 'r')).toBe(1);
+    expect(selectMenuItemByTypeahead(items, 'r', 1)).toBe(2);
+    expect(selectMenuItemByTypeahead(items, 'z', 1)).toBe(1);
+  });
+
+  it('filters picker items by label and description tokens', () => {
+    expect(filterPickerItems([
+      { label: 'deep-research', description: 'Use a child search skill', detail: '.deepclause/tools/deep-research.dml' },
+      { label: 'research-search-reader', description: 'Fetch and inspect papers', detail: '.deepclause/tools/research-search-reader.dml' },
+    ], 'child search')).toEqual([
+      { label: 'deep-research', description: 'Use a child search skill', detail: '.deepclause/tools/deep-research.dml' },
+    ]);
   });
 });

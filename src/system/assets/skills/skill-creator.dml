@@ -36,7 +36,7 @@ tool(fetch(Url, Content),
 
 tool(list_skills(Skills),
     "List reusable local skills in the current workspace catalog. Use this before re-implementing a capability that might already exist.") :-
-    exec(list_skills(), Skills).
+    exec(list_skills, Skills).
 
 tool(shell(Command, Result),
      "Run a shell command on the VM. Returns dict with: success (boolean), stdout (string), stderr (string), exitCode (integer), summary (string). Use for package installation, environment checks, and helper script creation/testing. Always check the 'success' field.") :-

@@ -66,13 +66,10 @@ RULE 7: Every agent_main MUST have a fallback clause with NO LLM calls.
 RULE 8: Use output/1 before every long-running operation (task, exec).
   A skill that runs silently appears broken to the user.
 
-RULE 9: No curl or wget in bash. Use url_fetch for web content.
-  bash is for local commands, package installation, and scripts only.
-
-RULE 10: Never mix {Variable} interpolation with format/3 ~w in the same string.
+RULE 9: Never mix {Variable} interpolation with format/3 ~w in the same string.
   Use EITHER {Variable} OR format/3, not both.
 
-RULE 11: {word} in ANY string triggers variable interpolation - including system(), output(), answer().
+RULE 10: {word} in ANY string triggers variable interpolation - including system(), output(), answer().
   If the word matches an unbound Prolog variable, the clause FAILS silently.
   NEVER use {word} as a placeholder or template example inside strings.
   Use angle brackets <word> or plain text instead.
@@ -167,7 +164,6 @@ EXACT CALLING SYNTAX AND RETURN TYPES:
    Access:  get_dict(stdout, Result, Output), get_dict(exitCode, Result, Code)
    NOTE:    Working directory is workspace root. Use relative paths.
    ALLOWED: pip install, npm install, apt-get install
-   BANNED:  curl, wget (use url_fetch instead)
 
 5. ask_user - Ask user for input
   Call:    exec(ask_user(prompt: "What is your name?"), Result)

@@ -78,7 +78,7 @@ function getIsolatedProxyAttemptTimeoutMs(): number {
       return parsed;
     }
   }
-  return 20_000;
+  return 300_000;
 }
 
 function getConfiguredTimeoutMs(envVar: string, fallback: number): number {

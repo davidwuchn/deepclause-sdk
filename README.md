@@ -1,8 +1,9 @@
-# DeepClause CLI and SDK
+# DeepClause TUI Agent, CLI and SDK
 
-Compile markdown specs into executable logic programs. Guaranteed execution semantics for agentic workflows.
+Compile markdown specs into executable logic programs. Guaranteed execution semantics for agentic workflows. Comes with a minimal coding agent incl. a nostalgic Borland-style TUI.
 
 ![docs/overview.png](docs/overview.png)
+![docs/tui.png](docs/tui.png)
 
 
 ## What This Is
@@ -15,6 +16,273 @@ DeepClause takes a different approach: **compile task descriptions into DML prog
 ```
 Markdown description  →  compile  →  Logic program  →  run  →  Output
 ```
+
+## Install and Run
+
+DeepClause requires Node.js 18+.
+
+### Global install
+
+```bash
+npm install -g deepclause-sdk
+
+# Pick one provider and export its API key
+export OPENAI_API_KEY="sk-..."
+# or: export ANTHROPIC_API_KEY="..."
+# or: export GOOGLE_GENERATIVE_AI_API_KEY="..."
+# or: export OPENROUTER_API_KEY="..."
+
+# Initialize the current workspace
+deepclause init --model openai:gpt-4o
+
+# Inspect the configured slots
+deepclause show-model
+
+# Start the fullscreen conductor TUI
+deepclause
+
+# Or run one headless conductor turn
+deepclause -p "Summarize the repository architecture"
+```
+
+### One-off usage with npx
+
+```bash
+npx deepclause-sdk@latest init --model openai:gpt-4o
+npx deepclause-sdk@latest show-model
+npx deepclause-sdk@latest
+```
+
+All commands except `init`, `help`, `--help`, `--version`, and `-V` expect a `.deepclause/` directory in the current workspace.
+
+`deepclause init` creates:
+
+- `.deepclause/config.json`
+- `.deepclause/tools/`
+- `.deepclause/.gitignore`
+- seeded local skills: `deep-research` and `research-search-reader`
+
+## TUI Agent
+
+Running `deepclause` with no subcommand starts the fullscreen TUI.
+
+- Session list on the left
+- Messages in the center
+- Execution log and context summary on the right
+- Slash commands such as `/new`, `/sessions`, `/compile <spec>`, `/skill-creator <spec>`, `/cancel`, and `/<skill> [args]`
+
+For non-interactive use, `deepclause -p "..."` runs a single headless conductor turn with a fresh session.
+
+### Basic Structure
+
+The TUI is the interface around a single built-in agent: the conductor.
+
+- The TUI itself is just the UI shell: session browser, messages pane, execution log, and context view.
+- The conductor is the actual agent that receives your prompt each turn and decides what to do.
+- The conductor is implemented as a system DML skill plus a system prompt.
+- The conductor can answer directly, call an existing local skill, invoke the skill creator to make a new skill, use shell tools, or do web research.
+
+Conceptually, a TUI turn works like this:
+
+1. Load the current session from `.deepclause/sessions/<session-id>/`.
+2. Build the conductor prompt from the packaged conductor prompt template, the current skill catalog, assistant memory, task memory, and session transcript.
+3. Run the conductor DML with the `gateway` model slot.
+4. Stream the conductor's own activity and any child-skill events into the execution log on the right.
+5. Persist the final user/assistant messages and updated usage counters back into the session directory.
+
+The conductor is the router and orchestrator for the CLI runtime. Normal compiled skills are the workers it delegates to. When the conductor launches a normal skill, that skill runs with the `run` model slot. When it launches the skill creator, that child run uses the `compile` model slot instead.
+
+### Memory Tools
+
+The memory tools are there so the conductor can keep durable technical notes across turns instead of re-deriving everything from scratch every time.
+
+- `messages.jsonl` is the conversation transcript. This is the raw history of user and assistant messages.
+- `assistant-memory.md` is long-lived assistant context that gets injected into the conductor prompt each turn.
+- `task-memory.md` is technical working memory: commands that worked, failure modes, local architecture notes, repair strategies, and other distilled learnings.
+
+In the conductor DML, the LLM-facing tool is `save_memory`. That tool does not write arbitrary files directly. Instead, it calls the runtime tool `update_memory`, which replaces `task-memory.md` with the complete updated memory contents.
+
+That distinction matters:
+
+- use the transcript for exact conversation history
+- use task memory for compressed technical learnings that should help future turns
+- use assistant memory for stable higher-level context, tone, or persistent instructions
+
+In the current CLI runtime, task memory is the main writable memory channel exposed to the conductor. Assistant memory is loaded and shown in the TUI, but it is not automatically updated by a built-in conductor tool in the same way.
+
+### Session and Memory Files
+
+Each TUI session lives under `.deepclause/sessions/<session-id>/`:
+
+```text
+.deepclause/
+    sessions/
+        <session-id>/
+            session.json
+            messages.jsonl
+            assistant-memory.md
+            task-memory.md
+            usage.json
+            specs/
+```
+
+- `session.json` stores the session title and timestamps.
+- `messages.jsonl` is the append-only user/assistant transcript that gets replayed into future conductor turns.
+- `assistant-memory.md` is loaded into the conductor prompt as stable assistant context.
+- `task-memory.md` is loaded into the conductor prompt as technical working memory.
+- `usage.json` stores token usage summaries by model.
+- `specs/` is used when the conductor invokes the skill creator and saves generated spec drafts for that session.
+
+In the CLI runtime today, task memory is the actively updated memory channel: the conductor can call `save_memory`, which persists through `update_memory` into `task-memory.md`. `assistant-memory.md` is still loaded every turn, but it is primarily something you inspect or edit manually unless you build additional tooling around it.
+
+### Hacking the Conductor and Skill Creator
+
+There are two levels of customization.
+
+#### 1. Workspace-local system overrides
+
+If you want to customize behavior for one workspace without modifying the package, place override DML files here:
+
+- `.deepclause/system/conductor.dml`
+- `.deepclause/system/skill-creator.dml`
+
+When present, the CLI runtime prefers those files over the packaged system DML.
+
+#### 2. Source-level hacking in this repository
+
+If you are developing DeepClause itself, these are the main files to edit:
+
+- `src/system/assets/skills/conductor.dml` - the conductor's DML logic
+- `src/system/assets/skills/skill-creator.dml` - the skill creator's DML logic
+- `src/system/assets/docs/CONDUCTOR_PROMPT.md` - the conductor system prompt template
+- `src/system/assets/docs/DML_COMPILER_PROMPT.md` - the skill creator/compiler system prompt template
+- `src/system/runtime/conductor.ts` - session loading, memory injection, tool registration, child-skill routing
+- `src/system/runtime/skill-creator.ts` - compile-slot execution, skill-creator tool registration, validation/testing/deploy flow
+
+Notes:
+
+- The conductor uses the `gateway` model slot.
+- Normal compiled skills use the `run` model slot.
+- The skill creator uses the `compile` model slot.
+- Prompt markdown files are packaged source assets. Unlike the DML files above, they are not currently loaded from `.deepclause/system/` workspace overrides.
+
+After source-level changes, rebuild the package:
+
+```bash
+npm install
+npm run build
+```
+
+If you want to run the CLI from a source checkout while hacking on it:
+
+```bash
+npm install
+npm run build
+npm run cli -- init
+npm run cli --
+```
+
+## Model and Provider Configuration
+
+DeepClause separates model choice into three slots:
+
+- `gateway` - conductor and orchestration turns
+- `run` - compiled skill execution
+- `compile` - skill compilation and `_skill-creator`
+
+The canonical model id format is `provider:model`, but the CLI also accepts `provider/model` and, for common built-ins, bare model names that it can infer.
+
+Example `.deepclause/config.json`:
+
+```json
+{
+    "models": {
+        "gateway": "openai:gpt-4o",
+        "run": "openrouter:google/gemini-2.5-flash",
+        "compile": "anthropic:claude-sonnet-4-20250514"
+    },
+    "temperatures": {
+        "gateway": 0.7,
+        "run": 0.7,
+        "compile": 0.4
+    },
+    "providers": {
+        "openai": {
+            "apiKey": "${OPENAI_API_KEY}"
+        },
+        "anthropic": {
+            "apiKey": "${ANTHROPIC_API_KEY}"
+        },
+        "google": {
+            "apiKey": "${GOOGLE_GENERATIVE_AI_API_KEY}"
+        },
+        "openrouter": {
+            "apiKey": "${OPENROUTER_API_KEY}",
+            "baseUrl": "https://openrouter.ai/api/v1"
+        }
+    },
+    "agentvm": {
+        "network": false
+    },
+    "workspace": "./workspace",
+    "dmlBase": ".deepclause/tools"
+}
+```
+
+Configuration values support `${ENV_VAR}` and `$ENV_VAR` interpolation.
+
+### Setting Models from the CLI
+
+```bash
+# Update all three slots
+deepclause set-model openai:gpt-4o
+
+# Only change the compile slot
+deepclause set-model anthropic:claude-sonnet-4-20250514 --slot compile
+
+# Use OpenRouter for the conductor only
+deepclause set-model openrouter:google/gemini-2.5-flash --slot gateway
+
+# Inspect the resolved slot values
+deepclause show-model
+```
+
+### Provider Notes
+
+| Provider | Canonical example | API key env var | Notes |
+|----------|-------------------|-----------------|-------|
+| OpenAI | `openai:gpt-4o` | `OPENAI_API_KEY` | You can also set `providers.openai.baseUrl` for an OpenAI-compatible endpoint. |
+| Anthropic | `anthropic:claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` | Native Anthropic adapter. |
+| Google | `google:gemini-2.5-flash` | `GOOGLE_GENERATIVE_AI_API_KEY` | Native Google Generative AI adapter. |
+| OpenRouter | `openrouter:anthropic/claude-sonnet-4` | `OPENROUTER_API_KEY` | Use any OpenRouter model path. |
+| Custom | `custom:local:qwen3-32b` | `LLM_PROVIDER_LOCAL_API_KEY` | Uses the OpenAI-compatible transport with a custom base URL. |
+
+### Custom Provider
+
+`custom:` is for OpenAI-compatible endpoints that you want to name explicitly instead of pretending they are one of the built-in providers.
+
+Format:
+
+```text
+custom:<provider-name>:<model-name>
+```
+
+Example:
+
+```bash
+export LLM_PROVIDER_LOCAL_BASE_URL="http://localhost:11434/v1"
+export LLM_PROVIDER_LOCAL_API_KEY="dummy"
+
+deepclause set-model custom:local:qwen3-32b --slot run
+deepclause show-model
+```
+
+Notes:
+
+- `custom:local:qwen3-32b` reads `LLM_PROVIDER_LOCAL_BASE_URL` and `LLM_PROVIDER_LOCAL_API_KEY`.
+- The provider name is uppercased and normalized when constructing env vars, so `custom:my-lab:model-x` becomes `LLM_PROVIDER_MY_LAB_BASE_URL` and `LLM_PROVIDER_MY_LAB_API_KEY`.
+- `custom:` providers are not configured under the `providers` object in `config.json`; they are resolved from env vars.
+- Internally, `custom:` uses the OpenAI-compatible transport, so your endpoint must speak an OpenAI-style chat/completions API.
 
 ## Runtime Model
 
@@ -88,24 +356,9 @@ agent_main(SpecUrl) :-
 
 Unlike traditional SDD where specs guide but don't control, DeepClause specs **become** the executable. The spec *is* the code—just at a higher abstraction level.
 
-## Quick Start
+## Compile and Run a Skill
 
 ```bash
-# Install
-npm install -g deepclause-sdk
-
-# Set API key (or ANTHROPIC_API_KEY, GOOGLE_API_KEY, etc.)
-export OPENAI_API_KEY="sk-..."
-
-# Initialize in your project
-deepclause init
-
-# Configure all model slots
-deepclause set-model openai:gpt-4o
-
-# Start the interactive conductor TUI
-deepclause
-
 # Create a task description
 cat > .deepclause/tools/explain.md << 'EOF'
 # Code Explainer
@@ -127,20 +380,10 @@ deepclause compile .deepclause/tools/explain.md
 # Run it
 deepclause run .deepclause/tools/explain.dml "function fib(n) { return n < 2 ? n : fib(n-1) + fib(n-2) }"
 
-# Or run the conductor headlessly for a single prompt
-deepclause -p "Summarize the repository architecture"
+# Or trigger skill creation directly from the TUI with:
+#   /compile <spec>
+#   /skill-creator <spec>
 ```
-
-## CLI Modes
-
-`deepclause` with no subcommand starts the fullscreen conductor TUI.
-
-- Session list on the left
-- Messages in the center
-- Execution log and context summary on the right
-- Slash commands such as `/new`, `/sessions`, `/cancel`, and `/<skill> [args]`
-
-For non-interactive use, `deepclause -p "..."` runs a single headless conductor turn with a fresh session.
 
 ## Use Cases
 
@@ -245,22 +488,22 @@ Analyze a CSV file and describe its contents.
 
 ## Available Tools
 
-Skills can use these built-in tools:
+Common built-in runtime tools:
 
 | Tool | Description |
 |------|-------------|
-| `web_search` | Search the web (requires `BRAVE_API_KEY`) |
+| `web_search` | Search the web using Brave Search (requires `BRAVE_API_KEY`) |
 | `news_search` | Search recent news |
 | `url_fetch` | Fetch a URL or save it into the workspace |
 | `bash` | Run shell commands in the active workspace shell |
 | `vm_exec` | Alias of `bash`; with `--sandbox`, runs in AgentVM |
-| `ask_user` | Prompt the user for input |
 
-Additional tools can come from configured MCP servers.
+Some tools are runtime-role specific rather than globally available to every skill. For example:
 
-Configure runtime behavior in `.deepclause/config.json`.
+- the conductor adds tools such as `run_skill`, `create_skill`, and `update_memory`
+- the skill creator adds tools such as `list_skills`, `write_file`, `validate_dml`, `test_dml`, and `deploy_skill`
 
-MCP support is on the roadmap.
+Additional tools can come from configured MCP servers. Use `deepclause list-tools` to see the built-ins plus anything exposed by your configured MCP servers.
 
 ## CLI Reference
 
@@ -281,73 +524,47 @@ deepclause set-model <model>       # Change all slots or one slot with --slot
 
 ```bash
 deepclause run skill.dml "input" \
-    --model google/gemini-2.5-flash \   # Override the run model for this execution
-  --stream \                           # Stream output
-  --verbose \                          # Show tool calls
-    --workspace ./data \                 # Set working directory
-    --sandbox                            # Use AgentVM instead of the local shell
+    --model google:gemini-2.5-flash \  # Override the run model for this execution
+    --stream \                          # Stream output
+    --verbose \                         # Show tool calls
+    --workspace ./data \                # Set working directory
+    --sandbox                           # Use AgentVM instead of the local shell
 ```
 
 ## Configuration
 
-`.deepclause/config.json`:
+The main configuration surface is `.deepclause/config.json`.
+
+The most important fields are covered above in:
+
+- [Install and Run](#install-and-run)
+- [TUI Conductor](#tui-conductor)
+- [Model and Provider Configuration](#model-and-provider-configuration)
+
+Other useful config fields:
+
 ```json
 {
-    "models": {
-        "gateway": "openai:gpt-4o",
-        "run": "openai:gpt-4o",
-        "compile": "openai:gpt-4o"
+    "agentvm": {
+        "network": false
     },
-    "temperatures": {
-        "gateway": 0.7,
-        "run": 0.7,
-        "compile": 0.4
-    },
-  "agentvm": { "network": true }
+    "workspace": "./workspace",
+    "dmlBase": ".deepclause/tools",
+    "mcp": {
+        "servers": {
+            "filesystem": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+            }
+        }
+    }
 }
 ```
 
-### System Overrides
-
-If you place system DML files in `.deepclause/system`, the CLI runtime will prefer them over the packaged defaults.
-
-- `.deepclause/system/conductor.dml`
-- `.deepclause/system/skill-creator.dml`
-
-### Model at Compile Time vs Run Time
-
-DeepClause separates model selection into three slots:
-
-- `gateway`: conductor and orchestration turns
-- `run`: compiled skill execution
-- `compile`: skill compilation
-
-At execution time, you can still override the run model for a single command:
-
-```bash
-# Set all slots
-deepclause set-model openai:gpt-4o
-
-# Or tune a single slot
-deepclause set-model anthropic:claude-sonnet-4-20250514 --slot compile
-
-# Compile with the compile slot
-deepclause compile research.md
-
-# Run with a different one-off model override
-deepclause run research.dml "quantum computing" --model google/gemini-2.5-flash
-```
-
-This lets you keep different defaults for orchestration, skill execution, and compilation without constantly editing prompts or code.
-
-### Supported Models
-
-| Provider | Models |
-|----------|--------|
-| OpenAI | `gpt-4o`, `gpt-4o-mini`, `o1`, `o3-mini` |
-| Anthropic | `claude-sonnet-4-20250514`, `claude-3-5-sonnet-20241022` |
-| Google | `gemini-2.5-pro`, `gemini-2.5-flash` |
-| OpenRouter | Any model via `openrouter/provider/model` |
+- `agentvm.network` controls whether shell commands in `--sandbox` mode get outbound network access.
+- `workspace` sets the default working directory used by shell/file tools.
+- `dmlBase` changes where compiled local skills are written.
+- `mcp.servers` registers MCP servers that then appear in `deepclause list-tools`.
 
 ## Understanding DML
 
