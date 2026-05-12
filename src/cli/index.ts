@@ -11,6 +11,7 @@ import { compile, compileAll } from './compile.js';
 import { run } from './run.js';
 import { listTools } from './tools.js';
 import { listCommands } from './commands.js';
+import { formatToolArgs } from './tool-args.js';
 import { buildModelOverride, type ModelSlot } from '../system/config/model-slots.js';
 import { runPromptHeadless, startTui } from './tui.js';
 import { readFileSync } from 'fs';
@@ -428,23 +429,6 @@ function collectParams(value: string, previous: Record<string, string>): Record<
     throw new Error(`Invalid param format: ${value}. Use key=value`);
   }
   return { ...previous, [key]: val };
-}
-
-function formatToolArgs(args: Record<string, unknown> | undefined): string {
-  if (!args) {
-    return '';
-  }
-
-  const parts: string[] = [];
-  for (const [key, value] of Object.entries(args)) {
-    let rendered = typeof value === 'string' ? value : JSON.stringify(value);
-    if (rendered.length > 50) {
-      rendered = rendered.slice(0, 47) + '...';
-    }
-    parts.push(`${key}=${rendered}`);
-  }
-
-  return parts.join(', ');
 }
 
 async function main(): Promise<void> {

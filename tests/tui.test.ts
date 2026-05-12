@@ -37,6 +37,7 @@ import {
   canSubmitParsedInputWhileBusy,
   computeFramePatch,
   ellipsize,
+  
   filterPickerItems,
   formatDisplayMessageHeader,
   LiveExecutionPrinter,
@@ -55,6 +56,14 @@ import {
   selectMenuItemByTypeahead,
   wrapPlainText,
 } from '../src/cli/tui.js';
+import { formatToolArgs } from '../src/cli/tool-args.js';
+
+describe('formatToolArgs', () => {
+  it('skips undefined values instead of crashing', () => {
+    expect(formatToolArgs({ arg0: undefined, arg1: 'hello' })).toBe('arg1=hello');
+    expect(formatToolArgs({ arg0: undefined })).toBe('');
+  });
+});
 
 describe('LiveExecutionPrinter', () => {
   it('streams tokens and hides internal tool noise', () => {

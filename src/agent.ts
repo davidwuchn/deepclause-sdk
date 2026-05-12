@@ -78,6 +78,8 @@ export interface AgentLoopResult {
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
 }
 
+type ResponseMessage = { role: 'user' | 'assistant' | 'system'; content: unknown };
+
 /**
  * Convert TypedVar type to Zod schema
  */
@@ -505,7 +507,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         // Use SDK's response.messages for message history.
         // The SDK handles tool execution and includes tool results in messages.
         const responseAwaitT0 = Date.now();
-        const responseMessages = (await result.response).messages;
+        const responseMessages = getResponseMessages(await result.response);
         const responseAwaitMs = Date.now() - responseAwaitT0;
         if (responseAwaitMs > 100) {
           debugLog(`Iteration ${iteration} await result.response took ${responseAwaitMs}ms (unexpectedly slow)`);
@@ -614,7 +616,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
         // Use response.messages to update message history (AI SDK v6 pattern)
         // This is the key change - let the SDK handle message formatting
-        messages = [...messages, ...result.response.messages];
+        messages = [...messages, ...getResponseMessages(result.response)];
 
         // If no tool calls were made, nudge the model to act.
         // This handles 'stop', 'other', and any unexpected finish reason.
@@ -706,6 +708,15 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     variables,
     messages: persistentMessages,
   };
+}
+
+function getResponseMessages(response: unknown): ResponseMessage[] {
+  if (!response || typeof response !== 'object') {
+    return [];
+  }
+
+  const maybeMessages = (response as { messages?: unknown }).messages;
+  return Array.isArray(maybeMessages) ? maybeMessages as ResponseMessage[] : [];
 }
 
 /**

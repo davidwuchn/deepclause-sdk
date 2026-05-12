@@ -7,6 +7,7 @@ import { stdin as input, stdout as output } from 'process';
 import { listCommands, type CommandInfo } from './commands.js';
 import { getConfigPath, loadConfig, resolveModelSlot, setModel, type ModelSlot } from './config.js';
 import { run, type RunResult as CliRunResult } from './run.js';
+import { formatToolArgs } from './tool-args.js';
 import {
   createLocalSkill,
   createConductorSession,
@@ -4157,23 +4158,6 @@ export function formatDisplayMessageHeader(entry: DisplayMessage, spinner = ''):
   }
 }
 
-function formatToolArgs(args: Record<string, unknown> | undefined): string {
-  if (!args) {
-    return '';
-  }
-
-  const parts: string[] = [];
-  for (const [key, value] of Object.entries(args)) {
-    let rendered = typeof value === 'string' ? value : JSON.stringify(value);
-    if (rendered.length > 80) {
-      rendered = rendered.slice(0, 77) + '...';
-    }
-    parts.push(`${key}=${rendered}`);
-  }
-
-  return parts.join(', ');
-}
-
 function formatSystemAssetSourcePath(workspaceRoot: string, filePath: string): string {
   const relativePath = path.relative(workspaceRoot, filePath);
   if (relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath)) {
@@ -4189,7 +4173,7 @@ function formatToolEventLine(logEvent: ConductorLogEvent): string | null {
   }
 
   const prefix = formatEventPrefix(logEvent);
-  const callLabel = `${event.toolName}(${formatToolArgs(event.toolArgs)})`;
+  const callLabel = `${event.toolName}(${formatToolArgs(event.toolArgs, 80)})`;
   if (!event.toolState) {
     return `${prefix}tool ${callLabel}`;
   }
