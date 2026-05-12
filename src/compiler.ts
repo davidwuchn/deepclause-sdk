@@ -500,7 +500,7 @@ export async function analyzeDML(dml: string): Promise<AnalysisResult> {
 /**
  * Run LLM-based security audit
  */
-async function auditDML(
+export async function runLLMSecurityAudit(
   dml: string,
   staticAnalysis: AnalysisResult,
   model: string,
@@ -512,6 +512,15 @@ async function auditDML(
   const prompt = `
 You are a senior security engineer auditing a DeepClause agent (DML).
 DML is a Prolog dialect for controlling LLMs.
+
+RUNTIME CONSTRAINTS:
+- Only recommend mitigations that are actually supported by the current DeepClause runtime or standard SWI-Prolog predicates used here.
+- Do NOT recommend nonexistent helpers or framework features such as sanitize_for_prompt/2, structured message envelopes for task()/prompt(), or built-in ask_user rate limiting.
+- task()/prompt() take a plain string as their first argument. If you suggest prompt-injection mitigations, prefer prompt() for fresh context, narrower prompt text, explicit quoting/fencing of untrusted data, and minimizing tainted interpolation into system()/user().
+- Positional agent_main arguments arrive as runtime strings by default. If you suggest type checks, prefer must_be(string, Arg) first, then explicit parsing/conversion.
+- Safe concrete suggestions in this codebase include must_be/2, simple string/atom guards, explicit empty-input checks, output-shape checks written in Prolog, atom_json_dict/3, get_dict/3, prompt(), and using gas limits or explicit counters for retry loops.
+- If an idea would require adding a new runtime helper or framework feature, label it clearly as "not currently built in" instead of presenting it as already available.
+- Do not invent warnings or remediation steps when the static findings do not support them.
 
 CODE:
 \`\`\`prolog
@@ -537,6 +546,10 @@ Provide a concise Markdown report with:
 - Critical Issues (if any)
 - Warnings
 - Suggestions for improvement
+
+Each suggestion must be either:
+- A supported mitigation that exists in this runtime, or
+- Explicitly labeled as requiring new runtime support.
 `;
 
   try {
@@ -550,6 +563,30 @@ Provide a concise Markdown report with:
   } catch (e) {
     return `Audit failed: ${e}`;
   }
+}
+
+export async function analyzeAndAuditDML(
+  dml: string,
+  options: {
+    audit?: boolean;
+    model: string;
+    provider: string;
+    baseUrl?: string;
+  }
+): Promise<AnalysisResult> {
+  const analysis = await analyzeDML(dml);
+
+  if (options.audit) {
+    analysis.auditorReport = await runLLMSecurityAudit(
+      dml,
+      analysis,
+      options.model,
+      options.provider,
+      options.baseUrl,
+    );
+  }
+
+  return analysis;
 }
 
 // =============================================================================
@@ -597,12 +634,12 @@ export async function compileToDML(
 
       if (validation.valid) {
         // Run Static Analysis
-        const analysis = await analyzeDML(dml);
-        
-        // Optionally Run Auditor
-        if (options.audit) {
-           analysis.auditorReport = await auditDML(dml, analysis, model, provider, baseUrl);
-        }
+        const analysis = await analyzeAndAuditDML(dml, {
+          audit: options.audit,
+          model,
+          provider,
+          baseUrl,
+        });
 
         // Generate explanation
         const explanation = await generateExplanation(dml, model, provider, baseUrl);

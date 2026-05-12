@@ -3,7 +3,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { createDeepClause } from '../../sdk.js';
 import type { AnalysisResult, DMLEvent, DeepClauseSDK } from '../../types.js';
-import { analyzeDML, extractDescription, extractParameters, validateWithProlog } from '../../compiler.js';
+import { analyzeAndAuditDML, analyzeDML, extractDescription, extractParameters, validateWithProlog } from '../../compiler.js';
 import { newsSearch, webSearch } from '../../cli/search.js';
 import type { Config } from '../../cli/config.js';
 import type { MetaFile } from '../../cli/compile.js';
@@ -13,6 +13,7 @@ import { listLocalSkillCatalog } from './catalog-skills.js';
 import { withCapturedConsole } from './console-capture.js';
 import { executeDml } from './dml-executor.js';
 import { createShellManager, type ShellManager } from './shell-manager.js';
+import { createShellToolEventBridge } from './shell-tool-events.js';
 import { recordTokenUsage, type TokenUsageByModel } from './token-usage.js';
 
 interface PublishResult {
@@ -34,6 +35,9 @@ export interface SkillCreatorCompileOptions {
   validateOnly?: boolean;
   maxAttempts?: number;
   verbose?: boolean;
+  stream?: boolean;
+  trace?: boolean;
+  audit?: boolean;
   onUserInput?: (prompt: string) => Promise<string>;
   signal?: AbortSignal;
   onEvent?: (event: DMLEvent) => void;
@@ -99,8 +103,8 @@ async function compileWithSkillCreatorInternal(
     baseUrl: options.compileSelection.baseUrl,
     temperature: options.compileSelection.temperature,
     debug: options.verbose,
-    trace: options.verbose,
-    streaming: !!options.onEvent,
+    trace: !!options.trace,
+    streaming: (options.stream ?? false) || !!options.onEvent,
     maxTokens: 65536,
   });
 
@@ -108,6 +112,25 @@ async function compileWithSkillCreatorInternal(
   let finalAnswer = '';
   let runtimeError: string | undefined;
   const usageByModel: TokenUsageByModel = {};
+
+  const emitEvent = (event: DMLEvent) => {
+    options.onEvent?.(event);
+    if (event.type === 'output' && options.verbose && !options.onEvent && event.content) {
+      console.log(event.content);
+    }
+    if (event.type === 'tool_call' && options.verbose && !options.onEvent && event.toolName) {
+      console.log(`  🔧 ${event.toolName}`);
+    }
+    if (event.type === 'usage') {
+      recordTokenUsage(usageByModel, options.compileSelection.id, event.usage);
+    }
+    if (event.type === 'answer' && event.content) {
+      finalAnswer = event.content;
+    }
+    if (event.type === 'error') {
+      runtimeError = event.content ?? 'Unknown skill creator error';
+    }
+  };
 
   try {
     registerSkillCreatorTools(sdk, {
@@ -126,13 +149,14 @@ async function compileWithSkillCreatorInternal(
       },
       sandbox: options.sandbox,
       signal: options.signal,
-        onEvent: options.onEvent,
+      onEvent: emitEvent,
     });
 
     const skillCreatorDml = await readSystemSkillAsset('skill-creator', {
       workspaceRoot: options.workspaceRoot,
     });
     const systemPrompt = await buildSkillCreatorSystemPrompt(
+      path.resolve(options.workspaceRoot ?? workspacePath),
       options.config,
       options.compileSelection,
       options.maxAttempts,
@@ -152,22 +176,7 @@ async function compileWithSkillCreatorInternal(
       onUserInput: options.onUserInput,
       signal: options.signal,
     })) {
-      options.onEvent?.(event);
-      if (event.type === 'output' && options.verbose && !options.onEvent && event.content) {
-        console.log(event.content);
-      }
-      if (event.type === 'tool_call' && options.verbose && !options.onEvent && event.toolName) {
-        console.log(`  🔧 ${event.toolName}`);
-      }
-      if (event.type === 'usage') {
-        recordTokenUsage(usageByModel, options.compileSelection.id, event.usage);
-      }
-      if (event.type === 'answer' && event.content) {
-        finalAnswer = event.content;
-      }
-      if (event.type === 'error') {
-        runtimeError = event.content ?? 'Unknown skill creator error';
-      }
+      emitEvent(event);
     }
 
     if (runtimeError) {
@@ -179,7 +188,12 @@ async function compileWithSkillCreatorInternal(
       throw new Error(finalAnswer || 'Skill creator finished without producing a published artifact');
     }
 
-    const analysis = await analyzeDML(publishResult.dml);
+    const analysis = await analyzeAndAuditDML(publishResult.dml, {
+      audit: options.audit,
+      model: options.compileSelection.model,
+      provider: options.compileSelection.provider,
+      baseUrl: options.compileSelection.baseUrl,
+    });
 
     return {
       dml: publishResult.dml,
@@ -280,7 +294,18 @@ function registerSkillCreatorTools(
       },
       required: ['command'],
     },
-    execute: async (args) => context.shell.exec(String(args.command ?? ''), context.signal),
+    execute: async (args) => {
+      const command = String(args.command ?? '');
+      return context.shell.exec(
+        command,
+        context.signal,
+        createShellToolEventBridge({
+          toolName: 'bash',
+          toolArgs: { command },
+          emit: context.onEvent,
+        }),
+      );
+    },
   });
 
   sdk.registerTool('write_file', {
@@ -347,12 +372,13 @@ function registerSkillCreatorTools(
 }
 
 async function buildSkillCreatorSystemPrompt(
+  workspaceRoot: string,
   config: Config,
   compileSelection: ResolvedModelConfig,
   maxAttempts?: number,
   sandbox = false,
 ): Promise<string> {
-  const promptTemplate = await readSystemPromptAsset('skill-creator');
+  const promptTemplate = await readSystemPromptAsset('skill-creator', { workspaceRoot });
   const toolsTable = [
     '| Tool | Description |',
     '|------|-------------|',

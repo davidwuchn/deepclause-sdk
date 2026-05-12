@@ -5,9 +5,11 @@
  */
 
 import { z } from 'zod';
+import { readFileSync } from 'fs';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { writeDefaultSkillSeeds } from './default-skills.js';
+import { getSystemPromptAssetPath, getSystemSkillAssetPath, getWorkspaceDocAssetPath } from '../system/assets/index.js';
 import {
   DEFAULT_MODEL_IDS,
   DEFAULT_TEMPERATURES,
@@ -111,6 +113,14 @@ export function getToolsDir(workspaceRoot: string): string {
   return path.join(getConfigDir(workspaceRoot), 'tools');
 }
 
+export function getSystemDir(workspaceRoot: string): string {
+  return path.join(getConfigDir(workspaceRoot), 'system');
+}
+
+export function getDocsDir(workspaceRoot: string): string {
+  return path.join(getConfigDir(workspaceRoot), 'docs');
+}
+
 // =============================================================================
 // Configuration Operations
 // =============================================================================
@@ -125,6 +135,8 @@ export async function initConfig(
   const configDir = getConfigDir(workspaceRoot);
   const configPath = getConfigPath(workspaceRoot);
   const toolsDir = getToolsDir(workspaceRoot);
+  const systemDir = getSystemDir(workspaceRoot);
+  const docsDir = getDocsDir(workspaceRoot);
 
   // Check for existing config
   try {
@@ -143,6 +155,8 @@ export async function initConfig(
   // Create directories
   await fs.mkdir(configDir, { recursive: true });
   await fs.mkdir(toolsDir, { recursive: true });
+  await fs.mkdir(systemDir, { recursive: true });
+  await fs.mkdir(docsDir, { recursive: true });
 
   // Create config with optional model override
   const initialModelId = options.model ? normalizeModelId(options.model) : DEFAULT_MODEL_IDS.run;
@@ -170,6 +184,64 @@ export async function initConfig(
   await fs.writeFile(gitignorePath, gitignoreContent);
 
   await writeDefaultSkillSeeds(toolsDir, initialModelId);
+  await writeSystemOverrideSeeds(systemDir);
+  await ensureWorkspaceDocSeeds(workspaceRoot, { overwrite: true });
+}
+
+async function writeSystemOverrideSeeds(systemDir: string): Promise<void> {
+  const packagedAssets = [
+    {
+      fileName: 'conductor.dml',
+      content: readFileSync(getSystemSkillAssetPath('conductor'), 'utf8'),
+    },
+    {
+      fileName: 'skill-creator.dml',
+      content: readFileSync(getSystemSkillAssetPath('skill-creator'), 'utf8'),
+    },
+    {
+      fileName: 'CONDUCTOR_PROMPT.md',
+      content: readFileSync(getSystemPromptAssetPath('conductor'), 'utf8'),
+    },
+    {
+      fileName: 'DML_COMPILER_PROMPT.md',
+      content: readFileSync(getSystemPromptAssetPath('skill-creator'), 'utf8'),
+    },
+  ];
+
+  await Promise.all(packagedAssets.map(({ fileName, content }) => (
+    fs.writeFile(path.join(systemDir, fileName), content, 'utf8')
+  )));
+}
+
+export async function ensureWorkspaceDocSeeds(
+  workspaceRoot: string,
+  options: { overwrite?: boolean } = {},
+): Promise<void> {
+  const docsDir = getDocsDir(workspaceRoot);
+  await fs.mkdir(docsDir, { recursive: true });
+  await copyWorkspaceDocSeeds(docsDir, options.overwrite ?? false);
+}
+
+async function copyWorkspaceDocSeeds(docsDir: string, overwrite: boolean): Promise<void> {
+  const packagedDocs = [
+    {
+      fileName: 'TUI.md',
+      content: readFileSync(getWorkspaceDocAssetPath('tui'), 'utf8'),
+    },
+  ];
+
+  await Promise.all(packagedDocs.map(async ({ fileName, content }) => {
+    const filePath = path.join(docsDir, fileName);
+    if (!overwrite) {
+      try {
+        await fs.access(filePath);
+        return;
+      } catch {
+        // Seed the packaged doc when it is missing.
+      }
+    }
+    await fs.writeFile(filePath, content, 'utf8');
+  }));
 }
 
 /**

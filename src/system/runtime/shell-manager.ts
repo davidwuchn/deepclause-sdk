@@ -1,11 +1,15 @@
 import { spawn, type ChildProcess } from 'child_process';
-import { AgentVMManager, type ShellExecResult } from './agentvm-manager.js';
+import {
+  AgentVMManager,
+  type ShellExecObserver,
+  type ShellExecResult,
+} from './agentvm-manager.js';
 
 const ABORT_FORCE_KILL_MS = 500;
 
 export interface ShellManager {
   readonly kind: 'host' | 'sandbox';
-  exec(command: string, signal?: AbortSignal): Promise<ShellExecResult>;
+  exec(command: string, signal?: AbortSignal, observer?: ShellExecObserver): Promise<ShellExecResult>;
   dispose(): Promise<void>;
 }
 
@@ -20,7 +24,11 @@ export class HostShellManager implements ShellManager {
 
   constructor(private readonly workspacePath: string) {}
 
-  async exec(command: string, signal?: AbortSignal): Promise<ShellExecResult> {
+  async exec(
+    command: string,
+    signal?: AbortSignal,
+    observer?: ShellExecObserver,
+  ): Promise<ShellExecResult> {
     if (signal?.aborted) {
       throw abortError(signal.reason);
     }
@@ -32,6 +40,12 @@ export class HostShellManager implements ShellManager {
         detached: process.platform !== 'win32',
       });
 
+      observer?.onStart?.({
+        command,
+        pid: child.pid,
+        backend: this.kind,
+      });
+
       let stdout = '';
       let stderr = '';
 
@@ -39,9 +53,21 @@ export class HostShellManager implements ShellManager {
       child.stderr.setEncoding('utf8');
       child.stdout.on('data', (chunk) => {
         stdout += chunk;
+        observer?.onStdout?.({
+          command,
+          chunk,
+          pid: child.pid,
+          backend: this.kind,
+        });
       });
       child.stderr.on('data', (chunk) => {
         stderr += chunk;
+        observer?.onStderr?.({
+          command,
+          chunk,
+          pid: child.pid,
+          backend: this.kind,
+        });
       });
 
       let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
@@ -103,15 +129,26 @@ export class HostShellManager implements ShellManager {
         }
         const exitCode = typeof code === 'number' ? code : 1;
         const signalSuffix = closeSignal ? ` (signal ${closeSignal})` : '';
-        finalizeResolve({
+        const result: ShellExecResult = {
           success: exitCode === 0,
           stdout,
           stderr,
           exitCode,
+          pid: child.pid,
+          backend: this.kind,
           summary: exitCode === 0
             ? 'Command completed successfully'
             : (stderr || `Command failed with exit code ${exitCode}${signalSuffix}`),
+        };
+        observer?.onExit?.({
+          command,
+          pid: child.pid,
+          backend: this.kind,
+          success: result.success,
+          exitCode,
+          summary: result.summary,
         });
+        finalizeResolve(result);
       });
     });
   }

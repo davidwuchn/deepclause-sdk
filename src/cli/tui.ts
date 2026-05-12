@@ -17,6 +17,15 @@ import {
   type ConductorSessionDetail,
   type ConductorSessionSummary,
 } from '../system/runtime/conductor.js';
+import { getSystemAssetSourcePaths } from '../system/assets/index.js';
+import { createShellManager } from '../system/runtime/shell-manager.js';
+import type { ShellExecResult } from '../system/runtime/agentvm-manager.js';
+import {
+  buildToolCompletionEvent,
+  buildToolFailureEvent,
+  buildToolStartEvent,
+  createShellToolEventBridge,
+} from '../system/runtime/shell-tool-events.js';
 import type { DMLEvent } from '../types.js';
 
 const IGNORED_LIVE_LOG_TOOLS = new Set(['set_result', 'update_memory']);
@@ -102,6 +111,7 @@ type MenuActionId =
   | 'files.readme'
   | 'files.config'
   | 'run.prompt'
+  | 'run.shell'
   | 'run.repeat'
   | 'run.cancel'
   | 'run.clear'
@@ -220,16 +230,26 @@ export interface DisplayMessage {
 
 interface RunningPreview {
   sessionId: string;
-  kind: 'task' | 'skill';
+  kind: 'task' | 'skill' | 'shell';
   rootTag?: string;
   activeChildTag?: string;
   entries: DisplayMessage[];
 }
 
+interface ActiveToolStatus {
+  scopeKey: string;
+  scopeLabel: string;
+  toolName: string;
+  toolState: NonNullable<DMLEvent['toolState']>;
+  toolPid?: number;
+  toolBackend?: DMLEvent['toolBackend'];
+}
+
 export type ParsedTuiInput =
   | { kind: 'text'; prompt: string }
   | { kind: 'builtin'; name: BuiltinSlashCommand; rawArgs: string; args: string[] }
-  | { kind: 'skill'; name: string; rawArgs: string; args: string[] };
+  | { kind: 'skill'; name: string; rawArgs: string; args: string[] }
+  | { kind: 'shell'; command: string };
 
 export interface SlashCompletionResult {
   value: string;
@@ -262,10 +282,7 @@ export class LiveExecutionPrinter {
 
     switch (event.type) {
       case 'tool_call':
-        if (!event.toolName || IGNORED_LIVE_LOG_TOOLS.has(event.toolName)) {
-          return;
-        }
-        this.writeLine(`${formatEventPrefix(logEvent)}tool ${event.toolName}(${formatToolArgs(event.toolArgs)})`);
+        this.handleToolCall(logEvent);
         break;
 
       case 'output':
@@ -333,10 +350,19 @@ export class LiveExecutionPrinter {
     this.streamOpen = false;
     this.activeStreamKey = null;
   }
+
+  private handleToolCall(logEvent: ConductorLogEvent): void {
+    const line = formatToolEventLine(logEvent);
+    if (!line) {
+      return;
+    }
+    this.writeLine(line);
+  }
 }
 
-class ActivityBuffer {
+export class ActivityBuffer {
   private readonly lines: string[] = [];
+  private readonly activeTools = new Map<string, ActiveToolStatus>();
   private activeStreamKey: string | null = null;
   private activeStreamLine = '';
 
@@ -356,10 +382,7 @@ class ActivityBuffer {
 
     switch (event.type) {
       case 'tool_call':
-        if (!event.toolName || IGNORED_LIVE_LOG_TOOLS.has(event.toolName)) {
-          return;
-        }
-        this.pushLine(`${formatEventPrefix(logEvent)}tool ${event.toolName}(${formatToolArgs(event.toolArgs)})`);
+        this.handleToolCall(logEvent);
         break;
 
       case 'output':
@@ -405,18 +428,27 @@ class ActivityBuffer {
 
   finish(): void {
     this.flushStream();
+    this.activeTools.clear();
   }
 
   clear(): void {
     this.lines.length = 0;
+    this.activeTools.clear();
     this.activeStreamKey = null;
     this.activeStreamLine = '';
   }
 
   snapshot(): string[] {
-    return this.activeStreamLine
+    const body = this.activeStreamLine
       ? [...this.lines, this.activeStreamLine]
       : [...this.lines];
+    const activeLines = this.buildActiveToolLines();
+    if (activeLines.length === 0) {
+      return body;
+    }
+    return body.length > 0
+      ? [...activeLines, '', ...body]
+      : activeLines;
   }
 
   private handleStream(logEvent: ConductorLogEvent): void {
@@ -453,6 +485,47 @@ class ActivityBuffer {
     if (this.lines.length > MAX_ACTIVITY_LINES) {
       this.lines.splice(0, this.lines.length - MAX_ACTIVITY_LINES);
     }
+  }
+
+  private handleToolCall(logEvent: ConductorLogEvent): void {
+    const { event } = logEvent;
+    if (!event.toolName || IGNORED_LIVE_LOG_TOOLS.has(event.toolName)) {
+      return;
+    }
+
+    if (event.toolState) {
+      const scopeKey = toolScopeKey(logEvent);
+      if (event.toolState === 'starting' || event.toolState === 'running') {
+        this.activeTools.set(scopeKey, {
+          scopeKey,
+          scopeLabel: toolScopeLabel(logEvent),
+          toolName: event.toolName,
+          toolState: event.toolState,
+          toolPid: event.toolPid,
+          toolBackend: event.toolBackend,
+        });
+      } else {
+        this.activeTools.delete(scopeKey);
+      }
+    }
+
+    const line = formatToolEventLine(logEvent);
+    if (line) {
+      this.pushLine(line);
+    }
+  }
+
+  private buildActiveToolLines(): string[] {
+    if (this.activeTools.size === 0) {
+      return [];
+    }
+
+    const lines = ['Active Tool Status'];
+    const entries = [...this.activeTools.values()].sort((left, right) => left.scopeKey.localeCompare(right.scopeKey));
+    for (const entry of entries) {
+      lines.push(formatActiveToolStatus(entry));
+    }
+    return lines;
   }
 }
 
@@ -491,6 +564,7 @@ class FullscreenTui {
   private editorState: EditorState | null = null;
   private readonly recentFiles: string[] = [];
   private lastSubmittedInput: ParsedTuiInput | null = null;
+  private shellWorkspacePath: string;
   private renderTimer: ReturnType<typeof setTimeout> | null = null;
   private animationTimer: ReturnType<typeof setInterval> | null = null;
   private closeResolver: (() => void) | null = null;
@@ -501,7 +575,9 @@ class FullscreenTui {
   constructor(
     private readonly workspaceRoot: string,
     private readonly options: { sandbox?: boolean } = {},
-  ) {}
+  ) {
+    this.shellWorkspacePath = path.resolve(workspaceRoot, 'workspace');
+  }
 
   async start(): Promise<void> {
     try {
@@ -681,8 +757,12 @@ class FullscreenTui {
         return;
 
       case 'escape':
+        {
+          const previousInput = this.inputValue;
         this.inputValue = '';
         this.cursor = 0;
+          this.refreshCommandBarStatus(previousInput);
+        }
         break;
 
       default:
@@ -1029,7 +1109,7 @@ class FullscreenTui {
       return;
     }
 
-    const parsed = parseSlashInput(trimmedInput);
+    const parsed = parseCommandBarInput(rawInput);
     if (this.busy && !this.pendingPrompt && !canSubmitParsedInputWhileBusy(parsed)) {
       this.statusLine = 'Execution is still running. Use /cancel or Ctrl+C to stop it.';
       this.requestRender();
@@ -1042,6 +1122,10 @@ class FullscreenTui {
     }
     if (parsed.kind === 'skill') {
       await this.executeSkill(parsed.name, parsed.args);
+      return;
+    }
+    if (parsed.kind === 'shell') {
+      await this.executeShellCommand(parsed.command);
       return;
     }
 
@@ -1257,6 +1341,66 @@ class FullscreenTui {
     }
   }
 
+  private async executeShellCommand(commandText: string): Promise<void> {
+    const trimmedCommand = commandText.trim();
+    if (!trimmedCommand) {
+      this.statusLine = 'Enter a shell command after !.';
+      this.requestRender();
+      return;
+    }
+
+    const sessionId = this.selectedSessionId || 'global';
+    const activity = this.activityFor(sessionId);
+    this.lastSubmittedInput = { kind: 'shell', command: trimmedCommand };
+    this.focusedPane = 'messages';
+    this.paneScroll.messages = 0;
+    this.paneScroll.process = 0;
+    this.beginExecutionPreview(sessionId, 'shell', {
+      role: 'system',
+      kind: 'output',
+      tag: 'shell',
+      content: `!${trimmedCommand}`,
+    }, 'shell');
+    activity.pushLine(`shell !${trimmedCommand}`);
+    this.busy = true;
+    this.currentAbortController = new AbortController();
+    this.startAnimation();
+    this.statusLine = `Running !${trimmedCommand}...`;
+    this.requestRender();
+
+    try {
+      const result = await runShellCommand(this.workspaceRoot, trimmedCommand, {
+        sandbox: this.options.sandbox,
+        signal: this.currentAbortController.signal,
+        onEvent: (event) => {
+          activity.handle(event);
+          this.requestRender();
+        },
+      });
+
+      activity.finish();
+      await this.refreshCommands();
+      this.finishExecutionPreview(result.success
+        ? { persist: true, finalText: formatShellCommandSummary(result) }
+        : { persist: true, error: formatShellCommandSummary(result) });
+      this.statusLine = result.success ? 'Shell command finished.' : 'Shell command failed.';
+    } catch (error) {
+      activity.finish();
+      const message = (error as Error).message;
+      this.finishExecutionPreview({ persist: true, error: message });
+      this.statusLine = isAbortError(error) ? 'Shell command cancelled.' : 'Shell command failed.';
+    } finally {
+      this.busy = false;
+      this.currentAbortController = null;
+      this.stopAnimation();
+      if (this.exitRequested) {
+        this.close();
+      } else {
+        this.requestRender();
+      }
+    }
+  }
+
   private async requestClarification(promptText: string): Promise<string> {
     this.ensureClarificationVisible(promptText);
     return this.promptForValue(promptText, 'clarify');
@@ -1450,7 +1594,8 @@ class FullscreenTui {
         label: 'Run',
         items: [
           { id: 'run.prompt', label: 'Send Prompt…', description: 'Return to the command bar and enter a freeform prompt.', shortcut: 'Enter' },
-          { id: 'run.repeat', label: 'Repeat Last Command', description: 'Re-run the last prompt or skill invocation.', enabled: !!this.lastSubmittedInput },
+          { id: 'run.shell', label: 'Run Shell Command…', description: 'Prefill the command bar for a direct workspace shell command.' },
+          { id: 'run.repeat', label: 'Repeat Last Command', description: 'Re-run the last prompt, shell command, or skill invocation.', enabled: !!this.lastSubmittedInput },
           { id: 'run.cancel', label: 'Cancel Current Execution', description: 'Abort the running task or skill.', shortcut: '/cancel', enabled: this.busy },
           { id: 'run.clear', label: 'Clear Execution Pane', description: 'Discard the current session execution log.' },
           { id: 'run.refreshSkills', label: 'Refresh Skill Catalog', description: 'Re-scan the workspace for compiled skills.' },
@@ -1473,7 +1618,7 @@ class FullscreenTui {
         label: 'Help',
         items: [
           { id: 'help.shortcuts', label: 'Keyboard Shortcuts', description: 'Show the fullscreen keyboard map.' },
-          { id: 'help.slash', label: 'Slash Commands', description: 'Show available slash commands and direct skill invocation.' },
+          { id: 'help.slash', label: 'Commands', description: 'Show slash commands, shell commands, and direct skill invocation.' },
           { id: 'help.about', label: 'About This TUI', description: 'Show a short explanation of the fullscreen workspace.' },
         ],
       },
@@ -1574,6 +1719,14 @@ class FullscreenTui {
         this.statusLine = 'Command bar ready.';
         return;
 
+      case 'run.shell':
+        this.closeMenuMode();
+        this.inputValue = '!';
+        this.cursor = this.inputValue.length;
+        this.statusLine = formatShellModeStatus(this.workspaceRoot, this.shellWorkspacePath, this.options.sandbox);
+        this.requestRender();
+        return;
+
       case 'run.repeat':
         await this.repeatLastCommand();
         return;
@@ -1623,7 +1776,7 @@ class FullscreenTui {
         return;
 
       case 'help.slash':
-        this.openTextViewer('Slash Commands', getSlashHelpLines().join('\n'), { preferredExtension: '.txt' });
+        this.openTextViewer('Commands', getSlashHelpLines().join('\n'), { preferredExtension: '.txt' });
         return;
 
       case 'help.about':
@@ -1633,6 +1786,7 @@ class FullscreenTui {
             'DeepClause fullscreen TUI',
             '',
             'Use F10 or Ctrl+G for the menu bar, Ctrl+W to cycle panes, and /cancel to stop a running execution.',
+            'Type !<command> to run a direct shell command in the configured workspace shell.',
             'The Skills and Files menus open searchable pickers, and Ctrl+P opens the action palette directly.',
           ].join('\n'),
           { preferredExtension: '.txt' },
@@ -2265,7 +2419,7 @@ class FullscreenTui {
   private async repeatLastCommand(): Promise<void> {
     if (!this.lastSubmittedInput) {
       this.closeMenuMode();
-      this.statusLine = 'No previous prompt or skill to repeat yet.';
+      this.statusLine = 'No previous prompt, shell command, or skill to repeat yet.';
       this.requestRender();
       return;
     }
@@ -2281,6 +2435,10 @@ class FullscreenTui {
       await this.executeSkill(this.lastSubmittedInput.name, this.lastSubmittedInput.args);
       return;
     }
+    if (this.lastSubmittedInput.kind === 'shell') {
+      await this.executeShellCommand(this.lastSubmittedInput.command);
+      return;
+    }
     if (this.lastSubmittedInput.kind === 'builtin') {
       await this.executeBuiltin(this.lastSubmittedInput);
     }
@@ -2294,13 +2452,15 @@ class FullscreenTui {
     return path.join(this.workspaceRoot, `${command.path}.meta.json`);
   }
 
-  private beginExecutionPreview(sessionId: string, kind: 'task' | 'skill', lead: DisplayMessage, rootTag?: string): void {
+  private beginExecutionPreview(sessionId: string, kind: 'task' | 'skill' | 'shell', lead: DisplayMessage, rootTag?: string): void {
     this.currentPreview = {
       sessionId,
       kind,
       rootTag,
       activeChildTag: kind === 'skill' ? rootTag : undefined,
-      entries: [lead, { role: 'assistant', content: '', pending: true }],
+      entries: kind === 'shell'
+        ? [lead]
+        : [lead, { role: 'assistant', content: '', pending: true }],
     };
   }
 
@@ -2354,6 +2514,10 @@ class FullscreenTui {
 
     if (this.currentPreview.kind === 'task') {
       return logEvent.scope === 'main';
+    }
+
+    if (this.currentPreview.kind === 'shell') {
+      return false;
     }
 
     return logEvent.scope === 'child' && logEvent.childSlug === this.currentPreview.rootTag;
@@ -2425,6 +2589,28 @@ class FullscreenTui {
     }
 
     this.currentPreview.activeChildTag = undefined;
+
+    if (this.currentPreview.kind === 'shell') {
+      const detail: DisplayMessage | null = typeof options.error === 'string' && options.error.trim()
+        ? { role: 'system', kind: 'output', tag: 'shell', content: options.error, error: true }
+        : typeof options.finalText === 'string' && options.finalText.trim()
+          ? { role: 'system', kind: 'output', tag: 'shell', content: options.finalText }
+          : null;
+
+      if (detail) {
+        this.currentPreview.entries.push(detail);
+      }
+
+      if (options.persist) {
+        const existing = this.ephemeralMessagesBySessionId.get(this.currentPreview.sessionId) ?? [];
+        existing.push(...this.currentPreview.entries.map((entry) => ({ ...entry, pending: false })));
+        this.ephemeralMessagesBySessionId.set(this.currentPreview.sessionId, existing);
+      }
+
+      this.currentPreview = null;
+      return;
+    }
+
     const assistant = this.ensurePreviewAssistantMessage();
     if (typeof options.finalText === 'string' && options.finalText.trim()) {
       assistant.content = options.finalText;
@@ -2554,27 +2740,56 @@ class FullscreenTui {
   }
 
   private insertText(text: string): void {
+    const previousInput = this.inputValue;
     this.inputValue = `${this.inputValue.slice(0, this.cursor)}${text}${this.inputValue.slice(this.cursor)}`;
     this.cursor += text.length;
+    this.refreshCommandBarStatus(previousInput);
   }
 
   private deleteBackward(): void {
     if (this.cursor === 0) {
       return;
     }
+    const previousInput = this.inputValue;
     this.inputValue = `${this.inputValue.slice(0, this.cursor - 1)}${this.inputValue.slice(this.cursor)}`;
     this.cursor -= 1;
+    this.refreshCommandBarStatus(previousInput);
   }
 
   private deleteForward(): void {
     if (this.cursor >= this.inputValue.length) {
       return;
     }
+    const previousInput = this.inputValue;
     this.inputValue = `${this.inputValue.slice(0, this.cursor)}${this.inputValue.slice(this.cursor + 1)}`;
+    this.refreshCommandBarStatus(previousInput);
   }
 
   private async refreshCommands(): Promise<void> {
     this.commands = await listCommands(this.workspaceRoot);
+    await this.refreshShellContext();
+  }
+
+  private async refreshShellContext(): Promise<void> {
+    const config = await loadConfig(this.workspaceRoot);
+    this.shellWorkspacePath = path.resolve(this.workspaceRoot, config.workspace || './workspace');
+  }
+
+  private refreshCommandBarStatus(previousInput = ''): void {
+    if (this.busy || this.pendingPrompt || this.uiMode !== 'command') {
+      return;
+    }
+
+    const wasShell = previousInput.trimStart().startsWith('!');
+    const isShell = this.inputValue.trimStart().startsWith('!');
+    if (isShell) {
+      this.statusLine = formatShellModeStatus(this.workspaceRoot, this.shellWorkspacePath, this.options.sandbox);
+      return;
+    }
+
+    if (wasShell) {
+      this.statusLine = 'Command bar ready.';
+    }
   }
 
   private async refreshSessions(options: { createIfMissing?: boolean; selectedSessionId?: string } = {}): Promise<void> {
@@ -2851,6 +3066,7 @@ class FullscreenTui {
     }
 
     const contextSize = summarizeContextSize(this.sessionDetail);
+    const systemAssetSources = getSystemAssetSourcePaths(this.workspaceRoot);
     const usageEntries = Object.entries(this.sessionDetail.usageByModel ?? {})
       .sort((left, right) => right[1].totalTokens - left[1].totalTokens || left[0].localeCompare(right[0]));
 
@@ -2861,6 +3077,17 @@ class FullscreenTui {
       `Task Memory ${formatByteSize(contextSize.taskMemoryBytes)} (~${formatInteger(contextSize.taskMemoryTokens)} tok)`,
       `Assistant Memory ${formatByteSize(contextSize.assistantMemoryBytes)} (~${formatInteger(contextSize.assistantMemoryTokens)} tok)`,
       `Total ${formatByteSize(contextSize.totalBytes)} (~${formatInteger(contextSize.totalTokens)} tok)`,
+      '',
+      'System Asset Sources',
+      `Conductor DML ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.conductorDml)}`,
+      `Conductor Prompt ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.conductorPrompt)}`,
+      `Skill Creator DML ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.skillCreatorDml)}`,
+      `Skill Creator Prompt ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.skillCreatorPrompt)}`,
+      'Changes apply on the next turn or /compile run. No TUI reload is required.',
+      '',
+      'Shell Execution',
+      `Backend ${this.options.sandbox ? 'sandbox' : 'host'}`,
+      `CWD ${this.shellWorkspacePath}`,
       '',
       'Session Token Usage',
     ];
@@ -3197,7 +3424,7 @@ async function startLineTui(
         continue;
       }
 
-      const parsed = parseSlashInput(line);
+      const parsed = parseCommandBarInput(line);
       if (parsed.kind === 'builtin') {
         switch (parsed.name) {
           case 'cancel':
@@ -3264,6 +3491,30 @@ async function startLineTui(
             console.log('');
             continue;
         }
+      }
+
+      if (parsed.kind === 'shell') {
+        console.log(divider('-'));
+        console.log(`${paint('shell', ANSI.dim)} !${parsed.command}`);
+        console.log(divider('-'));
+        const printer = new LiveExecutionPrinter();
+
+        try {
+          const result = await runShellCommand(workspaceRoot, parsed.command, {
+            sandbox: options.sandbox,
+            onEvent: (event) => printer.handle(event),
+          });
+          printer.finish();
+          console.log(formatShellCommandSummary(result));
+        } catch (error) {
+          printer.finish();
+          console.log(`${paint('error', ANSI.red)} ${(error as Error).message}`);
+        }
+
+        console.log('');
+        console.log(divider('-'));
+        console.log('');
+        continue;
       }
 
       if (parsed.kind === 'skill') {
@@ -3428,6 +3679,51 @@ async function runSkillCreatorCommand(
   });
 }
 
+async function runShellCommand(
+  workspaceRoot: string,
+  command: string,
+  options: {
+    sandbox?: boolean;
+    signal?: AbortSignal;
+    onEvent?: (event: ConductorLogEvent) => void;
+  } = {},
+): Promise<ShellExecResult> {
+  const trimmedCommand = command.trim();
+  if (!trimmedCommand) {
+    throw new Error('command is required');
+  }
+
+  const toolName = 'shell';
+  const toolArgs = { command: trimmedCommand };
+  const emit = (event: DMLEvent) => options.onEvent?.({ scope: 'main', event });
+  emit(buildToolStartEvent(toolName, toolArgs));
+
+  let shellManager: ReturnType<typeof createShellManager> | null = null;
+
+  try {
+    const config = await loadConfig(workspaceRoot);
+    const workspacePath = path.resolve(workspaceRoot, config.workspace || './workspace');
+    shellManager = createShellManager({
+      workspacePath,
+      sandbox: options.sandbox,
+    });
+
+    const observer = createShellToolEventBridge({
+      toolName,
+      toolArgs,
+      emit,
+    });
+    const result = await shellManager.exec(trimmedCommand, options.signal, observer);
+    emit(buildToolCompletionEvent(toolName, toolArgs, result));
+    return result;
+  } catch (error) {
+    emit(buildToolFailureEvent(toolName, toolArgs, error));
+    throw error;
+  } finally {
+    await shellManager?.dispose();
+  }
+}
+
 function formatSkillCreatorSummary(workspaceRoot: string, result: Record<string, unknown>): string {
   const slug = typeof result.slug === 'string' ? result.slug : 'unknown-skill';
   const outputPath = typeof result.output_path === 'string' ? result.output_path : '';
@@ -3437,6 +3733,18 @@ function formatSkillCreatorSummary(workspaceRoot: string, result: Record<string,
 
   const relativeOutputPath = path.relative(workspaceRoot, outputPath);
   return `Published /${slug} to ${relativeOutputPath || outputPath}.`;
+}
+
+function formatShellCommandSummary(result: ShellExecResult): string {
+  if (result.success) {
+    return result.summary || 'Shell command completed successfully.';
+  }
+
+  return result.summary || `Shell command failed with exit code ${result.exitCode}.`;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
 }
 
 export function previewMessageFromEvent(logEvent: ConductorLogEvent): DisplayMessage | null {
@@ -3535,7 +3843,15 @@ export function parseCommandArgs(rawArgs: string): string[] {
   return args;
 }
 
-export function parseSlashInput(line: string): ParsedTuiInput {
+export function parseCommandBarInput(line: string): ParsedTuiInput {
+  const trimmedStart = line.trimStart();
+  if (trimmedStart.startsWith('\\!')) {
+    return { kind: 'text', prompt: trimmedStart.slice(1).trim() };
+  }
+  if (trimmedStart.startsWith('!')) {
+    return { kind: 'shell', command: trimmedStart.slice(1).trim() };
+  }
+
   const trimmed = line.trim();
   if (!trimmed.startsWith('/')) {
     return { kind: 'text', prompt: trimmed };
@@ -3569,6 +3885,10 @@ export function parseSlashInput(line: string): ParsedTuiInput {
     rawArgs,
     args: parseCommandArgs(rawArgs),
   };
+}
+
+export function parseSlashInput(line: string): ParsedTuiInput {
+  return parseCommandBarInput(line);
 }
 
 export function canSubmitParsedInputWhileBusy(parsed: ParsedTuiInput): boolean {
@@ -3694,6 +4014,18 @@ function formatEventPrefix(logEvent: ConductorLogEvent): string {
     : '';
 }
 
+function toolScopeKey(logEvent: ConductorLogEvent): string {
+  return logEvent.scope === 'child'
+    ? `child:${logEvent.childSlug ?? '?'}`
+    : 'main';
+}
+
+function toolScopeLabel(logEvent: ConductorLogEvent): string {
+  return logEvent.scope === 'child'
+    ? logEvent.childSlug ?? '?'
+    : 'main';
+}
+
 function parseTaggedPrompt(promptText: string): { tag?: string; content: string } {
   const match = promptText.match(/^\[([^\]]+)\]\s*(.*)$/);
   if (!match) {
@@ -3760,6 +4092,73 @@ function formatToolArgs(args: Record<string, unknown> | undefined): string {
   return parts.join(', ');
 }
 
+function formatSystemAssetSourcePath(workspaceRoot: string, filePath: string): string {
+  const relativePath = path.relative(workspaceRoot, filePath);
+  if (relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath)) {
+    return relativePath || '.';
+  }
+  return filePath;
+}
+
+function formatToolEventLine(logEvent: ConductorLogEvent): string | null {
+  const { event } = logEvent;
+  if (!event.toolName || IGNORED_LIVE_LOG_TOOLS.has(event.toolName)) {
+    return null;
+  }
+
+  const prefix = formatEventPrefix(logEvent);
+  const callLabel = `${event.toolName}(${formatToolArgs(event.toolArgs)})`;
+  if (!event.toolState) {
+    return `${prefix}tool ${callLabel}`;
+  }
+
+  return `${prefix}tool ${callLabel} ${event.toolState}${formatToolEventDetails(event)}`;
+}
+
+function formatToolEventDetails(event: DMLEvent): string {
+  const details: string[] = [];
+
+  if (typeof event.toolPid === 'number') {
+    details.push(`pid=${event.toolPid}`);
+  } else if (event.toolBackend === 'sandbox') {
+    details.push('sandbox');
+  }
+
+  if (typeof event.toolExitCode === 'number') {
+    details.push(`exit=${event.toolExitCode}`);
+  }
+
+  const message = event.toolError
+    ?? (event.toolSummary && event.toolSummary !== 'Command completed successfully' ? event.toolSummary : undefined);
+  if (message) {
+    details.push(message);
+  }
+
+  return details.length > 0 ? ` ${details.join(' ')}` : '';
+}
+
+function formatActiveToolStatus(entry: ActiveToolStatus): string {
+  const details: string[] = [];
+
+  if (typeof entry.toolPid === 'number') {
+    details.push(`pid=${entry.toolPid}`);
+  } else if (entry.toolBackend === 'sandbox') {
+    details.push('sandbox');
+  }
+
+  const detailSuffix = details.length > 0 ? ` ${details.join(' ')}` : '';
+  return `${entry.scopeLabel} ${entry.toolName} ${entry.toolState}${detailSuffix}`;
+}
+
+function formatShellModeStatus(
+  workspaceRoot: string,
+  shellWorkspacePath: string,
+  sandbox?: boolean,
+): string {
+  const displayPath = path.relative(workspaceRoot, shellWorkspacePath) || '.';
+  return `Shell mode: ${sandbox ? 'AgentVM sandbox' : 'host shell'} in ${displayPath}. Enter runs, /cancel stops.`;
+}
+
 function buildHelpLines(): string[] {
   return [
     'commands',
@@ -3771,6 +4170,7 @@ function buildHelpLines(): string[] {
     '/help           show this help',
     '/quit           exit the TUI',
     '/<skill> [args] run a compiled skill directly',
+    '!<command>     run a shell command directly in the workspace shell',
     'keys',
     'F10 / Ctrl+G    open the menu bar',
     'Ctrl+P          open the action palette',

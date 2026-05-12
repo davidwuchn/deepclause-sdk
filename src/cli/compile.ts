@@ -19,11 +19,13 @@ import {
 } from './config.js';
 import { promptUser } from './interactive.js';
 import { compileWithSkillCreator } from '../system/runtime/skill-creator.js';
+import type { DMLEvent } from '../types.js';
 import {
   extractDescription as extractDescriptionFromCompiler,
   extractParameters as extractParametersFromCompiler,
   extractToolDependencies as extractToolDependenciesFromCompiler,
 } from '../compiler.js';
+import type { AnalysisResult } from '../types.js';
 
 // =============================================================================
 // Types
@@ -40,6 +42,10 @@ export interface CompileOptions {
   verbose?: boolean;
   stream?: boolean;
   audit?: boolean;
+  headless?: boolean;
+  trace?: string;
+  signal?: AbortSignal;
+  onEvent?: (event: DMLEvent) => void;
 }
 
 export interface CompileResult {
@@ -51,6 +57,16 @@ export interface CompileResult {
   meta?: MetaFile;
   explanation?: string;
   attempts?: number;
+  analysis?: AnalysisResult;
+  runtimeOutput?: string[];
+  trace?: object;
+  events?: DMLEvent[];
+}
+
+interface CompileExecutionError extends Error {
+  runtimeOutput?: string[];
+  trace?: object;
+  events?: DMLEvent[];
 }
 
 export interface CompileAllResult {
@@ -156,7 +172,8 @@ export async function compile(
 ): Promise<CompileResult> {
   const maxAttempts = options.maxAttempts ?? 3;
   const verbose = options.verbose ?? false;
-  const shouldStream = options.stream ?? true;
+  const shouldStream = options.stream ?? false;
+  const shouldAudit = options.audit !== false;
   
   // Resolve paths
   const absoluteSource = path.resolve(sourcePath);
@@ -216,9 +233,36 @@ export async function compile(
   applyResolvedModelConfig(compileSelection);
   const runSelection = resolveModelSlot(config, 'run');
 
-  // Status indicator
-  const status = new StatusIndicator(verbose || shouldStream);
-  status.start(`Compiling...`);
+  const runtimeOutput: string[] = [];
+  const events: DMLEvent[] = [];
+  let executionTrace: object | undefined;
+
+  const captureEvents = (
+    options.headless
+    || shouldStream
+    || verbose
+    || !!options.trace
+    || !!options.onEvent
+  );
+
+  const status = new StatusIndicator(!captureEvents);
+  if (!captureEvents) {
+    status.start('Compiling...');
+  }
+
+  const handleEvent = (event: DMLEvent): void => {
+    events.push(event);
+
+    if (event.type === 'output' && event.content) {
+      runtimeOutput.push(event.content);
+    }
+
+    if ((event.type === 'finished' || event.type === 'error') && event.trace) {
+      executionTrace = event.trace;
+    }
+
+    options.onEvent?.(event);
+  };
 
   try {
     const result = await compileWithSkillCreator(markdown, {
@@ -234,12 +278,24 @@ export async function compile(
       validateOnly: options.validateOnly,
       maxAttempts,
       verbose,
+      stream: shouldStream,
+      trace: !!options.trace,
+      audit: shouldAudit,
       onUserInput: promptUser,
+      signal: options.signal,
+      onEvent: handleEvent,
     });
 
-    status.stop();
+    if (!captureEvents) {
+      status.stop();
+    }
 
-    if (result.analysis.warnings.length > 0) {
+    if (options.trace && executionTrace) {
+      const tracePath = path.resolve(options.trace);
+      await fs.writeFile(tracePath, JSON.stringify(executionTrace, null, 2) + '\n');
+    }
+
+    if (!options.onEvent && !options.headless && result.analysis.warnings.length > 0) {
       console.log('\n⚠️  Static Analysis Warnings:');
       for (const warning of result.analysis.warnings) {
         const icon = warning.level === 'critical' ? '🔴' : warning.level === 'high' ? '🟠' : warning.level === 'medium' ? '🟡' : '⚪';
@@ -247,8 +303,10 @@ export async function compile(
       }
     }
 
-    console.log('\n✅ Compilation successful!\n');
-    console.log(result.explanation);
+    if (!options.onEvent && !options.headless) {
+      console.log('\n✅ Compilation successful!\n');
+      console.log(result.explanation);
+    }
 
     return {
       output: dmlPath,
@@ -259,10 +317,28 @@ export async function compile(
       meta: result.meta,
       explanation: result.explanation,
       attempts: 1,
+      analysis: result.analysis,
+      runtimeOutput,
+      trace: executionTrace,
+      events,
     };
   } catch (error) {
-    status.stop();
-    throw error;
+    if (!captureEvents) {
+      status.stop();
+    }
+
+    if (options.trace && executionTrace) {
+      const tracePath = path.resolve(options.trace);
+      await fs.writeFile(tracePath, JSON.stringify(executionTrace, null, 2) + '\n');
+    }
+
+    const compileError: CompileExecutionError = error instanceof Error
+      ? error as CompileExecutionError
+      : new Error(String(error));
+    compileError.runtimeOutput = runtimeOutput;
+    compileError.trace = executionTrace;
+    compileError.events = events;
+    throw compileError;
   }
 }
 
@@ -301,7 +377,8 @@ export async function compileAll(
       const compileResult = await compile(sourcePath, absoluteOutputDir, {
         ...options,
         stream: false,  // Don't stream when batch compiling
-        verbose: false
+        verbose: false,
+        headless: true,
       });
       
       if (compileResult.skipped) {
@@ -349,6 +426,7 @@ export async function compilePrompt(
     validateOnly: true,
     maxAttempts: options.maxAttempts,
     verbose: options.verbose,
+    audit: options.audit !== false,
     onUserInput: promptUser,
   });
 

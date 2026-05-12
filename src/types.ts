@@ -99,6 +99,18 @@ export interface DMLEvent {
   toolArgs?: Record<string, unknown>;
   /** Tool result (only for 'tool_call' events, set after execution) */
   toolResult?: unknown;
+  /** Tool lifecycle state (only for 'tool_call' events) */
+  toolState?: 'starting' | 'running' | 'completed' | 'failed';
+  /** Process identifier when available (only for 'tool_call' events) */
+  toolPid?: number;
+  /** Tool execution backend when available (only for 'tool_call' events) */
+  toolBackend?: 'host' | 'sandbox';
+  /** Tool exit code when available (only for 'tool_call' events) */
+  toolExitCode?: number;
+  /** Tool summary message when available (only for 'tool_call' events) */
+  toolSummary?: string;
+  /** Tool failure message when available (only for 'tool_call' events) */
+  toolError?: string;
   /** Token usage from an LLM call (only for 'usage' events) */
   usage?: LLMUsage;
 }

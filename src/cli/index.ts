@@ -97,40 +97,136 @@ program
   .description('Compile Markdown task description to DML')
   .option('-f, --force', 'Force recompilation even if source unchanged')
   .option('--validate-only', 'Validate without saving output')
+  .option('--headless', 'Plain output only, no live formatting')
   .option('--sandbox', 'Run shell tools inside AgentVM instead of the local workspace shell')
+  .option('--trace <file>', 'Save compilation trace to file')
   .option('--model <model>', 'Override model for compilation')
+  .option('--provider <provider>', 'Override provider for compilation (openai, anthropic, google, openrouter)')
   .option('--temperature <number>', 'Override temperature (0.0-2.0)', parseFloat)
   .option('--max-attempts <number>', 'Max compilation attempts (default: 3)', parseInt)
-  .option('-v, --verbose', 'Show detailed output including generated code')
-  .option('--no-stream', 'Disable streaming output')
-  .option('--no-audit', 'Disable security audit and static analysis')
+  .option('-v, --verbose', 'Show debug output including tool calls')
+  .option('--stream', 'Stream LLM responses in real-time')
+  .option('--no-audit', 'Disable the LLM security audit (static analysis still runs)')
   .action(async (source, output, options) => {
     try {
       const outputDir = output || '.deepclause/tools';
+
+      const liveOutput: string[] = [];
+      const onEvent = (event: import('../types.js').DMLEvent): void => {
+        switch (event.type) {
+          case 'output':
+            if (event.content) {
+              liveOutput.push(event.content);
+              if (!options.headless) {
+                process.stdout.write(`${event.content}\n`);
+              }
+            }
+            break;
+          case 'stream':
+            if (options.stream && !options.headless && event.content) {
+              process.stdout.write(event.content);
+            }
+            if (options.stream && !options.headless && event.done) {
+              process.stdout.write('\n');
+            }
+            break;
+          case 'log':
+            if (options.verbose && !options.headless && event.content) {
+              process.stdout.write(`[log] ${event.content}\n`);
+            }
+            break;
+          case 'tool_call':
+            if (options.verbose && !options.headless && event.toolName) {
+              process.stdout.write(`  🔧 ${event.toolName}(${formatToolArgs(event.toolArgs)})\n`);
+            }
+            break;
+          case 'input_required':
+            if (options.verbose && !options.headless && event.prompt) {
+              process.stdout.write(`[input_required] ${event.prompt}\n`);
+            }
+            break;
+          default:
+            break;
+        }
+      };
       
       const result = await compile(source, outputDir, {
         force: options.force,
         validateOnly: options.validateOnly,
+        headless: options.headless,
         sandbox: options.sandbox,
-        model: buildModelOverride(options.model),
+        trace: options.trace,
+        model: buildModelOverride(options.model, options.provider),
+        provider: options.provider as import('../system/config/model-slots.js').Provider,
         temperature: options.temperature,
         maxAttempts: options.maxAttempts,
         verbose: options.verbose,
-        stream: options.stream !== false,
-        audit: options.audit !== false
+        stream: options.stream,
+        audit: options.audit !== false,
+        onEvent,
       });
+
+      if (result.analysis?.warnings?.length) {
+        console.log('\n⚠️  Static Analysis Warnings:');
+        for (const warning of result.analysis.warnings) {
+          const icon = warning.level === 'critical' ? '🔴' : warning.level === 'high' ? '🟠' : warning.level === 'medium' ? '🟡' : '⚪';
+          console.log(`  ${icon} [${warning.level.toUpperCase()}] ${warning.message}`);
+        }
+      }
+
+      if (result.analysis?.auditorReport) {
+        console.log('\n🛡️  LLM Security Audit:\n');
+        console.log(result.analysis.auditorReport);
+      }
+
+      if (options.headless) {
+        for (const out of result.runtimeOutput ?? liveOutput) {
+          console.log(out);
+        }
+      }
       
       if (result.skipped) {
         console.log(`⏭️  Skipped (unchanged): ${source}`);
-      } else if (!options.validateOnly) {
+      } else {
+        console.log('\n✅ Compilation successful!\n');
+        if (result.explanation) {
+          console.log(result.explanation);
+        }
+      }
+
+      if (!result.skipped && !options.validateOnly) {
         console.log(`\n   Output: ${result.output}`);
         console.log(`   Tools: ${result.tools.join(', ') || 'none'}`);
         if (result.attempts && result.attempts > 1) {
           console.log(`   Attempts: ${result.attempts}`);
         }
       }
+
+      if (!result.skipped && options.trace) {
+        console.log(`\n📊 Trace saved to: ${options.trace}`);
+      }
     } catch (error) {
-      // Error message already printed by compile function
+      const compileError = error as {
+        runtimeOutput?: string[];
+        trace?: object;
+      };
+
+      if (options.headless && Array.isArray(compileError.runtimeOutput)) {
+        for (const out of compileError.runtimeOutput) {
+          console.log(out);
+        }
+      }
+
+      const message = error instanceof Error && error.message
+        ? error.message
+        : String(error);
+      console.error(message.startsWith('❌') ? message : `❌ Error: ${message}`);
+      if (options.trace && compileError.trace) {
+        console.log(`\n📊 Trace saved to: ${options.trace}`);
+      }
+      if (options.verbose && error instanceof Error && error.stack) {
+        console.error(error.stack);
+      }
       process.exit(1);
     }
   });
@@ -141,6 +237,10 @@ program
   .option('-f, --force', 'Force recompilation of all files')
   .option('--sandbox', 'Run shell tools inside AgentVM instead of the local workspace shell')
   .option('--model <model>', 'Override model for compilation')
+  .option('--provider <provider>', 'Override provider for compilation (openai, anthropic, google, openrouter)')
+  .option('--temperature <number>', 'Override temperature (0.0-2.0)', parseFloat)
+  .option('--max-attempts <number>', 'Max compilation attempts per file (default: 3)', parseInt)
+  .option('--no-audit', 'Disable the LLM security audit (static analysis still runs)')
   .action(async (sourceDir, outputDir, options) => {
     try {
       const out = outputDir || '.deepclause/tools';
@@ -148,7 +248,11 @@ program
       const result = await compileAll(sourceDir, out, {
         force: options.force,
         sandbox: options.sandbox,
-        model: buildModelOverride(options.model)
+        model: buildModelOverride(options.model, options.provider),
+        provider: options.provider as import('../system/config/model-slots.js').Provider,
+        temperature: options.temperature,
+        maxAttempts: options.maxAttempts,
+        audit: options.audit !== false,
       });
       
       console.log(`\n📊 Compilation Summary:`);
@@ -178,6 +282,7 @@ program
   .option('--model <model>', 'Override configured model (can be provider/model format, e.g., google/gemini-2.5-pro)')
   .option('--provider <provider>', 'Override configured provider (openai, anthropic, google, openrouter)')
   .option('--temperature <number>', 'Override temperature (0.0-2.0)', parseFloat)
+  .option('--no-audit', 'Disable the LLM security audit for one-shot prompt compilation')
   .option('--gas-limit <number>', 'Maximum number of execution steps', parseInt)
   .option('-p, --prompt <text>', 'One-shot prompt: generate and run DML from natural language')
   .option('-P, --param <key=value>', 'Pass named parameter (can be repeated)', collectParams, {})
@@ -203,6 +308,7 @@ program
         model,
         provider: provider as import('../system/config/model-slots.js').Provider,
         temperature: options.temperature,
+        audit: options.audit !== false,
         gasLimit: options.gasLimit,
         params: options.param,
         prompt: options.prompt
@@ -322,6 +428,23 @@ function collectParams(value: string, previous: Record<string, string>): Record<
     throw new Error(`Invalid param format: ${value}. Use key=value`);
   }
   return { ...previous, [key]: val };
+}
+
+function formatToolArgs(args: Record<string, unknown> | undefined): string {
+  if (!args) {
+    return '';
+  }
+
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(args)) {
+    let rendered = typeof value === 'string' ? value : JSON.stringify(value);
+    if (rendered.length > 50) {
+      rendered = rendered.slice(0, 47) + '...';
+    }
+    parts.push(`${key}=${rendered}`);
+  }
+
+  return parts.join(', ');
 }
 
 async function main(): Promise<void> {

@@ -38,6 +38,7 @@ export interface RunOptions {
   model?: string;
   provider?: Provider;
   temperature?: number;
+  audit?: boolean;
   gasLimit?: number;
   signal?: AbortSignal;
   params?: Record<string, string>;
@@ -86,6 +87,7 @@ export async function run(
       temperature: options.temperature,
       verbose: options.verbose,
       sandbox: options.sandbox,
+      audit: options.audit,
     });
     dmlCode = compileResult.dml;
 

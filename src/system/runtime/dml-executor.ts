@@ -93,6 +93,72 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
     output: [],
     events: [],
   };
+  let finished = false;
+
+  const handleEvent = (event: DMLEvent) => {
+    result.events.push(event);
+    options.onEvent?.(event);
+
+    switch (event.type) {
+      case 'output':
+        if (event.content) {
+          result.output.push(event.content);
+          if (!options.headless) {
+            console.log(event.content);
+          }
+        }
+        break;
+
+      case 'stream':
+        if (options.stream && !options.headless && event.content) {
+          process.stdout.write(event.content);
+        }
+        if (options.stream && !options.headless && event.done) {
+          process.stdout.write('\n');
+        }
+        break;
+
+      case 'log':
+        if (options.verbose && event.content && !options.headless) {
+          console.log(`[log] ${event.content}`);
+        }
+        break;
+
+      case 'tool_call':
+        if (!options.headless && options.verbose && event.toolName) {
+          console.log(`  🔧 ${event.toolName}(${formatToolArgs(event.toolArgs)})`);
+        }
+        break;
+
+      case 'answer':
+        result.answer = event.content;
+        break;
+
+      case 'error':
+        result.error = event.content;
+        if (event.trace) {
+          result.trace = event.trace;
+        }
+        finished = true;
+        break;
+
+      case 'finished':
+        if (event.trace) {
+          result.trace = event.trace;
+        }
+        finished = true;
+        break;
+
+      case 'input_required':
+        if (options.verbose && event.prompt && !options.headless) {
+          console.log(`[input_required] ${event.prompt}`);
+        }
+        break;
+
+      case 'usage':
+        break;
+    }
+  };
 
   try {
     const skillCatalog = options.skillCatalog
@@ -113,6 +179,7 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
       workspacePath: options.workspacePath,
       shell,
       signal: options.signal,
+      onEvent: handleEvent,
       skillCatalog,
     });
 
@@ -122,8 +189,6 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
       selection: options.selection,
       shell,
     });
-
-    let finished = false;
 
     for await (const event of sdk.runDML(options.dmlCode, {
       args: options.args,
@@ -138,68 +203,7 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
         break;
       }
 
-      result.events.push(event);
-      options.onEvent?.(event);
-
-      switch (event.type) {
-        case 'output':
-          if (event.content) {
-            result.output.push(event.content);
-            if (!options.headless) {
-              console.log(event.content);
-            }
-          }
-          break;
-
-        case 'stream':
-          if (options.stream && !options.headless && event.content) {
-            process.stdout.write(event.content);
-          }
-          if (options.stream && !options.headless && event.done) {
-            process.stdout.write('\n');
-          }
-          break;
-
-        case 'log':
-          if (options.verbose && event.content && !options.headless) {
-            console.log(`[log] ${event.content}`);
-          }
-          break;
-
-        case 'tool_call':
-          if (!options.headless && options.verbose && event.toolName) {
-            console.log(`  🔧 ${event.toolName}(${formatToolArgs(event.toolArgs)})`);
-          }
-          break;
-
-        case 'answer':
-          result.answer = event.content;
-          break;
-
-        case 'error':
-          result.error = event.content;
-          if (event.trace) {
-            result.trace = event.trace;
-          }
-          finished = true;
-          break;
-
-        case 'finished':
-          if (event.trace) {
-            result.trace = event.trace;
-          }
-          finished = true;
-          break;
-
-        case 'input_required':
-          if (options.verbose && event.prompt && !options.headless) {
-            console.log(`[input_required] ${event.prompt}`);
-          }
-          break;
-
-        case 'usage':
-          break;
-      }
+      handleEvent(event);
     }
 
     return result;

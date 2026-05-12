@@ -2,8 +2,9 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { newsSearch, webSearch } from '../../cli/search.js';
 import type { Config } from '../../cli/config.js';
-import type { DeepClauseSDK } from '../../types.js';
+import type { DMLEvent, DeepClauseSDK } from '../../types.js';
 import type { ShellManager } from './shell-manager.js';
+import { createShellToolEventBridge } from './shell-tool-events.js';
 
 const BUILT_IN_RUNTIME_TOOLS = new Set([
   'vm_exec',
@@ -49,6 +50,7 @@ export function registerLocalRuntimeTools(
     workspacePath: string;
     shell: ShellManager;
     signal?: AbortSignal;
+    onEvent?: (event: DMLEvent) => void;
     skillCatalog?: {
       listSkills: () => Promise<unknown>;
       runSkill: (args: Record<string, unknown>) => Promise<unknown>;
@@ -116,7 +118,18 @@ export function registerLocalRuntimeTools(
       },
       required: ['command'],
     },
-    execute: async (args) => options.shell.exec(String(args.command ?? args.arg1 ?? ''), options.signal),
+    execute: async (args) => {
+      const command = String(args.command ?? args.arg1 ?? '');
+      return options.shell.exec(
+        command,
+        options.signal,
+        createShellToolEventBridge({
+          toolName: 'bash',
+          toolArgs: { command },
+          emit: options.onEvent,
+        }),
+      );
+    },
   });
 
   sdk.registerTool('vm_exec', {
@@ -128,7 +141,18 @@ export function registerLocalRuntimeTools(
       },
       required: ['command'],
     },
-    execute: async (args) => options.shell.exec(String(args.command ?? args.arg1 ?? ''), options.signal),
+    execute: async (args) => {
+      const command = String(args.command ?? args.arg1 ?? '');
+      return options.shell.exec(
+        command,
+        options.signal,
+        createShellToolEventBridge({
+          toolName: 'vm_exec',
+          toolArgs: { command },
+          emit: options.onEvent,
+        }),
+      );
+    },
   });
 
   if (options.skillCatalog) {

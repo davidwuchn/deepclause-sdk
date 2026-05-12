@@ -20,6 +20,54 @@ import { getBuiltInCompileTools } from './tools.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
+function extractAgentMainArities(code: string): number[] {
+  const strippedCode = code.replace(/%.*$/gm, '');
+  const arities = new Set<number>();
+  const rulePattern = /^\s*agent_main\s*(?:\(([^)]*)\))?\s*:-/gm;
+  let match: RegExpExecArray | null;
+
+  while ((match = rulePattern.exec(strippedCode)) !== null) {
+    const rawArgs = match[1]?.trim();
+    if (!rawArgs) {
+      arities.add(0);
+      continue;
+    }
+
+    const args = rawArgs
+      .split(',')
+      .map((arg) => arg.trim())
+      .filter((arg) => arg.length > 0);
+    arities.add(args.length);
+  }
+
+  if (/^\s*agent_main\s*\.\s*$/m.test(strippedCode)) {
+    arities.add(0);
+  }
+
+  return [...arities].sort((left, right) => left - right);
+}
+
+function validateRunArguments(code: string, args?: unknown[]): string | undefined {
+  const supportedArities = extractAgentMainArities(code);
+  if (supportedArities.length === 0) {
+    return undefined;
+  }
+
+  const providedCount = args?.length ?? 0;
+  if (supportedArities.includes(providedCount)) {
+    return undefined;
+  }
+
+  if (supportedArities.length === 1) {
+    const [expectedArity] = supportedArities;
+    const expectedLabel = expectedArity === 1 ? '1 positional argument' : `${expectedArity} positional arguments`;
+    const receivedLabel = providedCount === 1 ? '1 argument' : `${providedCount} arguments`;
+    return `Argument validation failed: agent_main expects ${expectedLabel}, but received ${receivedLabel}. Provide all positional arguments so agent_main variables are bound at entry.`;
+  }
+
+  return `Argument validation failed: agent_main supports arities ${supportedArities.join(', ')}, but received ${providedCount} positional arguments. Provide an argument count that exactly matches one defined agent_main signature.`;
+}
+
 /**
  * Create a new DeepClause SDK instance
  */
@@ -60,6 +108,12 @@ export async function createDeepClause(options: CreateOptions): Promise<DeepClau
     async *runDML(code: string, runOptions?: RunOptions): AsyncGenerator<DMLEvent> {
       if (disposed) {
         throw new Error('SDK has been disposed');
+      }
+
+      const argumentValidationError = validateRunArguments(code, runOptions?.args);
+      if (argumentValidationError) {
+        yield { type: 'error', content: argumentValidationError };
+        return;
       }
 
       // Run with tool policy and custom tools

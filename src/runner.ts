@@ -6,6 +6,11 @@ import type { SWIPLModule } from './prolog/loader.js';
 import type { DMLEvent, ToolDefinition, ToolPolicy, MemoryMessage, TypedVar } from './types.js';
 import { mountWorkspace } from './prolog/loader.js';
 import { runAgentLoop } from './agent.js';
+import {
+  buildToolCompletionEvent,
+  buildToolFailureEvent,
+  buildToolStartEvent,
+} from './system/runtime/shell-tool-events.js';
 import { checkToolPolicy } from './tools.js';
 
 /**
@@ -489,13 +494,17 @@ export class DMLRunner {
     // Store current memory for getMemory() access
     this.currentMemory = fullMemory;
 
-    // Callback for tool output events
-    const onToolOutput = (text: string) => {
-      streamQueue.push({ type: 'output', content: text });
+    const emitToolEvent = (event: DMLEvent) => {
+      streamQueue.push(event);
       if (streamResolve) {
         streamResolve();
         streamResolve = null;
       }
+    };
+
+    // Callback for tool output events
+    const onToolOutput = (text: string) => {
+      emitToolEvent({ type: 'output', content: text });
     };
 
     // Augment registered tools with internal ask_user so DML tools can call exec(ask_user(...))
@@ -517,11 +526,7 @@ export class DMLRunner {
             return { error: 'No prompt provided to ask_user' };
           }
           try {
-            streamQueue.push({ type: 'input_required', prompt });
-            if (streamResolve) {
-              streamResolve();
-              streamResolve = null;
-            }
+            emitToolEvent({ type: 'input_required', prompt });
             const response = await options.onInputRequired(prompt);
             return { user_response: response };
           } catch (err) {
@@ -533,11 +538,7 @@ export class DMLRunner {
 
     // Callback to emit tool call events
     const emitToolCall = (toolName: string, args: Record<string, unknown>) => {
-      streamQueue.push({ type: 'tool_call', toolName, toolArgs: args });
-      if (streamResolve) {
-        streamResolve();
-        streamResolve = null;
-      }
+      emitToolEvent({ type: 'tool_call', toolName, toolArgs: args });
     };
 
     // Build available tools for agent - SIMPLIFIED: tools run in isolated engines
@@ -546,7 +547,7 @@ export class DMLRunner {
       options.toolPolicy,
       // executeToolIsolated callback - runs tool in separate engine (no state sharing)
       async (toolName: string, args: Record<string, unknown>) => {
-        return this.executeToolIsolated(toolName, args, augmentedTools, onToolOutput, [], emitToolCall);
+        return this.executeToolIsolated(toolName, args, augmentedTools, onToolOutput, [], emitToolCall, emitToolEvent);
       }
     );
 
@@ -690,19 +691,26 @@ export class DMLRunner {
       return;
     }
 
+    let argsObj: Record<string, unknown> | null = null;
+
     try {
       // Execute tool
-      const argsObj = this.argsToObject(args, tool);
+      argsObj = this.argsToObject(args, tool);
       
       // Emit tool_call event before execution
-      yield { type: 'tool_call', toolName, toolArgs: argsObj };
+      yield buildToolStartEvent(toolName, argsObj);
       
       const result = await tool.execute(argsObj);
+
+      yield buildToolCompletionEvent(toolName, argsObj, result);
 
       // Post result back to Prolog
       this.postExecResult({ success: true, result });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (argsObj) {
+        yield buildToolFailureEvent(toolName, argsObj, error);
+      }
       yield { type: 'log', content: `Tool '${toolName}' error: ${message}` };
       this.postExecResult({ success: false, error: message });
     }
@@ -962,6 +970,7 @@ export class DMLRunner {
     onOutput: (text: string) => void,
     excludedTools: string[] = [],
     onToolCall?: (toolName: string, args: Record<string, unknown>) => void,
+    onToolEvent?: (event: DMLEvent) => void,
   ): Promise<{ result: unknown; outputs: string[] }> {
     const outputs: string[] = [];
     
@@ -1037,13 +1046,19 @@ export class DMLRunner {
               const postGoal = `deepclause_mi:post_exec_result('${this.sessionId}', failure, "Tool not found: ${execToolName}")`;
               this.query(postGoal);
             } else {
+              let argsObj: Record<string, unknown> | null = null;
               try {
-                const argsObj = this.argsToObject(execArgs, tool);
+                argsObj = this.argsToObject(execArgs, tool);
+                onToolEvent?.(buildToolStartEvent(execToolName, argsObj));
                 const execResult = await tool.execute(argsObj);
+                onToolEvent?.(buildToolCompletionEvent(execToolName, argsObj, execResult));
                 const postGoal = `deepclause_mi:post_exec_result('${this.sessionId}', success, ${this.toPrologTerm(execResult)})`;
                 this.query(postGoal);
               } catch (error) {
                 const message = error instanceof Error ? error.message : String(error);
+                if (argsObj) {
+                  onToolEvent?.(buildToolFailureEvent(execToolName, argsObj, error));
+                }
                 const postGoal = `deepclause_mi:post_exec_result('${this.sessionId}', failure, "${message.replace(/"/g, '\\"')}")`;
                 this.query(postGoal);
               }
@@ -1153,7 +1168,13 @@ export class DMLRunner {
             // Build tools for nested agent with filtered tool list
             const nestedToolCallback = async (nestedToolName: string, nestedArgs: Record<string, unknown>) => {
               return this.executeToolIsolated(
-                nestedToolName, nestedArgs, registeredTools, onOutput, nestedExcludedTools, onToolCall
+                nestedToolName,
+                nestedArgs,
+                registeredTools,
+                onOutput,
+                nestedExcludedTools,
+                onToolCall,
+                onToolEvent,
               );
             };
             

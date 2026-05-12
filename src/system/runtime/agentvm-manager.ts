@@ -8,6 +8,37 @@ export interface ShellExecResult {
   stderr: string;
   exitCode: number;
   summary: string;
+  pid?: number;
+  backend: 'host' | 'sandbox';
+}
+
+export interface ShellExecStartEvent {
+  command: string;
+  pid?: number;
+  backend: 'host' | 'sandbox';
+}
+
+export interface ShellExecChunkEvent {
+  command: string;
+  chunk: string;
+  pid?: number;
+  backend: 'host' | 'sandbox';
+}
+
+export interface ShellExecExitEvent {
+  command: string;
+  pid?: number;
+  backend: 'host' | 'sandbox';
+  success: boolean;
+  exitCode: number;
+  summary: string;
+}
+
+export interface ShellExecObserver {
+  onStart?: (event: ShellExecStartEvent) => void;
+  onStdout?: (event: ShellExecChunkEvent) => void;
+  onStderr?: (event: ShellExecChunkEvent) => void;
+  onExit?: (event: ShellExecExitEvent) => void;
 }
 
 export class AgentVMManager {
@@ -19,12 +50,17 @@ export class AgentVMManager {
     private readonly network: boolean,
   ) {}
 
-  async exec(command: string, signal?: AbortSignal): Promise<ShellExecResult> {
+  async exec(
+    command: string,
+    signal?: AbortSignal,
+    observer?: ShellExecObserver,
+  ): Promise<ShellExecResult> {
     if (signal?.aborted) {
       throw abortError(signal.reason);
     }
 
     const vm = await this.getVM();
+    observer?.onStart?.({ command, backend: this.kind });
     const result = signal
       ? await new Promise<Awaited<ReturnType<AgentVM['exec']>>>((resolve, reject) => {
           let settled = false;
@@ -74,13 +110,30 @@ export class AgentVMManager {
     const stdout = result.stdout ?? '';
     const stderr = result.stderr ?? '';
     const exitCode = result.exitCode ?? 0;
-    return {
+    const execResult: ShellExecResult = {
       success: exitCode === 0,
       stdout,
       stderr,
       exitCode,
+      backend: this.kind,
       summary: exitCode === 0 ? 'Command completed successfully' : (stderr || `Command failed with exit code ${exitCode}`),
     };
+
+    if (stdout) {
+      observer?.onStdout?.({ command, chunk: stdout, backend: this.kind });
+    }
+    if (stderr) {
+      observer?.onStderr?.({ command, chunk: stderr, backend: this.kind });
+    }
+    observer?.onExit?.({
+      command,
+      backend: this.kind,
+      success: execResult.success,
+      exitCode,
+      summary: execResult.summary,
+    });
+
+    return execResult;
   }
 
   async dispose(): Promise<void> {

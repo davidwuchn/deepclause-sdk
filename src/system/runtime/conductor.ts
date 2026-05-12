@@ -3,6 +3,8 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { listCommands } from '../../cli/commands.js';
 import {
+  ensureWorkspaceDocSeeds,
+  getDocsDir,
   getConfigDir,
   getToolsDir,
   loadConfig,
@@ -172,6 +174,7 @@ export async function runConductorTurn(
 ): Promise<ConductorTurnResult> {
   const workspaceRoot = path.resolve(options.workspaceRoot ?? process.cwd());
   const config = options.config ?? await loadConfig(workspaceRoot);
+  await ensureWorkspaceDocSeeds(workspaceRoot);
   const workspacePath = path.resolve(options.workspacePath ?? config.workspace ?? './workspace');
   await fs.mkdir(workspacePath, { recursive: true });
 
@@ -398,19 +401,22 @@ async function buildConductorSystemPrompt(options: {
   compileModelId: string;
   runModelId: string;
 }): Promise<string> {
-  const template = await readSystemPromptAsset('conductor');
+  const template = await readSystemPromptAsset('conductor', { workspaceRoot: options.workspaceRoot });
   const commands = await listCommands(options.workspaceRoot, { detailed: false });
   const catalog = commands.length > 0
     ? commands.map((command) => `- ${command.name}: ${command.description}`).join('\n')
     : '- No compiled local skills are available yet.';
 
-  const assistantMemory = options.session.assistantMemory.trim() || 'No assistant memory recorded yet.';
+  const assistantMemory = options.session.assistantMemory.trim()
+    || 'No optional session context is recorded in assistant-memory.md for this session.';
   const taskMemory = options.session.taskMemory.trim() || 'No task memory recorded yet.';
   const localContext = [
     '## Local CLI Runtime',
     `- Workspace root: ${options.workspaceRoot}`,
     `- Working directory for tools: ${options.workspacePath}`,
     `- Skill catalog: ${getToolsDir(options.workspaceRoot)}`,
+    `- Docs directory: ${getDocsDir(options.workspaceRoot)}`,
+    `- TUI guide: ${path.join(getDocsDir(options.workspaceRoot), 'TUI.md')}`,
     `- Session directory: ${options.session.paths.dir}`,
     `- Gateway model: ${options.gatewayModelId}`,
     `- Run model: ${options.runModelId}`,
@@ -420,7 +426,7 @@ async function buildConductorSystemPrompt(options: {
     '## Local Skill Catalog',
     catalog,
     '',
-    '## Assistant Memory',
+    '## Optional Session Context (assistant-memory.md)',
     assistantMemory,
     '',
     '## Task Memory',
