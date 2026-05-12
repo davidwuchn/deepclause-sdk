@@ -25,6 +25,7 @@ Examples:
 ```text
 summarize the latest test failures
 /sessions
+/set-model openai:gpt-4.1 --slot run
 /compile create a skill that reviews changelogs
 /deep-research transformers scaling laws
 !git status
@@ -39,6 +40,7 @@ Common built-in slash commands:
 
 - `/new [title]` creates a new conductor session.
 - `/sessions` refreshes or switches sessions.
+- `/set-model <model> [--slot <slot>]` updates the configured model for all slots or one slot.
 - `/compile <spec>` runs the skill creator.
 - `/skill-creator <spec>` is an alias for `/compile`.
 - `/cancel` aborts the current running task, skill, or shell command.
@@ -124,6 +126,7 @@ The conductor is not the same thing as a compiled skill.
 
 - The conductor handles freeform user requests and orchestration.
 - Compiled skills are reusable DML workers in `.deepclause/tools/`.
+- `/set-model` updates the configured gateway, run, and compile model selection for future turns, or only one slot when `--slot` is provided.
 - `/compile` and `/skill-creator` use the skill creator to turn a spec into a validated local skill.
 
 If a user asks how to automate something repeatedly, the right TUI workflow is usually to use `/compile <spec>` rather than repeating the same one-off prompt manually.

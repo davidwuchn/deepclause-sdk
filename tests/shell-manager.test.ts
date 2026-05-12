@@ -34,6 +34,63 @@ describe('HostShellManager cancellation', () => {
     }));
     expect(killSpy).toHaveBeenCalledWith(-4321, 'SIGTERM');
   });
+
+  it('reports shell start, output, and exit events to observers', async () => {
+    const child = createMockChildProcess(9876);
+    childProcessMocks.spawn.mockReturnValue(child);
+    const manager = new HostShellManager('/tmp/workspace');
+    const onStart = vi.fn();
+    const onStdout = vi.fn();
+    const onStderr = vi.fn();
+    const onExit = vi.fn();
+
+    const execPromise = manager.exec('printf hello', undefined, {
+      onStart,
+      onStdout,
+      onStderr,
+      onExit,
+    });
+
+    child.stdout.emit('data', 'hello');
+    child.stderr.emit('data', 'warn');
+    child.emit('close', 0, null);
+
+    await expect(execPromise).resolves.toEqual({
+      success: true,
+      stdout: 'hello',
+      stderr: 'warn',
+      exitCode: 0,
+      pid: 9876,
+      backend: 'host',
+      summary: 'Command completed successfully',
+    });
+
+    expect(onStart).toHaveBeenCalledWith({
+      command: 'printf hello',
+      pid: 9876,
+      backend: 'host',
+    });
+    expect(onStdout).toHaveBeenCalledWith({
+      command: 'printf hello',
+      chunk: 'hello',
+      pid: 9876,
+      backend: 'host',
+    });
+    expect(onStderr).toHaveBeenCalledWith({
+      command: 'printf hello',
+      chunk: 'warn',
+      pid: 9876,
+      backend: 'host',
+    });
+    expect(onExit).toHaveBeenCalledWith({
+      command: 'printf hello',
+      pid: 9876,
+      backend: 'host',
+      success: true,
+      exitCode: 0,
+      summary: 'Command completed successfully',
+    });
+  });
 });
 
 function createMockChildProcess(pid: number) {

@@ -5,6 +5,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { vol } from 'memfs';
 import {
+  ensureWorkspaceDocSeeds,
   initConfig,
   loadConfig,
   validateConfig,
@@ -14,6 +15,7 @@ import {
   configExists,
   getConfigDir,
   getConfigPath,
+  getDocsDir,
   getToolsDir,
   getMCPServers,
   parseModelString,
@@ -53,6 +55,10 @@ describe('Config Module', () => {
 
     it('should return correct tools directory path', () => {
       expect(getToolsDir('/workspace')).toBe('/workspace/.deepclause/tools');
+    });
+
+    it('should return correct docs directory path', () => {
+      expect(getDocsDir('/workspace')).toBe('/workspace/.deepclause/docs');
     });
   });
 
@@ -139,6 +145,13 @@ describe('Config Module', () => {
       expect(vol.existsSync('/workspace/.deepclause')).toBe(true);
       expect(vol.existsSync('/workspace/.deepclause/config.json')).toBe(true);
       expect(vol.existsSync('/workspace/.deepclause/tools')).toBe(true);
+      expect(vol.existsSync('/workspace/.deepclause/docs')).toBe(true);
+      expect(vol.existsSync('/workspace/.deepclause/docs/TUI.md')).toBe(true);
+      expect(vol.existsSync('/workspace/.deepclause/system')).toBe(true);
+      expect(vol.existsSync('/workspace/.deepclause/system/conductor.dml')).toBe(true);
+      expect(vol.existsSync('/workspace/.deepclause/system/skill-creator.dml')).toBe(true);
+      expect(vol.existsSync('/workspace/.deepclause/system/CONDUCTOR_PROMPT.md')).toBe(true);
+      expect(vol.existsSync('/workspace/.deepclause/system/DML_COMPILER_PROMPT.md')).toBe(true);
       expect(vol.existsSync('/workspace/.deepclause/.gitignore')).toBe(true);
     });
 
@@ -184,6 +197,17 @@ describe('Config Module', () => {
       const config = JSON.parse(content);
       
       expect(config.model).toBe('gpt-4o');
+    });
+
+    it('should seed missing workspace docs without overwriting an existing guide', async () => {
+      vol.fromJSON({
+        '/workspace/.deepclause/config.json': JSON.stringify({ model: 'gpt-4o' }),
+        '/workspace/.deepclause/docs/TUI.md': '# Custom Guide\n'
+      });
+
+      await ensureWorkspaceDocSeeds('/workspace');
+
+      expect(vol.readFileSync('/workspace/.deepclause/docs/TUI.md', 'utf-8')).toBe('# Custom Guide\n');
     });
   });
 

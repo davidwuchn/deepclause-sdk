@@ -5,7 +5,7 @@ import { emitKeypressEvents } from 'readline';
 import { createInterface, type Interface } from 'readline/promises';
 import { stdin as input, stdout as output } from 'process';
 import { listCommands, type CommandInfo } from './commands.js';
-import { getConfigPath, loadConfig, resolveModelSlot } from './config.js';
+import { getConfigPath, loadConfig, resolveModelSlot, setModel, type ModelSlot } from './config.js';
 import { run, type RunResult as CliRunResult } from './run.js';
 import {
   createLocalSkill,
@@ -29,7 +29,8 @@ import {
 import type { DMLEvent } from '../types.js';
 
 const IGNORED_LIVE_LOG_TOOLS = new Set(['set_result', 'update_memory']);
-const BUILTIN_SLASH_COMMANDS = ['new', 'sessions', 'help', 'compile', 'skill-creator', 'cancel', 'exit', 'quit'] as const;
+const BUILTIN_SLASH_COMMANDS = ['new', 'sessions', 'help', 'compile', 'skill-creator', 'set-model', 'cancel', 'exit', 'quit'] as const;
+const MODEL_SLOTS = ['gateway', 'run', 'compile'] as const;
 const CHILD_EVENT_INDENT = '\t';
 const CHILD_EVENT_TAB_WIDTH = 4;
 const MAX_ACTIVITY_LINES = 400;
@@ -1158,6 +1159,10 @@ class FullscreenTui {
         await this.executeSkillCreator(parsed.name, parsed.rawArgs);
         return;
 
+      case 'set-model':
+        await this.executeSetModel(parsed.rawArgs);
+        return;
+
       case 'sessions':
         await this.refreshSessions({ createIfMissing: true, selectedSessionId: this.selectedSessionId });
         await this.refreshCommands();
@@ -1399,6 +1404,20 @@ class FullscreenTui {
         this.requestRender();
       }
     }
+  }
+
+  private async executeSetModel(rawArgs: string): Promise<void> {
+    try {
+      const { model, slot } = parseSetModelCommandArgs(rawArgs);
+      const result = await setModel(this.workspaceRoot, model, slot);
+      const slotsLabel = result.updatedSlots.join(', ');
+      this.currentProcessActivity().pushLine(`config model ${result.modelId} slots=${slotsLabel}`);
+      this.statusLine = `Model set to ${result.modelId} for ${slotsLabel}. Applies on the next turn.`;
+    } catch (error) {
+      this.statusLine = (error as Error).message;
+    }
+
+    this.requestRender();
   }
 
   private async requestClarification(promptText: string): Promise<string> {
@@ -3490,6 +3509,17 @@ async function startLineTui(
             console.log(divider('-'));
             console.log('');
             continue;
+
+          case 'set-model': {
+            try {
+              const { model, slot } = parseSetModelCommandArgs(parsed.rawArgs);
+              const result = await setModel(workspaceRoot, model, slot);
+              console.log(`Model set to ${result.modelId} (${result.updatedSlots.join(', ')}).`);
+            } catch (error) {
+              console.log(`${paint('error', ANSI.red)} ${(error as Error).message}`);
+            }
+            continue;
+          }
         }
       }
 
@@ -3996,10 +4026,62 @@ async function createSessionInteractive(rl: Interface, workspaceRoot: string): P
 function renderHeader(session: ConductorSessionSummary): void {
   console.log(divider('='));
   console.log(`${paint('DeepClause', ANSI.bold, ANSI.cyan)} ${paint('interactive conductor', ANSI.dim)}`);
-  console.log(`${paint('commands', ANSI.dim)} /compile <spec>  /new  /sessions  /help  /exit  /skill args`);
+  console.log(`${paint('commands', ANSI.dim)} /compile <spec>  /set-model <model>  /new  /sessions  /help  /exit  /skill args`);
   console.log(`${paint('session', ANSI.dim)}  ${paint(session.id, ANSI.cyan)}`);
   console.log(divider('='));
   console.log('');
+}
+
+export function parseSetModelCommandArgs(rawArgs: string): { model: string; slot?: ModelSlot } {
+  const args = parseCommandArgs(rawArgs);
+  let model: string | undefined;
+  let slot: ModelSlot | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--slot') {
+      const candidate = args[index + 1];
+      if (!candidate) {
+        throw new Error('Provide a slot after --slot.');
+      }
+      if (!isModelSlot(candidate)) {
+        throw new Error('Slot must be one of: gateway, run, compile.');
+      }
+      if (slot) {
+        throw new Error('Provide --slot only once.');
+      }
+      slot = candidate;
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('--slot=')) {
+      const candidate = arg.slice('--slot='.length);
+      if (!isModelSlot(candidate)) {
+        throw new Error('Slot must be one of: gateway, run, compile.');
+      }
+      if (slot) {
+        throw new Error('Provide --slot only once.');
+      }
+      slot = candidate;
+      continue;
+    }
+
+    if (arg.startsWith('--')) {
+      throw new Error(`Unknown option: ${arg}`);
+    }
+
+    if (model) {
+      throw new Error('Provide exactly one model for /set-model.');
+    }
+    model = arg;
+  }
+
+  if (!model) {
+    throw new Error('Provide a model after /set-model.');
+  }
+
+  return { model, slot };
 }
 
 function streamLabel(logEvent: ConductorLogEvent): string {
@@ -4166,6 +4248,7 @@ function buildHelpLines(): string[] {
     '/sessions       refresh or choose sessions',
     '/compile <spec> compile and publish a new local skill',
     '/skill-creator <spec> alias for /compile',
+    '/set-model <model> [--slot <slot>] update the configured model selection',
     '/cancel         abort the current execution',
     '/help           show this help',
     '/quit           exit the TUI',
@@ -4192,6 +4275,10 @@ function getShortcutHelpLines(): string[] {
   const lines = buildHelpLines();
   const keysIndex = lines.indexOf('keys');
   return keysIndex === -1 ? [] : lines.slice(keysIndex);
+}
+
+function isModelSlot(value: string): value is ModelSlot {
+  return (MODEL_SLOTS as readonly string[]).includes(value);
 }
 
 function computePaneWidths(columns: number): { left: number; center: number; right: number } {

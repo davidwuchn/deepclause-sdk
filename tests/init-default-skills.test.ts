@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { vol } from 'memfs';
 import {
   deepClauseDirExists,
+  getDocsDir,
+  getSystemDir,
   getToolsDir,
   initConfig,
 } from '../src/cli/config.js';
@@ -60,5 +62,26 @@ describe('deepclause init defaults', () => {
     await initConfig('/workspace');
 
     expect(await deepClauseDirExists('/workspace')).toBe(true);
+  });
+
+  it('seeds editable system DML and prompt overrides during init', async () => {
+    await initConfig('/workspace');
+
+    const systemDir = getSystemDir('/workspace');
+    const docsDir = getDocsDir('/workspace');
+
+    expect(vol.existsSync(`${systemDir}/conductor.dml`)).toBe(true);
+    expect(vol.existsSync(`${systemDir}/skill-creator.dml`)).toBe(true);
+    expect(vol.existsSync(`${systemDir}/CONDUCTOR_PROMPT.md`)).toBe(true);
+    expect(vol.existsSync(`${systemDir}/DML_COMPILER_PROMPT.md`)).toBe(true);
+    expect(vol.existsSync(`${docsDir}/TUI.md`)).toBe(true);
+
+    const conductorPrompt = vol.readFileSync(`${systemDir}/CONDUCTOR_PROMPT.md`, 'utf8') as string;
+    const compilerPrompt = vol.readFileSync(`${systemDir}/DML_COMPILER_PROMPT.md`, 'utf8') as string;
+    const tuiGuide = vol.readFileSync(`${docsDir}/TUI.md`, 'utf8') as string;
+
+    expect(conductorPrompt).toContain('# Who you are');
+    expect(compilerPrompt).toContain('DeepClause Meta Language');
+    expect(tuiGuide).toContain('# DeepClause TUI Guide');
   });
 });

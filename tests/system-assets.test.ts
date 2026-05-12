@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-import { readSystemSkillAsset } from '../src/system/assets/index.js';
+import { getSystemAssetSourcePaths, readSystemPromptAsset, readSystemSkillAsset } from '../src/system/assets/index.js';
 
 const tempDirs: string[] = [];
 
@@ -54,5 +54,42 @@ describe('system skill assets', () => {
 
     expect(content).toContain('exec(list_skills, Skills).');
     expect(content).not.toContain('exec(list_skills(), Skills).');
+  });
+
+  it('prefers a workspace conductor prompt override when present', async () => {
+    const workspaceRoot = await createWorkspace();
+    const systemDir = join(workspaceRoot, '.deepclause', 'system');
+    await mkdir(systemDir, { recursive: true });
+    await writeFile(join(systemDir, 'CONDUCTOR_PROMPT.md'), '# custom conductor prompt\n', 'utf8');
+
+    const content = await readSystemPromptAsset('conductor', { workspaceRoot });
+
+    expect(content).toContain('custom conductor prompt');
+  });
+
+  it('prefers a workspace skill creator prompt override when present', async () => {
+    const workspaceRoot = await createWorkspace();
+    const systemDir = join(workspaceRoot, '.deepclause', 'system');
+    await mkdir(systemDir, { recursive: true });
+    await writeFile(join(systemDir, 'DML_COMPILER_PROMPT.md'), '# custom compiler prompt\n', 'utf8');
+
+    const content = await readSystemPromptAsset('skill-creator', { workspaceRoot });
+
+    expect(content).toContain('custom compiler prompt');
+  });
+
+  it('reports the resolved system asset source paths for the workspace', async () => {
+    const workspaceRoot = await createWorkspace();
+    const systemDir = join(workspaceRoot, '.deepclause', 'system');
+    await mkdir(systemDir, { recursive: true });
+    await writeFile(join(systemDir, 'conductor.dml'), 'agent_main(_):-answer("override conductor").\n', 'utf8');
+    await writeFile(join(systemDir, 'CONDUCTOR_PROMPT.md'), '# custom conductor prompt\n', 'utf8');
+
+    const sources = getSystemAssetSourcePaths(workspaceRoot);
+
+    expect(sources.conductorDml).toBe(join(systemDir, 'conductor.dml'));
+    expect(sources.conductorPrompt).toBe(join(systemDir, 'CONDUCTOR_PROMPT.md'));
+    expect(sources.skillCreatorDml).toContain('/src/system/assets/skills/skill-creator.dml');
+    expect(sources.skillCreatorPrompt).toContain('/src/system/assets/docs/DML_COMPILER_PROMPT.md');
   });
 });

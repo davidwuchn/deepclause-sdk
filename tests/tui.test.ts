@@ -33,6 +33,7 @@ vi.mock('../src/cli/run.js', () => ({
 }));
 
 import {
+  ActivityBuffer,
   canSubmitParsedInputWhileBusy,
   computeFramePatch,
   ellipsize,
@@ -43,7 +44,9 @@ import {
   completeSlashCommand,
   nextWrappedIndex,
   padRight,
+  parseCommandBarInput,
   parseCommandArgs,
+  parseSetModelCommandArgs,
   parseSlashInput,
   previewChildSkillActivityMessage,
   previewMessageFromEvent,
@@ -77,6 +80,104 @@ describe('LiveExecutionPrinter', () => {
       'tool web_search(query=alpha)',
       '\t[research] output done',
       '\t[research] clarify Need a date range?',
+    ]);
+  });
+
+  it('prints stateful tool lifecycle lines', () => {
+    const lines: string[] = [];
+    const printer = new LiveExecutionPrinter(
+      () => {},
+      (text) => lines.push(text),
+    );
+
+    printer.handle({
+      scope: 'main',
+      event: {
+        type: 'tool_call',
+        toolName: 'bash',
+        toolArgs: { command: 'printf hello' },
+        toolState: 'running',
+        toolPid: 4321,
+      },
+    });
+    printer.handle({
+      scope: 'main',
+      event: {
+        type: 'tool_call',
+        toolName: 'bash',
+        toolArgs: { command: 'printf hello' },
+        toolState: 'completed',
+        toolPid: 4321,
+        toolExitCode: 0,
+        toolSummary: 'Command completed successfully',
+      },
+    });
+
+    expect(lines).toEqual([
+      'tool bash(command=printf hello) running pid=4321',
+      'tool bash(command=printf hello) completed pid=4321 exit=0',
+    ]);
+  });
+});
+
+describe('ActivityBuffer', () => {
+  it('shows active shell status until the tool completes', () => {
+    const activity = new ActivityBuffer();
+
+    activity.handle({
+      scope: 'main',
+      event: {
+        type: 'tool_call',
+        toolName: 'bash',
+        toolArgs: { command: 'printf hello' },
+        toolState: 'starting',
+      },
+    });
+    activity.handle({
+      scope: 'main',
+      event: {
+        type: 'tool_call',
+        toolName: 'bash',
+        toolArgs: { command: 'printf hello' },
+        toolState: 'running',
+        toolPid: 4321,
+      },
+    });
+    activity.handle({
+      scope: 'main',
+      event: {
+        type: 'log',
+        content: 'bash[4321] stdout hello',
+      },
+    });
+
+    expect(activity.snapshot()).toEqual([
+      'Active Tool Status',
+      'main bash running pid=4321',
+      '',
+      'tool bash(command=printf hello) starting',
+      'tool bash(command=printf hello) running pid=4321',
+      'log bash[4321] stdout hello',
+    ]);
+
+    activity.handle({
+      scope: 'main',
+      event: {
+        type: 'tool_call',
+        toolName: 'bash',
+        toolArgs: { command: 'printf hello' },
+        toolState: 'completed',
+        toolPid: 4321,
+        toolExitCode: 0,
+        toolSummary: 'Command completed successfully',
+      },
+    });
+
+    expect(activity.snapshot()).toEqual([
+      'tool bash(command=printf hello) starting',
+      'tool bash(command=printf hello) running pid=4321',
+      'log bash[4321] stdout hello',
+      'tool bash(command=printf hello) completed pid=4321 exit=0',
     ]);
   });
 });
@@ -229,7 +330,41 @@ describe('slash command parsing', () => {
       rawArgs: 'draft a benchmark helper',
       args: ['draft a benchmark helper'],
     });
+    expect(parseSlashInput('/set-model openai:gpt-4.1 --slot run')).toEqual({
+      kind: 'builtin',
+      name: 'set-model',
+      rawArgs: 'openai:gpt-4.1 --slot run',
+      args: ['openai:gpt-4.1', '--slot', 'run'],
+    });
     expect(parseSlashInput('summarize this')).toEqual({ kind: 'text', prompt: 'summarize this' });
+  });
+
+  it('parses /set-model arguments with optional slots', () => {
+    expect(parseSetModelCommandArgs('openai:gpt-4.1')).toEqual({
+      model: 'openai:gpt-4.1',
+    });
+
+    expect(parseSetModelCommandArgs('--slot run anthropic:claude-sonnet-4')).toEqual({
+      model: 'anthropic:claude-sonnet-4',
+      slot: 'run',
+    });
+
+    expect(parseSetModelCommandArgs('google:gemini-2.5-pro --slot=compile')).toEqual({
+      model: 'google:gemini-2.5-pro',
+      slot: 'compile',
+    });
+  });
+
+  it('parses direct shell commands and escaped leading bangs', () => {
+    expect(parseCommandBarInput('!git status')).toEqual({
+      kind: 'shell',
+      command: 'git status',
+    });
+
+    expect(parseCommandBarInput('  \\!this goes to the conductor')).toEqual({
+      kind: 'text',
+      prompt: '!this goes to the conductor',
+    });
   });
 
   it('completes slash commands and skills', () => {
@@ -250,6 +385,7 @@ describe('slash command parsing', () => {
     expect(canSubmitParsedInputWhileBusy(parseSlashInput('/cancel'))).toBe(true);
     expect(canSubmitParsedInputWhileBusy(parseSlashInput('/quit'))).toBe(true);
     expect(canSubmitParsedInputWhileBusy(parseSlashInput('/sessions'))).toBe(false);
+    expect(canSubmitParsedInputWhileBusy(parseCommandBarInput('!git status'))).toBe(false);
     expect(canSubmitParsedInputWhileBusy(parseSlashInput('keep going'))).toBe(false);
   });
 

@@ -585,6 +585,49 @@ describe('Args & Params', () => {
 
       expect(events.find(e => e.type === 'answer')?.content).toBe('Order: A, B, C');
     });
+
+    it('should reject missing positional args before execution', async () => {
+      const code = `
+        agent_main(Name, Age) :-
+            format(atom(Msg), "Name: ~w, Age: ~w", [Name, Age]),
+            answer(Msg).
+      `;
+
+      const events: any[] = [];
+      for await (const event of sdk.runDML(code, { args: ["Alice"] })) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: 'error',
+          content: expect.stringContaining('agent_main expects 2 positional arguments'),
+        }),
+      ]);
+    });
+
+    it('should allow any exact supported agent_main arity', async () => {
+      const code = `
+        agent_main :-
+            answer("no args").
+
+        agent_main(Name) :-
+            answer(Name).
+      `;
+
+      const noArgEvents: any[] = [];
+      for await (const event of sdk.runDML(code)) {
+        noArgEvents.push(event);
+      }
+
+      const oneArgEvents: any[] = [];
+      for await (const event of sdk.runDML(code, { args: ["Alice"] })) {
+        oneArgEvents.push(event);
+      }
+
+      expect(noArgEvents.find(e => e.type === 'answer')?.content).toBe('no args');
+      expect(oneArgEvents.find(e => e.type === 'answer')?.content).toBe('Alice');
+    });
   });
 
   describe('named params', () => {
