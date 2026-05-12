@@ -59,8 +59,14 @@ All commands except `init`, `help`, `--help`, `--version`, and `-V` expect a `.d
 
 - `.deepclause/config.json`
 - `.deepclause/tools/`
+- `.deepclause/system/`
 - `.deepclause/.gitignore`
 - seeded local skills: `deep-research` and `research-search-reader`
+- editable system overrides:
+    - `conductor.dml`
+    - `skill-creator.dml`
+    - `CONDUCTOR_PROMPT.md`
+    - `DML_COMPILER_PROMPT.md`
 
 ## TUI Agent
 
@@ -69,7 +75,8 @@ Running `deepclause` with no subcommand starts the fullscreen TUI.
 - Session list on the left
 - Messages in the center
 - Execution log and context summary on the right
-- Slash commands such as `/new`, `/sessions`, `/compile <spec>`, `/skill-creator <spec>`, `/cancel`, and `/<skill> [args]`
+- Slash commands such as `/new`, `/sessions`, `/set-model <model> [--slot <slot>]`, `/compile <spec>`, `/skill-creator <spec>`, `/cancel`, and `/<skill> [args]`
+- Direct shell commands with `!<command>`, streamed live in the execution pane and cancelled with `/cancel`
 
 For non-interactive use, `deepclause -p "..."` runs a single headless conductor turn with a fresh session.
 
@@ -85,7 +92,7 @@ The TUI is the interface around a single built-in agent: the conductor.
 Conceptually, a TUI turn works like this:
 
 1. Load the current session from `.deepclause/sessions/<session-id>/`.
-2. Build the conductor prompt from the packaged conductor prompt template, the current skill catalog, assistant memory, task memory, and session transcript.
+2. Build the conductor prompt from the resolved conductor prompt template, the current skill catalog, assistant memory, task memory, and session transcript.
 3. Run the conductor DML with the `gateway` model slot.
 4. Stream the conductor's own activity and any child-skill events into the execution log on the right.
 5. Persist the final user/assistant messages and updated usage counters back into the session directory.
@@ -141,12 +148,14 @@ There are two levels of customization.
 
 #### 1. Workspace-local system overrides
 
-If you want to customize behavior for one workspace without modifying the package, place override DML files here:
+If you want to customize behavior for one workspace without modifying the package, place override files here:
 
 - `.deepclause/system/conductor.dml`
 - `.deepclause/system/skill-creator.dml`
+- `.deepclause/system/CONDUCTOR_PROMPT.md`
+- `.deepclause/system/DML_COMPILER_PROMPT.md`
 
-When present, the CLI runtime prefers those files over the packaged system DML.
+When present, the CLI runtime prefers those files over the packaged system DML and system prompt markdown.
 
 #### 2. Source-level hacking in this repository
 
@@ -164,7 +173,8 @@ Notes:
 - The conductor uses the `gateway` model slot.
 - Normal compiled skills use the `run` model slot.
 - The skill creator uses the `compile` model slot.
-- Prompt markdown files are packaged source assets. Unlike the DML files above, they are not currently loaded from `.deepclause/system/` workspace overrides.
+- The TUI context pane shows the resolved source paths for the conductor DML/prompt and skill creator DML/prompt.
+- Changes to those `.deepclause/system/` files are picked up on the next conductor turn or skill-creator run; a dedicated TUI reload is not required.
 
 After source-level changes, rebuild the package:
 
@@ -383,7 +393,18 @@ deepclause run .deepclause/tools/explain.dml "function fib(n) { return n < 2 ? n
 # Or trigger skill creation directly from the TUI with:
 #   /compile <spec>
 #   /skill-creator <spec>
+# Or update the configured model selection from the TUI with:
+#   /set-model openai:gpt-4.1 --slot run
+# Or run a direct workspace shell command with:
+#   !npm test
 ```
+
+Compilation now runs two security-oriented checks on the generated DML:
+
+- Prolog static analysis for taint flow, dangerous tool usage, and capability extraction
+- An LLM security audit that reviews the generated DML and returns a short Markdown report
+
+The LLM audit runs by default for `deepclause compile`, `deepclause compile-all`, and one-shot `deepclause run -p ...`. Use `--no-audit` if you want to skip only the LLM review. Static analysis still runs either way.
 
 ## Use Cases
 
@@ -529,6 +550,27 @@ deepclause run skill.dml "input" \
     --verbose \                         # Show tool calls
     --workspace ./data \                # Set working directory
     --sandbox                           # Use AgentVM instead of the local shell
+```
+
+### Compile Options
+
+`deepclause compile` and `deepclause compile-all` use the `compile` model slot. They accept `--model`, `--provider`, `--temperature`, `--max-attempts`, `--sandbox`, and `--no-audit`.
+
+Static analysis always runs. `--no-audit` disables only the LLM security audit.
+
+One-shot prompt mode uses the same compile pipeline before execution, so `deepclause run -p "..." --no-audit` disables the LLM audit there as well.
+
+```bash
+deepclause compile skill.md \
+    --model claude-sonnet-4-20250514 \
+    --provider anthropic \
+    --temperature 0.2 \
+    --max-attempts 4
+
+deepclause compile-all ./specs \
+    --model claude-sonnet-4-20250514 \
+    --provider anthropic \
+    --no-audit
 ```
 
 ## Configuration
