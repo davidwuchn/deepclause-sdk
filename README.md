@@ -719,6 +719,37 @@ agent_main(Topic) :-
     answer(Final).
 ```
 
+### Shared Predicates Across DML Files
+
+When a skill grows beyond one file, move reusable predicates into helper files and load them at the top of the main DML. This is useful for shared search helpers, validation predicates, common formatting logic, or domain-specific utilities that multiple skills reuse.
+
+```prolog
+% .deepclause/tools/repo-review/helpers/search_helpers.dml
+normalize_query(Query, Normalized) :-
+    format(string(Normalized), "site:github.com ~w", [Query]).
+
+search_and_summarize(Query, Summary) :-
+    normalize_query(Query, Normalized),
+    exec(web_search(query: Normalized), Results),
+    task("Summarize these results: {Results}", Summary).
+```
+
+```prolog
+% .deepclause/tools/repo-review.dml
+:- use_module(library(lists)).
+:- use_module(library(clpfd)).
+:- consult('.deepclause/tools/repo-review/helpers/search_helpers.dml').
+
+agent_main(Topic) :-
+    search_and_summarize(Topic, Summary),
+    answer(Summary).
+```
+
+- Use `:- use_module(library(...)).` for standard SWI-Prolog libraries such as `lists`, `clpfd`, `clpq`, and `clpr`.
+- Use `:- consult('workspace-relative/path.dml').` for local shared DML helpers inside the workspace.
+- Local `:- use_module('.deepclause/tools/repo-review/helpers/search_helpers.dml').` also works as a convenience alias, but today it has consult-style loading semantics rather than full SWI module export filtering.
+- When a helper belongs to one skill, keep it in a dedicated subfolder such as `.deepclause/tools/<skill-slug>/helpers/` so the skill and its shared predicates stay together.
+
 ## Using as a Library
 
 Embed DeepClause in your own applications:
