@@ -372,6 +372,33 @@ extract_params([_Arg|Rest], Index, Arity, Inputs, Outputs) :-
     ;   Inputs = [Param|RestInputs], Outputs = RestOutputs
     ).
 
+module_reference_string(Module, ModuleStr) :-
+    atom(Module),
+    !,
+    atom_string(Module, ModuleStr).
+module_reference_string(Module, Module) :-
+    string(Module).
+
+workspace_module_reference(Module) :-
+    module_reference_string(Module, ModuleStr),
+    (   sub_string(ModuleStr, _, _, _, "/")
+    ;   sub_string(ModuleStr, _, _, 0, ".dml")
+    ;   sub_string(ModuleStr, _, _, 0, ".pl")
+    ;   sub_string(ModuleStr, 0, 1, _, ".")
+    ).
+
+process_use_module_directive(Module, SessionId) :-
+    (   workspace_module_reference(Module)
+    ->  process_directive(consult(Module), SessionId)
+    ;   SessionId:use_module(Module)
+    ).
+
+process_use_module_directive(Module, Exports, SessionId) :-
+    (   workspace_module_reference(Module)
+    ->  process_directive(consult(Module), SessionId)
+    ;   SessionId:use_module(Module, Exports)
+    ).
+
 %% process_directive(+Directive, +SessionId)
 process_directive(param(Key, Desc), SessionId) :-
     !,
@@ -379,6 +406,7 @@ process_directive(param(Key, Desc), SessionId) :-
 process_directive(param(Key, Desc, Default), SessionId) :-
     !,
     assertz(SessionId:param_decl(Key, Desc, Default)).
+
 %% Handle consult directive: :- consult(File)
 process_directive(consult(File), SessionId) :-
     !,
@@ -390,10 +418,10 @@ process_directive(consult(File), SessionId) :-
 %% Handle use_module directive
 process_directive(use_module(Module), SessionId) :-
     !,
-    SessionId:use_module(Module).
+    process_use_module_directive(Module, SessionId).
 process_directive(use_module(Module, Exports), SessionId) :-
     !,
-    SessionId:use_module(Module, Exports).
+    process_use_module_directive(Module, Exports, SessionId).
 %% Handle list-style consult: :- [File] or :- [File1, File2, ...]
 process_directive([File|Files], SessionId) :-
     !,
@@ -1614,6 +1642,16 @@ mi_call(consult(File), StateIn, StateIn) :-
     resolve_workspace_path(File, FullPath),
     readutil:read_file_to_string(FullPath, Code, []),
     consult_string(Code, SessionId).
+
+mi_call(use_module(Module), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    process_use_module_directive(Module, SessionId).
+
+mi_call(use_module(Module, Exports), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    process_use_module_directive(Module, Exports, SessionId).
 
 %% mi_call([File], +StateIn, -StateOut)
 %% Alternative consult syntax: [file]

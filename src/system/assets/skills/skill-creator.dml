@@ -87,6 +87,7 @@ agent_main(SpecMarkdown) :-
     format(string(EnvTask),
         "Set up the execution environment for the skill you are about to build.\n\nBased on your research:\n~w\n\nYour job in this phase:\n1. Use shell() to check what is already installed (python --version, node --version, which <tool>, pip show <pkg>, etc.).\n2. Install ALL missing packages and tools: pip install, apt-get install (always use sudo and -y), npm install -g.\n3. If the skill needs helper scripts (Python, Shell, etc.), create and smoke-test them now with shell().\n4. When you encounter errors during setup, diagnose the root cause (version mismatch, missing system lib, permissions, ...) and resolve it.\n5. Prefer the simplest approach with the fewest new dependencies when the spec does not specify.\n6. Do NOT install anything inside the DML skill itself - the skill must assume everything is pre-installed.\n\nStore a short environment summary (what was installed, what exists) in EnvSummary.",
         [ResearchSummary]),
+
     task(EnvTask, string(EnvSummary)),
     output(EnvSummary),
 

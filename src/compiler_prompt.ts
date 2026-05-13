@@ -325,9 +325,11 @@ catch(Goal, Error, Recovery)
 throw(some_error)
 \`\`\`
 
-### Logic & Optimization (CLP)
+### Module Directives & Logic (CLP)
 
-DML supports Prolog's Constraint Logic Programming (CLP) libraries. Use these instead of Python for mathematical optimization, scheduling, or strict logic puzzles:
+DML supports top-level \`:- use_module(...)\` directives for standard SWI-Prolog libraries, such as \`library(clpfd)\`.
+Use them when the skill needs built-in library predicates. For workspace-local shared DML code, prefer \`:- consult('relative/path.dml').\`.
+Local \`:- use_module('relative/path.dml').\` is accepted as a convenience alias, but it currently loads the file with consult-style semantics rather than full SWI module export filtering.
 
 - **CLP(FD)**: Finite domains (integers). Use \`:- use_module(library(clpfd)).\`
 - **CLP(Q)**: Rational numbers (exact fractions). Use \`:- use_module(library(clpq)).\`

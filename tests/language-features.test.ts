@@ -1419,6 +1419,67 @@ describe('File I/O Operations', () => {
     });
   });
 
+  describe('Module Loading', () => {
+    it('should load a local helper file with use_module/2 at the top level', async () => {
+      writeFileSync(join(testWorkspace, 'helper.dml'), 'helper_value("from helper").\n');
+
+      const code = `
+        :- use_module("helper.dml", [helper_value/1]).
+
+        agent_main :-
+            helper_value(Value),
+            answer(Value).
+      `;
+
+      const events: any[] = [];
+      for await (const event of sdk.runDML(code, { workspacePath: testWorkspace })) {
+        events.push(event);
+      }
+
+      expect(events.find(e => e.type === 'answer')?.content).toBe('from helper');
+    });
+
+    it('should resolve use_module/1 inside a consulted local helper file', async () => {
+      writeFileSync(join(testWorkspace, 'inner.dml'), 'inner_value("from nested helper").\n');
+      writeFileSync(
+        join(testWorkspace, 'outer.dml'),
+        ':- use_module("inner.dml").\nhelper_value(Value) :-\n    inner_value(Value).\n',
+      );
+
+      const code = `
+        agent_main :-
+            consult("outer.dml"),
+            helper_value(Value),
+            answer(Value).
+      `;
+
+      const events: any[] = [];
+      for await (const event of sdk.runDML(code, { workspacePath: testWorkspace })) {
+        events.push(event);
+      }
+
+      expect(events.find(e => e.type === 'answer')?.content).toBe('from nested helper');
+    });
+
+    it('should keep standard library use_module/1 working', async () => {
+      const code = `
+        :- use_module(library(clpfd)).
+
+        agent_main :-
+            [X] ins 1..1,
+            label([X]),
+            answer("ok").
+      `;
+
+      const events: any[] = [];
+      for await (const event of sdk.runDML(code, { workspacePath: testWorkspace })) {
+        events.push(event);
+      }
+
+      expect(events.find(e => e.type === 'answer')?.content).toBe('ok');
+    });
+  });
+
   describe('Writing Files', () => {
     it('should write file contents with write_file/2', async () => {
       const code = `

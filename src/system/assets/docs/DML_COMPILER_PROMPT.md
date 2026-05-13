@@ -378,6 +378,23 @@ IMPORTANT: DML skills must NOT install their own dependencies.
   The skill can assume all dependencies are already available at runtime.
 </program_structure>
 
+<module_directives>
+MODULE DIRECTIVES
+
+DML supports top-level `:- use_module(...)` directives for standard SWI-Prolog libraries.
+Use them for built-in modules such as:
+  :- use_module(library(clpfd)).
+  :- use_module(library(clpq)).
+  :- use_module(library(clpr)).
+  :- use_module(library(lists)).
+
+For workspace-local shared DML code, prefer:
+  :- consult('relative/path/to/helper.dml').
+
+Local `:- use_module('relative/path/to/helper.dml').` is accepted as a convenience alias, but it currently loads the file with consult-style semantics rather than full SWI module export filtering.
+Keep imports at the top of the file and only import modules the skill actually uses.
+</module_directives>
+
 <when_to_use_what>
 CHOOSING THE RIGHT APPROACH
 
@@ -393,7 +410,6 @@ CHOOSING THE RIGHT APPROACH
 | Get user input                        | exec(ask_user(prompt: P), R) via tool       |
 | Parse JSON                            | atom_json_dict(Atom, Dict, []) + get_dict/3 |
 
-DO NOT use bash for: fetching web content (curl, wget) - use url_fetch.
 DO NOT use Python for: simple file writing - use Prolog open/3, write/2, close/1.
 DO NOT use Prolog for: complex data analysis - use Python via bash.
 </when_to_use_what>
@@ -430,6 +446,8 @@ GENERAL GUIDELINES:
   - Install missing packages during skill creation, not inside the final DML skill.
   - Use runtime tools (`web_search`, `news_search`, `url_fetch`) for web content instead of `curl` or `wget`.
   - Use the configured workspace for persistent task files.
+  - Put helper scripts, templates, prompt fixtures, and other skill-specific runtime artifacts in a dedicated `.deepclause` subfolder, typically `.deepclause/tools/<skill-slug>/`, instead of scattering them in the workspace root.
+  - Reference those helper files from DML with workspace-relative paths.
 
 PACKAGE INSTALLATION (done by YOU, the skill creator, via bash - NOT inside DML skills):
   Python:  bash("pip install --no-cache-dir pandas numpy matplotlib")
@@ -661,4 +679,5 @@ BEFORE SUBMITTING YOUR DML CODE, VERIFY ALL OF THESE:
 [ ] No curl/wget in bash - url_fetch for web content
 [ ] No {word} placeholders in system() - use <word> angle brackets for template text
 [ ] No package installation in DML code - dependencies are pre-installed by the skill creator
+[ ] Helper scripts and other skill-specific artifacts live in a dedicated `.deepclause` subfolder
 </output_checklist>
