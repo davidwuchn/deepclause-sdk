@@ -453,6 +453,20 @@ export class ActivityBuffer {
       : activeLines;
   }
 
+  snapshotTail(limit: number): string[] {
+    const boundedLimit = Math.max(1, limit);
+    const body = this.activeStreamLine
+      ? [...this.lines.slice(-boundedLimit), this.activeStreamLine]
+      : this.lines.slice(-boundedLimit);
+    const activeLines = this.buildActiveToolLines();
+    if (activeLines.length === 0) {
+      return body;
+    }
+    return body.length > 0
+      ? [...activeLines, '', ...body]
+      : activeLines;
+  }
+
   private handleStream(logEvent: ConductorLogEvent): void {
     const streamKey = logEvent.scope === 'child' ? `child:${logEvent.childSlug ?? '?'}` : 'main';
 
@@ -1213,9 +1227,12 @@ class FullscreenTui {
       });
 
       activity.finish();
+      this.completeCurrentPreview({
+        finalText: result.answer,
+        error: result.error,
+      });
       await this.refreshSessions({ createIfMissing: true, selectedSessionId: result.sessionId });
       await this.refreshCommands();
-      this.finishExecutionPreview({ persist: false });
       this.statusLine = result.error ? 'Task failed.' : 'Task finished.';
     } catch (error) {
       activity.finish();
@@ -2650,6 +2667,24 @@ class FullscreenTui {
     this.currentPreview = null;
   }
 
+  private completeCurrentPreview(options: { finalText?: string; error?: string }): void {
+    if (!this.currentPreview || this.currentPreview.kind === 'shell') {
+      return;
+    }
+
+    this.currentPreview.activeChildTag = undefined;
+
+    const assistant = this.ensurePreviewAssistantMessage();
+    if (typeof options.finalText === 'string' && options.finalText.trim()) {
+      assistant.content = options.finalText;
+    }
+    if (typeof options.error === 'string' && options.error.trim()) {
+      assistant.content = options.error;
+      assistant.error = true;
+    }
+    assistant.pending = false;
+  }
+
   private cancelCurrentExecution(message: string): void {
     if (!this.busy || !this.currentAbortController) {
       this.statusLine = 'No execution is currently running.';
@@ -2833,6 +2868,31 @@ class FullscreenTui {
     }
 
     this.sessionDetail = await getConductorSessionDetail(this.workspaceRoot, this.selectedSessionId);
+
+    if (
+      this.currentPreview
+      && this.currentPreview.kind === 'task'
+      && this.currentPreview.sessionId === this.selectedSessionId
+      && sessionMessagesContainCompletedTaskPreview(this.sessionDetail.messages, this.currentPreview.entries)
+    ) {
+      this.currentPreview = null;
+    }
+
+    const existingEphemeral = this.ephemeralMessagesBySessionId.get(this.selectedSessionId);
+    if (!existingEphemeral || existingEphemeral.length === 0) {
+      return;
+    }
+
+    const reconciled = reconcileEphemeralMessages(
+      this.sessionDetail.messages,
+      existingEphemeral,
+    );
+    if (reconciled.length === 0) {
+      this.ephemeralMessagesBySessionId.delete(this.selectedSessionId);
+      return;
+    }
+
+    this.ephemeralMessagesBySessionId.set(this.selectedSessionId, reconciled);
   }
 
   private activityFor(key: string): ActivityBuffer {
@@ -3022,7 +3082,7 @@ class FullscreenTui {
     return lines;
   }
 
-  private buildMessagesPaneBody(): string[] {
+  private buildMessageEntries(): DisplayMessage[] {
     const entries: DisplayMessage[] = [];
 
     if (this.sessionDetail) {
@@ -3038,6 +3098,11 @@ class FullscreenTui {
       entries.push(...this.currentPreview.entries);
     }
 
+    return entries;
+  }
+
+  private buildMessagesPaneBody(options: { recentEntryLimit?: number } = {}): string[] {
+    const entries = this.buildMessageEntries();
     if (entries.length === 0) {
       return [
         '[System] No messages yet.',
@@ -3046,8 +3111,11 @@ class FullscreenTui {
       ];
     }
 
+    const visibleEntries = typeof options.recentEntryLimit === 'number' && options.recentEntryLimit > 0
+      ? entries.slice(-options.recentEntryLimit)
+      : entries;
     const lines: string[] = [];
-    for (const entry of entries) {
+    for (const entry of visibleEntries) {
       const header = this.formatMessageHeader(entry);
       lines.push(header);
       const bodyLines = entry.content
@@ -3067,8 +3135,10 @@ class FullscreenTui {
     return lines;
   }
 
-  private buildProcessPaneBody(): string[] {
-    const activity = this.currentProcessActivity().snapshot();
+  private buildProcessPaneBody(options: { tailLineLimit?: number } = {}): string[] {
+    const activity = typeof options.tailLineLimit === 'number' && options.tailLineLimit > 0
+      ? this.currentProcessActivity().snapshotTail(options.tailLineLimit)
+      : this.currentProcessActivity().snapshot();
     if (activity.length > 0) {
       return activity;
     }
@@ -3143,7 +3213,7 @@ class FullscreenTui {
   }
 
   private buildPaneView(kind: PaneKind, title: string, width: number, height: number): string[] {
-    const metrics = this.getPaneMetrics(kind, width, height);
+    const metrics = this.getRenderPaneMetrics(kind, width, height);
     const paneTitle = this.buildPaneTitle(title, kind, metrics);
     return buildPane(
       paneTitle,
@@ -3333,6 +3403,29 @@ class FullscreenTui {
     return this.paneScroll[kind] === 0
       ? `${title}${this.focusedPane === kind ? ' [focus]' : ''} [follow]`
       : `${title}${this.focusedPane === kind ? ' [focus]' : ''} [-${this.paneScroll[kind]}]`;
+  }
+
+  private getRenderPaneMetrics(
+    kind: PaneKind,
+    width = paneDimensionsForKind(kind, output.columns ?? 120, output.rows ?? 40).width,
+    height = paneDimensionsForKind(kind, output.columns ?? 120, output.rows ?? 40).height,
+  ): { lines: string[]; start: number; maxStart: number; viewportLines: number } {
+    if ((kind === 'process' || kind === 'messages') && this.paneScroll[kind] === 0) {
+      const innerWidth = Math.max(1, width - 2);
+      const viewportLines = Math.max(0, height - 2);
+      const rawBody = kind === 'messages'
+        ? this.buildMessagesPaneBody({ recentEntryLimit: Math.max(8, viewportLines * 2) })
+        : this.buildProcessPaneBody({ tailLineLimit: Math.max(16, viewportLines * 4) });
+      const tail = collectTailWrappedLines(rawBody, innerWidth, viewportLines);
+      return {
+        lines: tail.lines,
+        start: 0,
+        maxStart: tail.truncated ? 1 : 0,
+        viewportLines,
+      };
+    }
+
+    return this.getPaneMetrics(kind, width, height);
   }
 
   private getPaneMetrics(
@@ -3924,6 +4017,67 @@ export function parseSlashInput(line: string): ParsedTuiInput {
 
 export function canSubmitParsedInputWhileBusy(parsed: ParsedTuiInput): boolean {
   return parsed.kind === 'builtin' && (parsed.name === 'cancel' || parsed.name === 'exit' || parsed.name === 'quit');
+}
+
+export function reconcileEphemeralMessages(
+  persistedMessages: Array<{ role: 'user' | 'assistant'; content: string }>,
+  ephemeralMessages: DisplayMessage[],
+): DisplayMessage[] {
+  if (ephemeralMessages.length === 0) {
+    return [];
+  }
+
+  const persistedCounts = new Map<string, number>();
+  for (const message of persistedMessages) {
+    const key = `${message.role}\u0000${message.content}`;
+    persistedCounts.set(key, (persistedCounts.get(key) ?? 0) + 1);
+  }
+
+  const remaining: DisplayMessage[] = [];
+  for (const message of ephemeralMessages) {
+    if (message.pending || message.role === 'system') {
+      remaining.push(message);
+      continue;
+    }
+
+    const key = `${message.role}\u0000${message.content}`;
+    const count = persistedCounts.get(key) ?? 0;
+    if (count > 0) {
+      persistedCounts.set(key, count - 1);
+      continue;
+    }
+
+    remaining.push(message);
+  }
+
+  return remaining;
+}
+
+export function sessionMessagesContainCompletedTaskPreview(
+  persistedMessages: Array<{ role: 'user' | 'assistant'; content: string }>,
+  previewEntries: DisplayMessage[],
+): boolean {
+  const previewUser = [...previewEntries].reverse().find((entry) => entry.role === 'user' && entry.content);
+  const previewAssistant = [...previewEntries].reverse().find((entry) => entry.role === 'assistant' && !entry.pending && entry.content);
+
+  if (!previewUser || !previewAssistant) {
+    return false;
+  }
+
+  for (let index = persistedMessages.length - 1; index >= 1; index -= 1) {
+    const assistant = persistedMessages[index];
+    const user = persistedMessages[index - 1];
+    if (
+      user?.role === 'user'
+      && assistant?.role === 'assistant'
+      && user.content === previewUser.content
+      && assistant.content === previewAssistant.content
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 export function computeFramePatch(
@@ -4790,6 +4944,40 @@ function wrapBodyLines(body: string[], innerWidth: number): string[] {
     lines.push(...wrapPlainText(line, innerWidth));
   }
   return lines;
+}
+
+export function collectTailWrappedLines(
+  body: string[],
+  innerWidth: number,
+  limit: number,
+): { lines: string[]; truncated: boolean } {
+  if (limit <= 0) {
+    return { lines: [], truncated: body.length > 0 };
+  }
+
+  const collected: string[] = [];
+  let truncated = false;
+
+  for (let index = body.length - 1; index >= 0; index -= 1) {
+    const wrapped = wrapPlainText(body[index], innerWidth);
+    const remaining = limit - collected.length;
+
+    if (remaining <= 0) {
+      truncated = true;
+      break;
+    }
+
+    if (wrapped.length <= remaining) {
+      collected.unshift(...wrapped);
+      continue;
+    }
+
+    collected.unshift(...wrapped.slice(wrapped.length - remaining));
+    truncated = true;
+    break;
+  }
+
+  return { lines: collected, truncated };
 }
 
 async function listWorkspaceTextFiles(workspaceRoot: string): Promise<string[]> {

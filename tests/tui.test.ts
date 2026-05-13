@@ -35,6 +35,7 @@ vi.mock('../src/cli/run.js', () => ({
 import {
   ActivityBuffer,
   canSubmitParsedInputWhileBusy,
+  collectTailWrappedLines,
   computeFramePatch,
   ellipsize,
   
@@ -52,7 +53,9 @@ import {
   previewChildSkillActivityMessage,
   previewMessageFromEvent,
   previewQuestionMessage,
+  reconcileEphemeralMessages,
   runPromptHeadless,
+  sessionMessagesContainCompletedTaskPreview,
   selectMenuItemByTypeahead,
   wrapPlainText,
 } from '../src/cli/tui.js';
@@ -189,6 +192,19 @@ describe('ActivityBuffer', () => {
       'tool bash(command=printf hello) completed pid=4321 exit=0',
     ]);
   });
+
+  it('returns only the newest activity lines in tail snapshots', () => {
+    const activity = new ActivityBuffer();
+
+    activity.handle({ scope: 'main', event: { type: 'output', content: 'first' } });
+    activity.handle({ scope: 'main', event: { type: 'output', content: 'second' } });
+    activity.handle({ scope: 'main', event: { type: 'output', content: 'third' } });
+
+    expect(activity.snapshotTail(2)).toEqual([
+      'output second',
+      'output third',
+    ]);
+  });
 });
 
 describe('previewMessageFromEvent', () => {
@@ -253,6 +269,72 @@ describe('display-width helpers', () => {
     expect(wrapPlainText('🙂🙂a', 4)).toEqual(['🙂🙂', 'a']);
     expect(ellipsize('你好世界', 5)).toBe('你...');
     expect(padRight('🙂好', 6)).toBe('🙂好  ');
+  });
+
+  it('collects only the newest wrapped lines for follow-mode panes', () => {
+    expect(collectTailWrappedLines(['first', 'second', 'third'], 20, 2)).toEqual({
+      lines: ['second', 'third'],
+      truncated: true,
+    });
+
+    expect(collectTailWrappedLines(['alpha beta', 'gamma'], 6, 2)).toEqual({
+      lines: ['beta', 'gamma'],
+      truncated: true,
+    });
+  });
+});
+
+describe('reconcileEphemeralMessages', () => {
+  it('drops user and assistant entries once the session detail contains them', () => {
+    expect(reconcileEphemeralMessages(
+      [
+        { role: 'user', content: 'Build a skill' },
+        { role: 'assistant', content: 'Done.' },
+      ],
+      [
+        { role: 'user', content: 'Build a skill' },
+        { role: 'system', kind: 'output', tag: 'skill-creator', content: 'Running child skill...' },
+        { role: 'assistant', content: 'Done.' },
+      ],
+    )).toEqual([
+      { role: 'system', kind: 'output', tag: 'skill-creator', content: 'Running child skill...' },
+    ]);
+  });
+
+  it('keeps unmatched or pending preview entries visible', () => {
+    expect(reconcileEphemeralMessages(
+      [{ role: 'user', content: 'Build a skill' }],
+      [
+        { role: 'assistant', content: 'Still streaming...', pending: true },
+        { role: 'assistant', content: 'New answer' },
+      ],
+    )).toEqual([
+      { role: 'assistant', content: 'Still streaming...', pending: true },
+      { role: 'assistant', content: 'New answer' },
+    ]);
+  });
+});
+
+describe('sessionMessagesContainCompletedTaskPreview', () => {
+  it('recognizes when a task preview user-answer pair has been persisted', () => {
+    expect(sessionMessagesContainCompletedTaskPreview(
+      [
+        { role: 'user', content: 'Find papers' },
+        { role: 'assistant', content: 'Here are the results.' },
+      ],
+      [
+        { role: 'user', content: 'Find papers' },
+        { role: 'system', kind: 'output', tag: 'research', content: 'Searching...' },
+        { role: 'assistant', content: 'Here are the results.' },
+      ],
+    )).toBe(true);
+  });
+
+  it('does not match incomplete or different previews', () => {
+    expect(sessionMessagesContainCompletedTaskPreview(
+      [{ role: 'user', content: 'Find papers' }, { role: 'assistant', content: 'Different answer' }],
+      [{ role: 'user', content: 'Find papers' }, { role: 'assistant', content: 'Here are the results.' }],
+    )).toBe(false);
   });
 });
 
