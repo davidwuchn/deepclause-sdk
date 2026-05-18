@@ -6,6 +6,8 @@ import {
 } from './agentvm-manager.js';
 
 const ABORT_FORCE_KILL_MS = 500;
+const EXIT_STDIO_GRACE_MS = 25;
+const DEFAULT_HOST_SHELL_IDLE_TIMEOUT_MS = 180_000;
 
 export interface ShellManager {
   readonly kind: 'host' | 'sandbox';
@@ -34,6 +36,7 @@ export class HostShellManager implements ShellManager {
     }
 
     return new Promise((resolve, reject) => {
+      const idleTimeoutMs = getHostShellIdleTimeoutMs();
       const child = spawn('bash', ['-lc', command], {
         cwd: this.workspacePath,
         env: process.env,
@@ -48,11 +51,47 @@ export class HostShellManager implements ShellManager {
 
       let stdout = '';
       let stderr = '';
+      let exitCode: number | null = null;
+      let exitSignal: NodeJS.Signals | null = null;
+      let timedOut = false;
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const resetIdleTimer = () => {
+        if (idleTimeoutMs <= 0 || settled || timedOut) {
+          return;
+        }
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+        }
+        idleTimer = setTimeout(() => {
+          if (settled || signal?.aborted) {
+            return;
+          }
+
+          timedOut = true;
+          exitCode = 124;
+          stderr = stderr
+            ? `${stderr}${stderr.endsWith('\n') ? '' : '\n'}Command timed out after ${idleTimeoutMs}ms without output`
+            : `Command timed out after ${idleTimeoutMs}ms without output`;
+
+          terminateChildProcessTree(child, 'SIGTERM');
+          if (!forceKillTimer) {
+            forceKillTimer = setTimeout(() => {
+              if (child.exitCode === null && child.signalCode === null) {
+                terminateChildProcessTree(child, 'SIGKILL');
+              }
+            }, ABORT_FORCE_KILL_MS);
+            forceKillTimer.unref?.();
+          }
+        }, idleTimeoutMs);
+        idleTimer.unref?.();
+      };
 
       child.stdout.setEncoding('utf8');
       child.stderr.setEncoding('utf8');
       child.stdout.on('data', (chunk) => {
         stdout += chunk;
+        resetIdleTimer();
         observer?.onStdout?.({
           command,
           chunk,
@@ -62,6 +101,7 @@ export class HostShellManager implements ShellManager {
       });
       child.stderr.on('data', (chunk) => {
         stderr += chunk;
+        resetIdleTimer();
         observer?.onStderr?.({
           command,
           chunk,
@@ -71,7 +111,44 @@ export class HostShellManager implements ShellManager {
       });
 
       let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+      let exitGraceTimer: ReturnType<typeof setTimeout> | null = null;
       let settled = false;
+      const maybeDestroyStreams = () => {
+        child.stdout.destroy?.();
+        child.stderr.destroy?.();
+      };
+      const buildResult = (): ShellExecResult => {
+        const resolvedExitCode = typeof exitCode === 'number'
+          ? exitCode
+          : (timedOut ? 124 : 1);
+        const signalSuffix = exitSignal ? ` (signal ${exitSignal})` : '';
+        return {
+          success: resolvedExitCode === 0,
+          stdout,
+          stderr,
+          exitCode: resolvedExitCode,
+          pid: child.pid,
+          backend: this.kind,
+          summary: resolvedExitCode === 0
+            ? 'Command completed successfully'
+            : (timedOut ? `Command timed out after ${idleTimeoutMs}ms without output` : (stderr || `Command failed with exit code ${resolvedExitCode}${signalSuffix}`)),
+        };
+      };
+      const finalizeExit = (detachStreams = false) => {
+        if (detachStreams) {
+          maybeDestroyStreams();
+        }
+        const result = buildResult();
+        observer?.onExit?.({
+          command,
+          pid: child.pid,
+          backend: this.kind,
+          success: result.success,
+          exitCode: result.exitCode,
+          summary: result.summary,
+        });
+        finalizeResolve(result);
+      };
       const finalizeReject = (error: unknown) => {
         if (settled) {
           return;
@@ -104,51 +181,52 @@ export class HostShellManager implements ShellManager {
       };
       const cleanup = () => {
         signal?.removeEventListener('abort', onAbort);
-      };
-      signal?.addEventListener('abort', onAbort, { once: true });
-
-      child.once('error', (error) => {
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
+        }
         if (forceKillTimer) {
           clearTimeout(forceKillTimer);
           forceKillTimer = null;
         }
+        if (exitGraceTimer) {
+          clearTimeout(exitGraceTimer);
+          exitGraceTimer = null;
+        }
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      resetIdleTimer();
+
+      child.once('error', (error) => {
         if (signal?.aborted) {
           finalizeReject(abortError(signal.reason));
           return;
         }
         finalizeReject(error);
       });
-      child.once('close', (code, closeSignal) => {
-        if (forceKillTimer) {
-          clearTimeout(forceKillTimer);
-          forceKillTimer = null;
+      child.once('exit', (code, closeSignal) => {
+        exitCode = typeof code === 'number' ? code : 1;
+        exitSignal = closeSignal;
+
+        if (signal?.aborted || settled) {
+          return;
         }
+
+        exitGraceTimer = setTimeout(() => {
+          if (!settled) {
+            finalizeExit(true);
+          }
+        }, EXIT_STDIO_GRACE_MS);
+        exitGraceTimer.unref?.();
+      });
+      child.once('close', (code, closeSignal) => {
+        exitCode = typeof code === 'number' ? code : (exitCode ?? 1);
+        exitSignal = closeSignal ?? exitSignal;
         if (signal?.aborted) {
           finalizeReject(abortError(signal.reason));
           return;
         }
-        const exitCode = typeof code === 'number' ? code : 1;
-        const signalSuffix = closeSignal ? ` (signal ${closeSignal})` : '';
-        const result: ShellExecResult = {
-          success: exitCode === 0,
-          stdout,
-          stderr,
-          exitCode,
-          pid: child.pid,
-          backend: this.kind,
-          summary: exitCode === 0
-            ? 'Command completed successfully'
-            : (stderr || `Command failed with exit code ${exitCode}${signalSuffix}`),
-        };
-        observer?.onExit?.({
-          command,
-          pid: child.pid,
-          backend: this.kind,
-          success: result.success,
-          exitCode,
-          summary: result.summary,
-        });
-        finalizeResolve(result);
+        finalizeExit(false);
       });
     });
   }
@@ -164,6 +242,17 @@ export function createShellManager(options: CreateShellManagerOptions): ShellMan
   }
 
   return new HostShellManager(options.workspacePath);
+}
+
+function getHostShellIdleTimeoutMs(): number {
+  const raw = process.env.DC_HOST_SHELL_IDLE_TIMEOUT_MS;
+  if (raw != null) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_HOST_SHELL_IDLE_TIMEOUT_MS;
 }
 
 function abortError(reason: unknown): Error {

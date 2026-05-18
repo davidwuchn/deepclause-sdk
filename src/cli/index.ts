@@ -395,22 +395,55 @@ program
       } else {
         console.log('Compiled Commands:\n');
         for (const cmd of commands) {
-          console.log(`📋 ${cmd.name}`);
+          const label = cmd.displayName && cmd.displayName !== cmd.name
+            ? `${cmd.displayName} (${cmd.name})`
+            : cmd.name;
+
+          console.log(`📋 ${label}`);
           console.log(`   ${cmd.description}`);
-          if (options.detailed && cmd.parameters) {
-            console.log('   Parameters:');
-            for (const p of cmd.parameters) {
-              const req = p.required ? '(required)' : `(optional, default: ${p.default})`;
-              console.log(`     • ${p.name} ${req} - ${p.description}`);
+          console.log(`   Usage: ${cmd.usage}`);
+          if (options.detailed) {
+            if (cmd.triggerPhrases?.length) {
+              console.log('   Trigger Phrases:');
+              for (const phrase of cmd.triggerPhrases) {
+                console.log(`     • ${phrase}`);
+              }
             }
+
+            if (cmd.parameters?.length) {
+              console.log('   Arguments:');
+              for (const p of cmd.parameters) {
+                const status = p.required === false
+                  ? (p.default !== undefined ? `optional, default: ${p.default}` : 'optional')
+                  : 'required';
+                const description = p.description ? ` - ${p.description}` : '';
+                console.log(`     • ${p.name} (${status})${description}`);
+              }
+            }
+
+            if (cmd.capabilities?.length) {
+              console.log('   Capabilities:');
+              for (const capability of cmd.capabilities) {
+                console.log(`     • ${capability}`);
+              }
+            }
+
             if (cmd.tools?.length) {
               console.log('   Tool Dependencies:');
               for (const t of cmd.tools) {
                 console.log(`     • ${t}`);
               }
             }
+
+            if (cmd.model) {
+              console.log(`   Model: ${cmd.model}`);
+            }
+
+            if (cmd.compiledAt) {
+              console.log(`   Compiled: ${cmd.compiledAt}`);
+            }
           }
-          console.log(`   Usage: deepclause run ${cmd.path}\n`);
+          console.log('');
         }
       }
     } catch (error) {

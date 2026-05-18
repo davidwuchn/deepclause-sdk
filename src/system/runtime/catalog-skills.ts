@@ -1,6 +1,6 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { listCommands } from '../../cli/commands.js';
+import { listCommands, type Parameter } from '../../cli/commands.js';
 import { getToolsDir, type Config, type ResolvedModelConfig } from '../../cli/config.js';
 import { buildDmlParams } from './dml-params.js';
 import { verifyRuntimeToolsAvailable } from './runtime-tools.js';
@@ -19,8 +19,12 @@ interface SkillMetaFile {
 
 export interface LocalSkillCatalogEntry {
   slug: string;
+  name?: string;
   description: string;
-  parameters?: unknown[];
+  usage?: string;
+  trigger_phrases?: string[];
+  parameters?: Parameter[];
+  capabilities?: string[];
   tools?: string[];
   compiled_at?: string;
   model?: string;
@@ -71,8 +75,12 @@ export async function listLocalSkillCatalog(
     .filter((command) => options.includeSystemSkills || !isSystemSkillSlug(command.name))
     .map((command) => ({
       slug: command.name,
+      name: command.displayName,
       description: command.description,
+      usage: buildRunSkillUsage(command.name, command.parameters),
+      trigger_phrases: command.triggerPhrases,
       parameters: command.parameters,
+      capabilities: command.capabilities,
       tools: command.tools,
       compiled_at: command.compiledAt,
       model: command.model,
@@ -185,4 +193,35 @@ async function loadSkillProgram(
   }
 
   return { dmlCode, meta };
+}
+
+function buildRunSkillUsage(slug: string, parameters: Parameter[] | undefined): string {
+  const args = orderParameters(parameters).map((parameter) => `"${formatRunSkillArgument(parameter)}"`);
+
+  if (args.length === 0) {
+    return `run_skill(slug: "${slug}")`;
+  }
+
+  return `run_skill(slug: "${slug}", args: [${args.join(', ')}])`;
+}
+
+function orderParameters(parameters: Parameter[] | undefined): Parameter[] {
+  if (!parameters || parameters.length === 0) {
+    return [];
+  }
+
+  return [...parameters]
+    .map((parameter, index) => ({ parameter, index }))
+    .sort((left, right) => (left.parameter.position ?? left.index) - (right.parameter.position ?? right.index))
+    .map(({ parameter }) => parameter);
+}
+
+function formatRunSkillArgument(parameter: Parameter): string {
+  if (parameter.required === false || parameter.default !== undefined) {
+    return parameter.default !== undefined
+      ? `[${parameter.name}=${parameter.default}]`
+      : `[${parameter.name}]`;
+  }
+
+  return `<${parameter.name}>`;
 }

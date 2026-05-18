@@ -83,6 +83,9 @@ export interface MetaFile {
   compiledAt: string;
   model: string;
   provider: string;
+  name?: string;
+  triggerPhrases?: string[];
+  capabilities?: string[];
   description: string;
   parameters: Array<{
     name: string;

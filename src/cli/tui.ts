@@ -9,6 +9,7 @@ import { getConfigPath, loadConfig, resolveModelSlot, setModel, type ModelSlot }
 import { run, type RunResult as CliRunResult } from './run.js';
 import { formatToolArgs } from './tool-args.js';
 import {
+  createSessionExecutionLogWriter,
   createLocalSkill,
   createConductorSession,
   getConductorSessionDetail,
@@ -1270,6 +1271,7 @@ class FullscreenTui {
 
     try {
       const result = await runSkillCommand(this.workspaceRoot, skillName, args, {
+        sessionId: this.selectedSessionId || undefined,
         sandbox: this.options.sandbox,
         signal: this.currentAbortController.signal,
         onUserInput: (question) => this.requestClarification(question),
@@ -3118,13 +3120,7 @@ class FullscreenTui {
     for (const entry of visibleEntries) {
       const header = this.formatMessageHeader(entry);
       lines.push(header);
-      const bodyLines = entry.content
-        ? entry.content.split(/\r?\n/)
-        : (entry.pending ? [''] : ['(empty)']);
-
-      if (entry.pending && !entry.content) {
-        bodyLines[0] = 'thinking...';
-      }
+      const bodyLines = formatDisplayMessageBodyLines(entry);
 
       for (const line of bodyLines) {
         lines.push(`  ${line}`);
@@ -3649,6 +3645,7 @@ async function startLineTui(
 
         try {
           await runSkillCommand(workspaceRoot, parsed.name, parsed.args, {
+            sessionId: session.id,
             sandbox: options.sandbox,
             onUserInput: async (question) => {
               printer.finish();
@@ -3737,11 +3734,12 @@ export async function runPromptHeadless(
   }
 }
 
-async function runSkillCommand(
+export async function runSkillCommand(
   workspaceRoot: string,
   skillName: string,
   args: string[],
   options: {
+    sessionId?: string;
     sandbox?: boolean;
     signal?: AbortSignal;
     onUserInput?: (prompt: string) => Promise<string>;
@@ -3754,18 +3752,47 @@ async function runSkillCommand(
     throw new Error(`Unknown skill: ${skillName}`);
   }
 
-  const result = await run(command.path, args, {
-    configRoot: workspaceRoot,
-    headless: true,
-    stream: true,
-    sandbox: options.sandbox,
-    signal: options.signal,
-    onUserInput: options.onUserInput,
-    onEvent: (event: DMLEvent) => options.onEvent?.({ scope: 'child', childSlug: skillName, event }),
-    onChildEvent: (childSlug, event) => options.onEvent?.({ scope: 'child', childSlug, event }),
-  });
+  const executionLog = options.sessionId
+    ? createSessionExecutionLogWriter({
+      workspaceRoot,
+      sessionId: options.sessionId,
+      executionKind: 'skill',
+      inputText: `/${skillName}${args.length > 0 ? ` ${args.join(' ')}` : ''}`,
+      skillName,
+      args,
+    })
+    : null;
+  const emitLogEvent = (event: ConductorLogEvent): void => {
+    executionLog?.recordEvent(event);
+    options.onEvent?.(event);
+  };
 
-  return result;
+  try {
+    const result = await run(command.path, args, {
+      configRoot: workspaceRoot,
+      headless: true,
+      stream: true,
+      sandbox: options.sandbox,
+      signal: options.signal,
+      onUserInput: options.onUserInput,
+      onEvent: (event: DMLEvent) => emitLogEvent({ scope: 'child', childSlug: skillName, event }),
+      onChildEvent: (childSlug, event) => emitLogEvent({ scope: 'child', childSlug, event }),
+    });
+
+    await executionLog?.finish({
+      status: result.error ? 'error' : 'success',
+      answer: result.answer,
+      error: result.error,
+      outputCount: result.output.length,
+    });
+    return result;
+  } catch (error) {
+    await executionLog?.finish({
+      status: 'error',
+      error: (error as Error).message,
+    });
+    throw error;
+  }
 }
 
 async function runSkillCreatorCommand(
@@ -3788,19 +3815,41 @@ async function runSkillCreatorCommand(
   const compileSelection = resolveModelSlot(config, 'compile');
   const runSelection = resolveModelSlot(config, 'run');
 
-  return createLocalSkill({
-    spec: trimmedSpec,
+  const executionLog = createSessionExecutionLogWriter({
     workspaceRoot,
-    workspacePath: path.resolve(workspaceRoot, config.workspace || './workspace'),
-    config,
-    compileSelection,
-    runSelection,
     sessionId,
-    sandbox: options.sandbox ?? false,
-    signal: options.signal,
-    onUserInput: options.onUserInput ?? (async () => ''),
-    onEvent: options.onEvent,
+    executionKind: 'skill-creator',
+    inputText: trimmedSpec,
+    skillName: 'skill-creator',
   });
+  const emitLogEvent = (event: ConductorLogEvent): void => {
+    executionLog.recordEvent(event);
+    options.onEvent?.(event);
+  };
+
+  try {
+    const result = await createLocalSkill({
+      spec: trimmedSpec,
+      workspaceRoot,
+      workspacePath: path.resolve(workspaceRoot, config.workspace || './workspace'),
+      config,
+      compileSelection,
+      runSelection,
+      sessionId,
+      sandbox: options.sandbox ?? false,
+      signal: options.signal,
+      onUserInput: options.onUserInput ?? (async () => ''),
+      onEvent: emitLogEvent,
+    });
+    await executionLog.finish({ status: 'success' });
+    return result;
+  } catch (error) {
+    await executionLog.finish({
+      status: 'error',
+      error: (error as Error).message,
+    });
+    throw error;
+  }
 }
 
 async function runShellCommand(
@@ -4301,7 +4350,11 @@ export function formatDisplayMessageHeader(entry: DisplayMessage, spinner = ''):
       return '[You]';
 
     case 'assistant': {
-      const base = entry.error ? 'Assistant Error' : 'Assistant';
+      const base = entry.error
+        ? 'Assistant Error'
+        : entry.pending
+          ? 'Thinking'
+          : 'Assistant';
       return entry.tag
         ? `[${base}: ${entry.tag}${spinner}]`
         : `[${base}${spinner}]`;
@@ -4310,6 +4363,22 @@ export function formatDisplayMessageHeader(entry: DisplayMessage, spinner = ''):
     case 'system':
       return formatSystemMessageHeader(entry, spinner);
   }
+}
+
+export function formatDisplayMessageBodyLines(entry: DisplayMessage): string[] {
+  const bodyLines = entry.content
+    ? entry.content.split(/\r?\n/)
+    : (entry.pending ? [''] : ['(empty)']);
+
+  if (!entry.pending) {
+    return bodyLines;
+  }
+
+  if (!entry.content) {
+    return ['thinking> generating intermediate output...'];
+  }
+
+  return bodyLines.map((line) => line ? `thinking> ${line}` : 'thinking>');
 }
 
 function formatSystemAssetSourcePath(workspaceRoot: string, filePath: string): string {
@@ -4827,8 +4896,14 @@ function renderWindowBody(text: string, innerWidth: number, kind: RenderPaneKind
     if (text.startsWith('[Assistant Error]')) {
       return `${border}${paint(content, ANSI.red, ANSI.bgBlue, ANSI.bold)}${border}`;
     }
+    if (text.startsWith('[Thinking')) {
+      return `${border}${paint(content, ANSI.cyan, ANSI.bgBlue, ANSI.bold)}${border}`;
+    }
     if (text.startsWith('[Assistant')) {
       return `${border}${paint(content, ANSI.brightYellow, ANSI.bgBlue, ANSI.bold)}${border}`;
+    }
+    if (text.startsWith('  thinking>')) {
+      return `${border}${paint(content, ANSI.cyan, ANSI.bgBlue, ANSI.dim)}${border}`;
     }
     if (text.startsWith('[System')) {
       return `${border}${paint(content, ANSI.cyan, ANSI.bgBlue, ANSI.bold)}${border}`;

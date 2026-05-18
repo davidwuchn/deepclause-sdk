@@ -10,10 +10,11 @@
 import { generateText, streamText, hasToolCall, tool as aiTool } from 'ai';
 import { z } from 'zod';
 import type { ToolDefinition, MemoryMessage, TypedVar } from './types.js';
-import { createModelProvider } from './prolog/bridge.js';
+import { createModelProvider, type RawProviderResponseSnapshot } from './prolog/bridge.js';
 
 /** Maximum number of retries for LLM error finish reasons */
 const MAX_ERROR_RETRIES = 3;
+const DEFAULT_STREAM_RESPONSE_AWAIT_TIMEOUT_MS = 2_000;
 
 /**
  * Clean Prolog dict markers ($tag, $t) from tool results
@@ -80,18 +81,92 @@ export interface AgentLoopResult {
 
 type ResponseMessage = { role: 'user' | 'assistant' | 'system'; content: unknown };
 
-/**
- * Convert TypedVar type to Zod schema
- */
-function typedVarToZod(type: TypedVar['type'], itemType?: TypedVar['type']): z.ZodTypeAny {
-  switch (type) {
-    case 'string': return z.string();
-    case 'number': return z.number();
-    case 'integer': return z.number().int();
-    case 'boolean': return z.boolean();
-    case 'array': return z.array(itemType ? typedVarToZod(itemType) : z.unknown());
-    case 'object': return z.record(z.unknown());
-    default: return z.unknown();
+interface ResponseMessagesResolution {
+  messages: ResponseMessage[];
+  timedOut: boolean;
+  elapsedMs: number;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function getStreamResponseAwaitTimeoutMs(): number {
+  const raw = process.env.DC_STREAM_RESPONSE_TIMEOUT_MS;
+  if (raw != null) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  return DEFAULT_STREAM_RESPONSE_AWAIT_TIMEOUT_MS;
+}
+
+async function resolveResponseMessagesWithTimeout(
+  responsePromise: PromiseLike<unknown>,
+  timeoutMs: number,
+): Promise<ResponseMessagesResolution> {
+  const startMs = Date.now();
+
+  if (timeoutMs <= 0) {
+    return {
+      messages: getResponseMessages(await responsePromise),
+      timedOut: false,
+      elapsedMs: Date.now() - startMs,
+    };
+  }
+
+  const timeoutResult = Symbol('timeout');
+  const raced = await Promise.race([
+    responsePromise,
+    new Promise<symbol>((resolve) => {
+      setTimeout(() => resolve(timeoutResult), timeoutMs);
+    }),
+  ]);
+
+  if (raced === timeoutResult) {
+    return {
+      messages: [],
+      timedOut: true,
+      elapsedMs: Date.now() - startMs,
+    };
+  }
+
+  return {
+    messages: getResponseMessages(raced),
+    timedOut: false,
+    elapsedMs: Date.now() - startMs,
+  };
+}
+
+function validateTypedResultValue(typedVar: TypedVar, value: unknown): string | null {
+  switch (typedVar.type) {
+    case 'string':
+      return typeof value === 'string' ? null : 'Expected a string value';
+    case 'number':
+      return typeof value === 'number' ? null : 'Expected a number value';
+    case 'integer':
+      return typeof value === 'number' && Number.isInteger(value) ? null : 'Expected an integer value';
+    case 'boolean':
+      return typeof value === 'boolean' ? null : 'Expected a boolean value';
+    case 'array':
+      if (!Array.isArray(value)) {
+        return 'Expected an array value';
+      }
+      if (!typedVar.itemType) {
+        return null;
+      }
+      for (const item of value) {
+        const itemError = validateTypedResultValue({ name: typedVar.name, type: typedVar.itemType }, item);
+        if (itemError) {
+          return `Expected array<${typedVar.itemType}> value`;
+        }
+      }
+      return null;
+    case 'object':
+      return isPlainObject(value) ? null : 'Expected an object value';
+    default:
+      return null;
   }
 }
 
@@ -220,27 +295,38 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   // Add set_result tool for output variables
   if (normalizedOutputVars.length > 0) {
     const varNames = normalizedOutputVars.map(v => v.name);
-    
-    // Create discriminated union schema for variable-specific validation
-    // This ensures that if variable="X", value must match the type of X
-    const unionOptions = normalizedOutputVars.map(v => {
-      return z.object({
-        variable: z.literal(v.name).describe(`Set value for '${v.name}' (${v.type})`),
-        value: typedVarToZod(v.type, v.itemType).describe(`Value for '${v.name}' (must be ${v.type})`)
-      });
+    const typeSummary = normalizedOutputVars.map(v => {
+      const renderedType = v.type === 'array' && v.itemType ? `array<${v.itemType}>` : v.type;
+      return `${v.name}: ${renderedType}`;
+    }).join(', ');
+    const variableSchema = varNames.length === 1
+      ? z.literal(varNames[0])
+      : z.enum(varNames as [string, ...string[]]);
+    const inputSchema = z.object({
+      variable: variableSchema.describe(`Output variable name. Must be one of: ${varNames.join(', ')}`),
+      value: z.union([
+        z.string(),
+        z.number(),
+        z.boolean(),
+        z.array(z.unknown()),
+        z.record(z.unknown()),
+      ]).describe(`Value for the selected variable. Expected types: ${typeSummary}`),
     });
-
-    // Create the union schema - handle single var case specially since union needs >= 2 options
-    const inputSchema = unionOptions.length > 1 
-      ? z.discriminatedUnion('variable', unionOptions as any)
-      : unionOptions[0];
 
     aiTools['set_result'] = aiTool({
       description: `Set a result value for an output variable. You MUST call this tool to return results from the task. Use the exact variable name as specified.`,
       inputSchema: inputSchema as any,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       execute: async ({ variable, value }: { variable: string; value: any }) => {
-        if (varNames.includes(variable)) {
+        const typedVar = normalizedOutputVars.find(v => v.name === variable);
+        if (typedVar) {
+          const validationError = validateTypedResultValue(typedVar, value);
+          if (validationError) {
+            return {
+              success: false,
+              error: `${validationError} for ${variable}`,
+            };
+          }
           variables[variable] = value;
           return { success: true, variable, value };
         }
@@ -312,8 +398,41 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   debugLog('Conversation history:', conversationHistory);
   debugLog('Subtask:', taskDescription);
 
+  let latestRawProviderResponse: Promise<RawProviderResponseSnapshot> | null = null;
+
+  const maybeLogEmptyOtherProviderResponse = async (finishReason: string, text: string): Promise<void> => {
+    if (finishReason !== 'other' || text) {
+      latestRawProviderResponse = null;
+      return;
+    }
+
+    if (!latestRawProviderResponse) {
+      debugLog('Raw upstream provider response unavailable for empty finishReason=other result.');
+      return;
+    }
+
+    const snapshot = await latestRawProviderResponse;
+    latestRawProviderResponse = null;
+
+    debugLog(
+      `[fetch] Raw upstream provider response requestId=${snapshot.requestId} status=${snapshot.status} transport=${snapshot.transport} content-type=${snapshot.contentType ?? 'unknown'}`,
+    );
+    if (snapshot.captureError) {
+      debugLog(`[fetch] Raw upstream response capture error: ${snapshot.captureError}`);
+    }
+    debugLog(snapshot.bodyText || '(empty raw upstream response body)');
+  };
+
   // Create model provider
-  const model = createModelProvider(modelOptions.provider, modelOptions.model, modelOptions.baseUrl, debugLog);
+  const model = createModelProvider(
+    modelOptions.provider,
+    modelOptions.model,
+    modelOptions.baseUrl,
+    debugLog,
+    (snapshot) => {
+      latestRawProviderResponse = snapshot;
+    },
+  );
 
   // Agent loop
   const maxIterations = 50;
@@ -335,6 +454,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       await tick();
       
       if (streaming && onStream) {
+        latestRawProviderResponse = null;
+
         // Signal LLM call start so TTFT (time-to-first-token) is captured in timing.
         // For thinking models (e.g. Claude with extended thinking), textStream yields
         // nothing during the thinking phase — without this signal, the thinking time
@@ -485,6 +606,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
         debugLog(`Response text: ${fullText || '(empty)'}`);
         debugLog(`Finish reason: ${finishReason}`);
+  await maybeLogEmptyOtherProviderResponse(finishReason, fullText);
 
         // Handle errors
         if (finishReason === 'error') {
@@ -506,14 +628,22 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
         // Use SDK's response.messages for message history.
         // The SDK handles tool execution and includes tool results in messages.
-        const responseAwaitT0 = Date.now();
-        const responseMessages = getResponseMessages(await result.response);
-        const responseAwaitMs = Date.now() - responseAwaitT0;
-        if (responseAwaitMs > 100) {
-          debugLog(`Iteration ${iteration} await result.response took ${responseAwaitMs}ms (unexpectedly slow)`);
+        const responseResolution = await resolveResponseMessagesWithTimeout(
+          result.response,
+          getStreamResponseAwaitTimeoutMs(),
+        );
+        const responseMessages = responseResolution.messages;
+        if (responseResolution.timedOut) {
+          debugLog(
+            `Iteration ${iteration} timed out waiting ${responseResolution.elapsedMs}ms for result.response after stream completion; continuing without SDK response messages.`,
+          );
+        } else if (responseResolution.elapsedMs > 100) {
+          debugLog(`Iteration ${iteration} await result.response took ${responseResolution.elapsedMs}ms (unexpectedly slow)`);
         }
         if (responseMessages.length > 0) {
           messages.push(...responseMessages);
+        } else if (responseResolution.timedOut && fullText) {
+          messages.push({ role: 'assistant', content: fullText });
         }
 
         // If no tool calls were made, nudge the model to act.
@@ -526,6 +656,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         }
 
       } else {
+        latestRawProviderResponse = null;
+
         // Signal LLM call start for TTFT measurement (even in non-streaming mode)
         if (onStream) {
           onStream('', false);
@@ -578,6 +710,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         debugLog(`Response text: ${result.text || '(empty)'}`);
         debugLog(`Tool calls: ${result.toolCalls?.length ?? 0}`);
         debugLog(`Finish reason: ${result.finishReason}`);
+        await maybeLogEmptyOtherProviderResponse(result.finishReason, result.text);
 
         // Handle errors
         if (result.finishReason === 'error') {

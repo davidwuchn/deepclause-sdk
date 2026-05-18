@@ -5,11 +5,17 @@
  */
 
 import { z } from 'zod';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { writeDefaultSkillSeeds } from './default-skills.js';
-import { getSystemPromptAssetPath, getSystemSkillAssetPath, getWorkspaceDocAssetPath } from '../system/assets/index.js';
+import {
+  getPackagedRecipeAssetsDir,
+  getSystemPromptAssetPath,
+  getSystemSkillAssetPath,
+  getWorkspaceDocAssetPath,
+  getWorkspaceRecipeAssetsDir,
+} from '../system/assets/index.js';
 import {
   DEFAULT_MODEL_IDS,
   DEFAULT_TEMPERATURES,
@@ -185,6 +191,7 @@ export async function initConfig(
 
   await writeDefaultSkillSeeds(toolsDir, initialModelId);
   await writeSystemOverrideSeeds(systemDir);
+  await writeRecipeSeeds(workspaceRoot, { overwrite: true });
   await ensureWorkspaceDocSeeds(workspaceRoot, { overwrite: true });
 }
 
@@ -211,6 +218,45 @@ async function writeSystemOverrideSeeds(systemDir: string): Promise<void> {
   await Promise.all(packagedAssets.map(({ fileName, content }) => (
     fs.writeFile(path.join(systemDir, fileName), content, 'utf8')
   )));
+}
+
+async function writeRecipeSeeds(
+  workspaceRoot: string,
+  options: { overwrite?: boolean } = {},
+): Promise<void> {
+  const sourceRoot = getPackagedRecipeAssetsDir();
+  const targetRoot = getWorkspaceRecipeAssetsDir(workspaceRoot);
+  await fs.mkdir(targetRoot, { recursive: true });
+  await copyRecipeSeedDirectory(sourceRoot, targetRoot, options.overwrite ?? false);
+}
+
+async function copyRecipeSeedDirectory(
+  sourceDir: string,
+  targetDir: string,
+  overwrite: boolean,
+): Promise<void> {
+  const entries = readdirSync(sourceDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const sourcePath = path.join(sourceDir, entry.name);
+    const targetPath = path.join(targetDir, entry.name);
+
+    if (entry.isDirectory()) {
+      await fs.mkdir(targetPath, { recursive: true });
+      await copyRecipeSeedDirectory(sourcePath, targetPath, overwrite);
+      continue;
+    }
+
+    if (!overwrite) {
+      try {
+        await fs.access(targetPath);
+        continue;
+      } catch {
+        // Seed the packaged recipe file when it is missing.
+      }
+    }
+
+    await fs.writeFile(targetPath, readFileSync(sourcePath, 'utf8'), 'utf8');
+  }
 }
 
 export async function ensureWorkspaceDocSeeds(

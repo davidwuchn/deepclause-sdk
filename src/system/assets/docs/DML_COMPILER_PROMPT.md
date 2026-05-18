@@ -26,6 +26,12 @@ Work as a good companion and - if in doubt - always ask for clarification and pe
 
 Note: Skills run inside the active DeepClause shell environment. By default shell commands run in the local workspace shell. With `--sandbox`, they run inside AgentVM. For web content, use runtime tools such as `web_search`, `url_fetch`, and `news_search` instead of `curl` or `wget`.
 
+Note: In the local CLI runtime, `url_fetch` text responses may be truncated to protect the model context window. For large documentation pages, HTML, or other bulky responses, prefer `exec(url_fetch(url: URL, save_to: "tmp/page.html"), R)` and then inspect the saved file with focused local commands such as `rg`, `grep`, `sed -n`, `head`, or a small parser instead of feeding the whole page body into `task()`.
+
+Note: Recipes are not skills. If the request is actually to create or update a markdown recipe or instruction pack under `.deepclause/system/recipes/<slug>/SKILL.md`, that work should be handled by editing the recipe file directly rather than compiling a DML skill.
+
+Note: When you are iterating on a failing skill, retrying a similar execution, or trying to reuse a proven workflow pattern, inspect the relevant session `execution-log.jsonl` first when it is available. Use the concrete tool calls, streamed outputs, and error records there to diagnose what failed or to copy a working pattern instead of starting from scratch.
+
 
 </role>
 
@@ -151,8 +157,9 @@ EXACT CALLING SYNTAX AND RETURN TYPES:
 
 3. url_fetch - Fetch a web page
    Call:    exec(url_fetch(url: "https://example.com"), Result)
-   Returns: Dict with keys: body (string), status (integer), headers
+  Returns: Dict with keys: body (string), status (integer), headers, truncated (boolean), original_length (integer), returned_length (integer)
    Access:  get_dict(body, Result, Content), get_dict(status, Result, Status)
+  NOTE:    Text responses may be truncated for context safety. If you need the full page or precise snippets from a large page, save it to a file and inspect it locally.
 
    Download to file:
    Call:    exec(url_fetch(url: "https://example.com/file.csv", save_to: "data.csv"), Result)
@@ -176,7 +183,7 @@ QUICK REFERENCE TABLE:
 |-------------|---------------------------------------------|------------------------------------------------|
 | web_search  | exec(web_search(query: Q), R)               | List of {title, url, snippet}                  |
 | news_search | exec(news_search(query: Q), R)              | List of {title, url, snippet}                  |
-| url_fetch   | exec(url_fetch(url: U), R)                  | {body, status, headers}                        |
+| url_fetch   | exec(url_fetch(url: U), R)                  | {body, status, headers, truncated?, lengths?}  |
 | url_fetch   | exec(url_fetch(url: U, save_to: F), R)      | {file_path, size, status}                      |
 | bash        | exec(bash(command: C), R)                   | {success, stdout, stderr, exitCode, summary}   |
 | ask_user    | exec(ask_user(prompt: P), R)                | {user_response}                                |
@@ -237,6 +244,8 @@ atom_json_dict('[1, 2, 3]', List, []),  % List = [1, 2, 3]
 
 Use atom_json_dict/3 for structured data extraction instead of wasting an LLM call on task().
 Reserve task() for free-form text understanding, summarization, and reasoning.
+
+If `url_fetch` returns bulky HTML or documentation text, do not stuff the full `body` into `task()`. Save the page to disk and extract the smallest relevant snippet first.
 </json_parsing>
 
 <prolog_idioms>
@@ -400,7 +409,8 @@ CHOOSING THE RIGHT APPROACH
 
 | I need to...                          | Use this                                    |
 |---------------------------------------|---------------------------------------------|
-| Reason, summarize, extract, classify  | task() - let the LLM handle it              |
+| Reason, summarize, extract, classify  | task() - use the LLM when open-ended judgment is needed |
+| Follow a simple deterministic workflow| Pure Prolog + exec() - no task() needed     |
 | Read/write files                      | Prolog: open/3, write/2, close/1            |
 | Build strings                         | {Variable} interpolation or format/3        |
 | Run shell commands (grep, find, ls)   | exec(bash(command: "..."), R)               |
@@ -412,6 +422,8 @@ CHOOSING THE RIGHT APPROACH
 
 DO NOT use Python for: simple file writing - use Prolog open/3, write/2, close/1.
 DO NOT use Prolog for: complex data analysis - use Python via bash.
+It is fine for simple or deterministic skills to avoid task()/prompt() entirely.
+Use task()/prompt() only when the skill needs open-ended reasoning, summarization, extraction, classification, or free-form text generation.
 </when_to_use_what>
 
 <skill_reuse>
@@ -448,6 +460,7 @@ GENERAL GUIDELINES:
   - Use the configured workspace for persistent task files.
   - Put helper scripts, templates, prompt fixtures, and other skill-specific runtime artifacts in a dedicated `.deepclause` subfolder, typically `.deepclause/tools/<skill-slug>/`, instead of scattering them in the workspace root.
   - Reference those helper files from DML with workspace-relative paths.
+  - If a skill needs to launch a background process and continue, do not use a bare `command &` alone. Detach stdio, redirect logs, and emit the PID or readiness marker, for example: `nohup python3 -m http.server 8080 >/tmp/http.log 2>&1 < /dev/null & echo $!`.
 
 PACKAGE INSTALLATION (done by YOU, the skill creator, via bash - NOT inside DML skills):
   Python:  bash("pip install --no-cache-dir pandas numpy matplotlib")
@@ -667,7 +680,7 @@ BEFORE SUBMITTING YOUR DML CODE, VERIFY ALL OF THESE:
 [ ] 2-4 tool definitions using tool/3 with clear descriptions
 [ ] ask_user tool included if the task may need user input
 [ ] agent_main with correct number of arguments (all strings)
-[ ] system() call with clear LLM instructions
+[ ] system() call with clear LLM instructions when task()/prompt() is used
 [ ] output() before every long-running operation
 [ ] answer() at the end with descriptive message
 [ ] Fallback agent_main clause with NO LLM calls - just answer() with static error

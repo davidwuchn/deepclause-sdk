@@ -12,6 +12,7 @@ import { readSystemPromptAsset, readSystemSkillAsset } from '../assets/index.js'
 import { listLocalSkillCatalog } from './catalog-skills.js';
 import { withCapturedConsole } from './console-capture.js';
 import { executeDml } from './dml-executor.js';
+import { truncateUrlFetchTextBody } from './runtime-tools.js';
 import { createShellManager, type ShellManager } from './shell-manager.js';
 import { createShellToolEventBridge } from './shell-tool-events.js';
 import { recordTokenUsage, type TokenUsageByModel } from './token-usage.js';
@@ -20,6 +21,7 @@ interface PublishResult {
   dml: string;
   meta: MetaFile;
   outputPath: string;
+  slug: string;
 }
 
 export interface SkillCreatorCompileOptions {
@@ -364,7 +366,7 @@ function registerSkillCreatorTools(
       context.onPublish(published);
       return {
         ok: true,
-        slug: context.baseName,
+        slug: published.slug,
         version: published.meta.history.length,
       };
     },
@@ -389,7 +391,7 @@ async function buildSkillCreatorSystemPrompt(
     '## LLM Access from Scripts',
     '',
     'The local CLI runtime does not provide an extra proxy-only script API.',
-    'Use DML task()/prompt() for LLM work unless you explicitly configure provider SDK access in your shell environment.',
+    'Use DML task()/prompt() when the skill needs open-ended LLM reasoning or text generation. Deterministic or simple skills can be pure Prolog plus exec()/consult() with no task() at all.',
     `The compile slot currently resolves to \`${compileSelection.id}\`.`,
   ].join('\n');
 
@@ -429,6 +431,11 @@ async function buildSkillCreatorSystemPrompt(
 ## File-Based DML Only
 validate_dml, test_dml, and deploy_skill only accept file paths. Write the DML to disk first.
 
+## Deterministic Skills
+- It is fine for a skill to use no task()/prompt() when the workflow is mostly deterministic or simple.
+- In those cases, prefer direct Prolog predicates, consult/use_module, and exec() calls.
+- Add task()/prompt() only when the skill needs open-ended reasoning, extraction, summarization, classification, or free-form text generation.
+
 ## Reusing Existing Skills
 - Call list_skills when the requested functionality overlaps with an existing local skill.
 - Prefer narrow wrapper tool predicates that internally call exec(run_skill(...)) for one specific child skill.
@@ -437,31 +444,235 @@ validate_dml, test_dml, and deploy_skill only accept file paths. Write the DML t
 ${runtimeSection}${attemptSection}`;
 }
 
+const SKILL_NAME_PATTERNS = [
+  /(?:called|named)\s+["']?([A-Za-z0-9][A-Za-z0-9 _-]{1,79})["']?/i,
+  /(?:create|build|make|write|generate|implement)(?:\s+me)?\s+(?:a|an|the)?\s*["']?([A-Za-z0-9][A-Za-z0-9 _-]{1,79}?)(?:["']?\s+skill\b|["']?$)/i,
+  /(?:create|build|make|write|generate|implement)(?:\s+me)?\s+(?:a|an|the)?\s+skill\s+(?:to|for|that)\s+["']?([A-Za-z0-9][A-Za-z0-9 _-]{1,79})["']?/i,
+];
+
+function cleanSkillLabel(value: string): string {
+  return value
+    .trim()
+    .replace(/[`"']/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findSkillNameCandidate(source: string): string | null {
+  const heading = source.match(/^#\s+(.+)$/m)?.[1];
+  if (heading) {
+    const cleaned = cleanSkillLabel(heading);
+    if (cleaned) {
+      return cleaned;
+    }
+  }
+
+  for (const pattern of SKILL_NAME_PATTERNS) {
+    const match = pattern.exec(source);
+    if (!match?.[1]) {
+      continue;
+    }
+    const cleaned = cleanSkillLabel(match[1]);
+    if (cleaned) {
+      return cleaned;
+    }
+  }
+
+  return null;
+}
+
+function shortenSlug(slug: string, maxLength = 40): string {
+  if (slug.length <= maxLength) {
+    return slug;
+  }
+
+  const boundary = slug.lastIndexOf('-', maxLength);
+  if (boundary >= Math.floor(maxLength / 2)) {
+    return slug.slice(0, boundary);
+  }
+
+  return slug.slice(0, maxLength).replace(/-+$/g, '');
+}
+
+export function normalizeSkillSlug(value: string, fallback = 'skill'): string {
+  const slug = shortenSlug(value
+    .trim()
+    .replace(/[`"']/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-+/g, '-'));
+
+  if (slug) {
+    return slug;
+  }
+
+  const fallbackSlug = fallback
+    .trim()
+    .replace(/[`"']/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-+/g, '-');
+
+  return fallbackSlug || 'skill';
+}
+
+function formatSkillName(value: string): string {
+  return cleanSkillLabel(value)
+    .replace(/[-_]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+export function deriveSkillSlugFromMarkdown(markdown: string, fallbackBaseName = 'skill'): string {
+  const fallbackSlug = normalizeSkillSlug(fallbackBaseName, 'skill');
+  const directCandidate = findSkillNameCandidate(markdown);
+  if (directCandidate) {
+    return normalizeSkillSlug(directCandidate, fallbackSlug);
+  }
+
+  const fallbackCandidate = findSkillNameCandidate(fallbackBaseName.replace(/[-_]+/g, ' '));
+  if (fallbackCandidate) {
+    return normalizeSkillSlug(fallbackCandidate, fallbackSlug);
+  }
+
+  return fallbackSlug;
+}
+
 function buildLocalMetadata(markdown: string, baseName: string): {
   slug: string;
   name: string;
   description: string;
   trigger_phrases: string[];
 } {
-  const name = baseName
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
+  const slug = deriveSkillSlugFromMarkdown(markdown, baseName);
+  const nameCandidate = findSkillNameCandidate(markdown)
+    ?? findSkillNameCandidate(baseName.replace(/[-_]+/g, ' '))
+    ?? slug;
+  const name = formatSkillName(nameCandidate) || formatSkillName(slug);
 
   const description = extractDescription(markdown);
+  const triggerPhraseBase = name.replace(/\s+/g, ' ').trim().toLowerCase() || slug.replace(/[-_]+/g, ' ');
   const triggerPhrases = Array.from(new Set([
-    baseName.replace(/[-_]+/g, ' '),
-    `run ${baseName.replace(/[-_]+/g, ' ')}`,
-    `use ${baseName.replace(/[-_]+/g, ' ')}`,
+    triggerPhraseBase,
+    `run ${triggerPhraseBase}`,
+    `use ${triggerPhraseBase}`,
   ])).slice(0, 3);
 
   return {
-    slug: baseName,
-    name: name || baseName,
+    slug,
+    name: name || formatSkillName(slug),
     description,
     trigger_phrases: triggerPhrases,
   };
+}
+
+interface ParameterDoc {
+  name: string;
+  description?: string;
+  required?: boolean;
+  default?: string;
+}
+
+function normalizeParameterName(name: string): string {
+  return name
+    .trim()
+    .replace(/[`"']/g, '')
+    .replace(/([A-Z])/g, (_m, c, i) => (i > 0 ? '_' : '') + c.toLowerCase())
+    .replace(/[\s-]+/g, '_')
+    .replace(/[^a-z0-9_]/g, '')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function extractParameterDocs(markdown: string): ParameterDoc[] {
+  const parameterDocs: ParameterDoc[] = [];
+  const lines = markdown.split('\n');
+  let inParametersSection = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (!inParametersSection) {
+      if (/^##\s+Parameters\b/i.test(trimmed)) {
+        inParametersSection = true;
+      }
+      continue;
+    }
+
+    if (/^##\s+/.test(trimmed)) {
+      break;
+    }
+
+    const match = /^-\s+`?([^`:(]+)`?\s*(?:\(([^)]*)\))?\s*:\s*(.+)$/.exec(trimmed);
+    if (!match) {
+      continue;
+    }
+
+    const [, rawName, qualifiers = '', description] = match;
+    const defaultMatch = /default\s*:\s*(?:"([^"]+)"|'([^']+)'|([^,]+))/i.exec(qualifiers);
+    const qualifierText = qualifiers.toLowerCase();
+
+    parameterDocs.push({
+      name: normalizeParameterName(rawName),
+      description: description.trim(),
+      required: qualifierText.includes('required')
+        ? true
+        : (qualifierText.includes('optional') || !!defaultMatch ? false : undefined),
+      default: defaultMatch
+        ? (defaultMatch[1] ?? defaultMatch[2] ?? defaultMatch[3]).trim()
+        : undefined,
+    });
+  }
+
+  return parameterDocs;
+}
+
+function mergeParameterDocs(
+  parameters: MetaFile['parameters'],
+  parameterDocs: ParameterDoc[],
+): MetaFile['parameters'] {
+  const docsByName = new Map(parameterDocs.map((parameterDoc) => [parameterDoc.name, parameterDoc]));
+
+  return parameters.map((parameter) => {
+    const parameterDoc = docsByName.get(parameter.name);
+    if (!parameterDoc) {
+      return parameter;
+    }
+
+    return {
+      ...parameter,
+      description: parameterDoc.description ?? parameter.description,
+      required: parameterDoc.required ?? parameter.required,
+      default: parameterDoc.default ?? parameter.default,
+    };
+  });
+}
+
+function extractSkillCapabilities(analysis: AnalysisResult): string[] {
+  return Array.from(new Set(
+    analysis.capabilities.filter((capability) => !capability.startsWith('tool_use(')),
+  ));
+}
+
+function readMetadataName(metadata: Record<string, unknown>, fallbackName: string): string {
+  const name = metadata['name'];
+  return typeof name === 'string' && name.trim() ? name.trim() : fallbackName;
+}
+
+function readMetadataTriggerPhrases(metadata: Record<string, unknown>, fallbackTriggerPhrases: string[]): string[] {
+  const rawTriggerPhrases = Array.isArray(metadata['trigger_phrases'])
+    ? metadata['trigger_phrases']
+    : (Array.isArray(metadata['triggerPhrases']) ? metadata['triggerPhrases'] : fallbackTriggerPhrases);
+
+  return Array.from(new Set(rawTriggerPhrases
+    .filter((triggerPhrase) => typeof triggerPhrase === 'string')
+    .map((triggerPhrase) => triggerPhrase.trim())
+    .filter((triggerPhrase) => triggerPhrase.length > 0)))
+    .slice(0, 5);
 }
 
 async function writeWorkspaceFile(
@@ -571,12 +782,16 @@ async function publishSkill(
   const dmlPath = resolveWorkspacePath(context.workspacePath, String(args.dml_file ?? ''));
   const dml = await fs.readFile(dmlPath, 'utf8');
 
+  const fallbackMetadata = buildLocalMetadata(context.markdown, context.baseName);
   const normalized = normalizeDeployInputs(
     String(args.spec_markdown ?? context.markdown),
     String(args.metadata_json ?? ''),
   );
-  const metadata = parseMetadataJson(normalized.metadataJson, buildLocalMetadata(context.markdown, context.baseName));
-  const publishName = context.baseName || String(args.slug_override ?? metadata.slug ?? 'skill');
+  const metadata = parseMetadataJson(normalized.metadataJson, fallbackMetadata);
+  const requestedSlug = typeof args.slug_override === 'string' && args.slug_override.trim()
+    ? args.slug_override
+    : (typeof metadata.slug === 'string' && metadata.slug.trim() ? metadata.slug : fallbackMetadata.slug);
+  const publishName = normalizeSkillSlug(requestedSlug, fallbackMetadata.slug);
 
   const meta = await buildMetaFile({
     dml,
@@ -585,6 +800,8 @@ async function publishSkill(
     publishName,
     model: context.compileSelection.model,
     provider: context.compileSelection.provider,
+    name: readMetadataName(metadata, fallbackMetadata.name),
+    triggerPhrases: readMetadataTriggerPhrases(metadata, fallbackMetadata.trigger_phrases),
     description: typeof metadata.description === 'string' ? metadata.description : extractDescription(normalized.specMarkdown),
   });
 
@@ -600,6 +817,7 @@ async function publishSkill(
     dml,
     meta,
     outputPath,
+    slug: publishName,
   };
 }
 
@@ -610,6 +828,8 @@ async function buildMetaFile(input: {
   publishName: string;
   model: string;
   provider: string;
+  name: string;
+  triggerPhrases: string[];
   description: string;
 }): Promise<MetaFile> {
   const metaPath = path.join(input.outputDir, `${input.publishName}.meta.json`);
@@ -618,6 +838,8 @@ async function buildMetaFile(input: {
   const history = existing?.history ?? [];
   const analysis = await analyzeDML(input.dml);
   const tools = extractToolNames(analysis);
+  const parameters = mergeParameterDocs(extractParameters(input.dml), extractParameterDocs(input.markdown));
+  const capabilities = extractSkillCapabilities(analysis);
 
   return {
     version: '1.0.0',
@@ -626,8 +848,11 @@ async function buildMetaFile(input: {
     compiledAt: new Date().toISOString(),
     model: input.model,
     provider: input.provider,
+    name: input.name,
+    triggerPhrases: input.triggerPhrases.length > 0 ? input.triggerPhrases : undefined,
+    capabilities: capabilities.length > 0 ? capabilities : undefined,
     description: input.description,
-    parameters: extractParameters(input.dml),
+    parameters,
     tools,
     history: [
       ...history,
@@ -676,8 +901,14 @@ async function urlFetch(
     };
   }
 
+  const body = await response.text();
+  const truncated = truncateUrlFetchTextBody(body);
+
   return {
-    body: await response.text(),
+    body: truncated.body,
+    truncated: truncated.truncated,
+    original_length: truncated.originalLength,
+    returned_length: truncated.returnedLength,
     status: response.status,
     headers,
   };
@@ -712,9 +943,10 @@ function looksLikeJsonObject(value: string): boolean {
 function parseMetadataJson(
   metadataJson: string,
   fallback: { slug: string; name: string; description: string; trigger_phrases: string[] },
-): { slug?: string; name?: string; description?: string; trigger_phrases?: string[] } {
+): Record<string, unknown> {
   try {
-    return JSON.parse(metadataJson) as { slug?: string; name?: string; description?: string; trigger_phrases?: string[] };
+    const parsed = JSON.parse(metadataJson);
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : fallback;
   } catch {
     return fallback;
   }

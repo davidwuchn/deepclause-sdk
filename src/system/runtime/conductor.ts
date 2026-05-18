@@ -13,9 +13,14 @@ import {
 } from '../../cli/config.js';
 import { promptUser } from '../../cli/interactive.js';
 import type { DMLEvent, DeepClauseSDK } from '../../types.js';
-import { readSystemPromptAsset, readSystemSkillAsset } from '../assets/index.js';
+import {
+  getWorkspaceRecipeAssetsDir,
+  readSystemPromptAsset,
+  readSystemSkillAsset,
+} from '../assets/index.js';
+import { listRecipeCatalog, searchRecipeCatalog } from './catalog-recipes.js';
 import { executeDml, type DmlExecutionContext } from './dml-executor.js';
-import { compileWithSkillCreator } from './skill-creator.js';
+import { compileWithSkillCreator, deriveSkillSlugFromMarkdown } from './skill-creator.js';
 import {
   isTokenUsageEmpty,
   mergeTokenUsageMaps,
@@ -45,6 +50,7 @@ interface SessionPaths {
   assistantMemoryPath: string;
   taskMemoryPath: string;
   usagePath: string;
+  executionLogPath: string;
 }
 
 interface LoadedSession {
@@ -73,6 +79,7 @@ export interface ConductorSessionDetail extends ConductorSessionSummary {
   assistantMemory: string;
   taskMemory: string;
   usageByModel?: TokenUsageByModel;
+  executionLogPath: string;
 }
 
 export interface ConductorTurnOptions {
@@ -105,6 +112,64 @@ export interface ConductorLogEvent {
   childSlug?: string;
   modelId?: string;
   event: DMLEvent;
+}
+
+export type SessionExecutionKind = 'conductor' | 'skill' | 'skill-creator';
+
+interface SessionExecutionStartRecord {
+  timestamp: string;
+  sessionId: string;
+  executionId: string;
+  entryType: 'execution_started';
+  executionKind: SessionExecutionKind;
+  inputText: string;
+  skillName?: string;
+  args?: string[];
+  modelId?: string;
+}
+
+interface SessionExecutionEventRecord {
+  timestamp: string;
+  sessionId: string;
+  executionId: string;
+  entryType: 'event';
+  executionKind: SessionExecutionKind;
+  scope: ConductorLogEvent['scope'];
+  childSlug?: string;
+  modelId?: string;
+  event: DMLEvent;
+}
+
+interface SessionExecutionFinishedRecord {
+  timestamp: string;
+  sessionId: string;
+  executionId: string;
+  entryType: 'execution_finished';
+  executionKind: SessionExecutionKind;
+  status: 'success' | 'error';
+  answer?: string;
+  error?: string;
+  outputCount?: number;
+  usageByModel?: TokenUsageByModel;
+}
+
+type SessionExecutionLogRecord =
+  | SessionExecutionStartRecord
+  | SessionExecutionEventRecord
+  | SessionExecutionFinishedRecord;
+
+export interface SessionExecutionLogWriter {
+  readonly executionId: string;
+  readonly logPath: string;
+  recordEvent(event: ConductorLogEvent): void;
+  finish(summary: {
+    status: 'success' | 'error';
+    answer?: string;
+    error?: string;
+    outputCount?: number;
+    usageByModel?: TokenUsageByModel;
+  }): Promise<void>;
+  flush(): Promise<void>;
 }
 
 export async function listConductorSessions(workspaceRoot = process.cwd()): Promise<ConductorSessionSummary[]> {
@@ -145,6 +210,7 @@ export async function createConductorSession(
   await fs.writeFile(paths.assistantMemoryPath, '', 'utf8');
   await fs.writeFile(paths.taskMemoryPath, '', 'utf8');
   await fs.writeFile(paths.usagePath, '{}\n', 'utf8');
+  await fs.writeFile(paths.executionLogPath, '', 'utf8');
   return metadata;
 }
 
@@ -165,6 +231,7 @@ export async function getConductorSessionDetail(
     assistantMemory,
     taskMemory,
     usageByModel,
+    executionLogPath: paths.executionLogPath,
   };
 }
 
@@ -193,57 +260,75 @@ export async function runConductorTurn(
   const conductorDml = await readSystemSkillAsset('conductor', { workspaceRoot });
   const onUserInput = options.onUserInput ?? promptUser;
   const usageByModel: TokenUsageByModel = {};
+  const executionLog = createSessionExecutionLogWriter({
+    workspaceRoot,
+    sessionId: session.metadata.id,
+    executionKind: 'conductor',
+    inputText: userMessage,
+    modelId: gatewaySelection.id,
+  });
   const emitLogEvent = (event: ConductorLogEvent): void => {
     if (event.event.type === 'usage') {
       recordTokenUsage(usageByModel, event.modelId, event.event.usage);
     }
+    executionLog.recordEvent(event);
     options.onEvent?.(event);
   };
 
-  const result = await executeDml({
-    dmlCode: conductorDml,
-    config,
-    workspacePath,
-    selection: gatewaySelection,
-    args: [userMessage],
-    params: {
-      system_prompt: systemPrompt,
-    },
-    gasLimit: options.gasLimit ?? 320,
-    verbose: options.verbose,
-    headless: options.headless ?? true,
-    stream: options.stream ?? false,
-    trace: options.trace,
-    sandbox: options.sandbox,
-    signal: options.signal,
-    onUserInput,
-    initialMessages: session.messages,
-    skillCatalog: {
-      workspaceRoot,
-      currentSkillSlug: '_conductor',
-      onChildEvent: (childSlug, event) => emitLogEvent({
-        scope: 'child',
-        childSlug,
-        modelId: gatewaySelection.id,
-        event,
-      }),
-    },
-    onEvent: (event) => emitLogEvent({ scope: 'main', modelId: gatewaySelection.id, event }),
-    registerAdditionalTools: async (sdk, context) => registerConductorTools(sdk, context, {
-      workspaceRoot,
-      workspacePath,
-      session,
+  let result;
+  try {
+    result = await executeDml({
+      dmlCode: conductorDml,
       config,
-      compileSelection,
-      runSelection,
-      stream: options.stream ?? false,
+      workspacePath,
+      selection: gatewaySelection,
+      args: [userMessage],
+      params: {
+        system_prompt: systemPrompt,
+      },
+      gasLimit: options.gasLimit ?? 320,
       verbose: options.verbose,
-      sandbox: options.sandbox ?? false,
+      headless: options.headless ?? true,
+      stream: options.stream ?? false,
+      trace: options.trace,
+      sandbox: options.sandbox,
       signal: options.signal,
       onUserInput,
-      onEvent: emitLogEvent,
-    }),
-  });
+      initialMessages: session.messages,
+      skillCatalog: {
+        workspaceRoot,
+        currentSkillSlug: '_conductor',
+        onChildEvent: (childSlug, event) => emitLogEvent({
+          scope: 'child',
+          childSlug,
+          modelId: gatewaySelection.id,
+          event,
+        }),
+      },
+      onEvent: (event) => emitLogEvent({ scope: 'main', modelId: gatewaySelection.id, event }),
+      registerAdditionalTools: async (sdk, context) => registerConductorTools(sdk, context, {
+        workspaceRoot,
+        workspacePath,
+        session,
+        config,
+        compileSelection,
+        runSelection,
+        stream: options.stream ?? false,
+        verbose: options.verbose,
+        sandbox: options.sandbox ?? false,
+        signal: options.signal,
+        onUserInput,
+        onEvent: emitLogEvent,
+      }),
+    });
+  } catch (error) {
+    await executionLog.finish({
+      status: 'error',
+      error: (error as Error).message,
+      usageByModel: isTokenUsageEmpty(usageByModel) ? undefined : usageByModel,
+    });
+    throw error;
+  }
 
   await maybeUpdateSessionTitle(workspaceRoot, session.metadata, userMessage);
   await appendSessionMessage(session.paths.messagesPath, {
@@ -262,6 +347,13 @@ export async function runConductorTurn(
   }
   await mergeSessionUsage(workspaceRoot, session.metadata.id, usageByModel);
   await touchSession(workspaceRoot, session.metadata.id);
+  await executionLog.finish({
+    status: result.error ? 'error' : 'success',
+    answer: result.answer,
+    error: result.error,
+    outputCount: result.output.length,
+    usageByModel: isTokenUsageEmpty(usageByModel) ? undefined : usageByModel,
+  });
 
   return {
     sessionId: session.metadata.id,
@@ -326,6 +418,60 @@ async function registerConductorTools(
     },
     execute: async (args) => updateTaskMemory(options.session.paths.taskMemoryPath, String(args.content ?? '')),
   });
+
+  sdk.registerTool('consult_recipes', {
+    description: 'Search the recipe library for guidance on workflows, conventions, and how to approach a task in this workspace.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Natural-language description of the workflow or convention you need.' },
+        max_results: { type: 'number', description: 'Optional maximum number of matching recipes to return.' },
+      },
+      required: ['query'],
+    },
+    execute: async (args) => consultRecipes({
+      workspaceRoot: options.workspaceRoot,
+      query: String(args.query ?? ''),
+      maxResults: typeof args.max_results === 'number' ? args.max_results : undefined,
+    }),
+  });
+}
+
+export async function consultRecipes(options: {
+  workspaceRoot: string;
+  query: string;
+  maxResults?: number;
+}): Promise<Record<string, unknown>> {
+  const query = options.query.trim();
+  if (!query) {
+    throw new Error('query is required');
+  }
+
+  const [catalog, matches] = await Promise.all([
+    listRecipeCatalog(options.workspaceRoot),
+    searchRecipeCatalog(options.workspaceRoot, query, { maxResults: options.maxResults ?? 3 }),
+  ]);
+
+  return {
+    success: true,
+    query,
+    total_recipes: catalog.length,
+    matches: matches.map((recipe) => ({
+      slug: recipe.slug,
+      name: recipe.name,
+      description: recipe.description,
+      tags: recipe.tags,
+      when_to_use: recipe.whenToUse,
+      when_not_to_use: recipe.whenNotToUse,
+      globs: recipe.globs,
+      priority: recipe.priority,
+      matched_on: recipe.matchedOn,
+      score: recipe.score,
+      source: recipe.source,
+      source_path: recipe.sourcePath,
+      content: recipe.content,
+    })),
+  };
 }
 
 export async function createLocalSkill(options: {
@@ -346,7 +492,7 @@ export async function createLocalSkill(options: {
     throw new Error('spec is required');
   }
 
-  const slug = deriveSkillSlug(options.spec);
+  const slug = deriveSkillSlugFromMarkdown(options.spec, `skill-${Date.now().toString(36)}`);
   const specDir = path.join(getSessionPaths(options.workspaceRoot, options.sessionId).dir, 'specs');
   const specPath = path.join(specDir, `${slug}.md`);
   await fs.mkdir(specDir, { recursive: true });
@@ -374,10 +520,11 @@ export async function createLocalSkill(options: {
   });
 
   await mergeSessionUsage(options.workspaceRoot, options.sessionId, result.usageByModel);
+  const publishedSlug = path.basename(result.outputPath, path.extname(result.outputPath)) || slug;
 
   return {
     success: true,
-    slug,
+    slug: publishedSlug,
     output_path: result.outputPath,
     description: result.meta.description,
     tools: result.tools,
@@ -403,9 +550,13 @@ async function buildConductorSystemPrompt(options: {
 }): Promise<string> {
   const template = await readSystemPromptAsset('conductor', { workspaceRoot: options.workspaceRoot });
   const commands = await listCommands(options.workspaceRoot, { detailed: false });
+  const recipes = await listRecipeCatalog(options.workspaceRoot);
   const catalog = commands.length > 0
     ? commands.map((command) => `- ${command.name}: ${command.description}`).join('\n')
     : '- No compiled local skills are available yet.';
+  const recipeCatalog = recipes.length > 0
+    ? recipes.map((recipe) => `- ${recipe.slug}: ${recipe.description}`).join('\n')
+    : '- No recipes are available yet.';
 
   const assistantMemory = options.session.assistantMemory.trim()
     || 'No optional session context is recorded in assistant-memory.md for this session.';
@@ -415,9 +566,11 @@ async function buildConductorSystemPrompt(options: {
     `- Workspace root: ${options.workspaceRoot}`,
     `- Working directory for tools: ${options.workspacePath}`,
     `- Skill catalog: ${getToolsDir(options.workspaceRoot)}`,
+    `- Recipe library: ${getWorkspaceRecipeAssetsDir(options.workspaceRoot)} plus packaged defaults`,
     `- Docs directory: ${getDocsDir(options.workspaceRoot)}`,
     `- TUI guide: ${path.join(getDocsDir(options.workspaceRoot), 'TUI.md')}`,
     `- Session directory: ${options.session.paths.dir}`,
+    `- Session execution log: ${options.session.paths.executionLogPath}`,
     `- Gateway model: ${options.gatewayModelId}`,
     `- Run model: ${options.runModelId}`,
     `- Compile model: ${options.compileModelId}`,
@@ -425,6 +578,9 @@ async function buildConductorSystemPrompt(options: {
     '',
     '## Local Skill Catalog',
     catalog,
+    '',
+    '## Recipe Library',
+    recipeCatalog,
     '',
     '## Optional Session Context (assistant-memory.md)',
     assistantMemory,
@@ -477,6 +633,88 @@ function getSessionPaths(workspaceRoot: string, sessionId: string): SessionPaths
     assistantMemoryPath: path.join(dir, 'assistant-memory.md'),
     taskMemoryPath: path.join(dir, 'task-memory.md'),
     usagePath: path.join(dir, 'usage.json'),
+    executionLogPath: path.join(dir, 'execution-log.jsonl'),
+  };
+}
+
+export function createSessionExecutionLogWriter(options: {
+  workspaceRoot: string;
+  sessionId: string;
+  executionKind: SessionExecutionKind;
+  inputText: string;
+  skillName?: string;
+  args?: string[];
+  modelId?: string;
+}): SessionExecutionLogWriter {
+  const logPath = getSessionPaths(options.workspaceRoot, options.sessionId).executionLogPath;
+  const executionId = randomUUID();
+  let writeChain = Promise.resolve();
+  let writeError: Error | null = null;
+
+  const enqueue = (record: SessionExecutionLogRecord): void => {
+    writeChain = writeChain.then(async () => {
+      if (writeError) {
+        return;
+      }
+
+      try {
+        await fs.appendFile(logPath, JSON.stringify(record) + '\n', 'utf8');
+      } catch (error) {
+        writeError = error as Error;
+      }
+    });
+  };
+
+  enqueue({
+    timestamp: new Date().toISOString(),
+    sessionId: options.sessionId,
+    executionId,
+    entryType: 'execution_started',
+    executionKind: options.executionKind,
+    inputText: options.inputText,
+    skillName: options.skillName,
+    args: options.args,
+    modelId: options.modelId,
+  });
+
+  return {
+    executionId,
+    logPath,
+    recordEvent: (event) => enqueue({
+      timestamp: new Date().toISOString(),
+      sessionId: options.sessionId,
+      executionId,
+      entryType: 'event',
+      executionKind: options.executionKind,
+      scope: event.scope,
+      childSlug: event.childSlug,
+      modelId: event.modelId,
+      event: event.event,
+    }),
+    finish: async (summary) => {
+      enqueue({
+        timestamp: new Date().toISOString(),
+        sessionId: options.sessionId,
+        executionId,
+        entryType: 'execution_finished',
+        executionKind: options.executionKind,
+        status: summary.status,
+        answer: summary.answer,
+        error: summary.error,
+        outputCount: summary.outputCount,
+        usageByModel: summary.usageByModel,
+      });
+      await writeChain;
+      if (writeError) {
+        throw writeError;
+      }
+    },
+    flush: async () => {
+      await writeChain;
+      if (writeError) {
+        throw writeError;
+      }
+    },
   };
 }
 
@@ -565,23 +803,6 @@ async function maybeUpdateSessionTitle(workspaceRoot: string, metadata: SessionM
   metadata.title = nextTitle;
   metadata.updatedAt = new Date().toISOString();
   await fs.writeFile(paths.metadataPath, JSON.stringify(metadata, null, 2) + '\n', 'utf8');
-}
-
-function deriveSkillSlug(spec: string): string {
-  const heading = spec.match(/^#\s+(.+)$/m)?.[1];
-  const named = spec.match(/(?:called|named)\s+["']?([A-Za-z0-9 _-]{3,40})["']?/i)?.[1];
-  const firstLine = spec.split('\n').map((line) => line.trim()).find(Boolean);
-  const seed = heading ?? named ?? firstLine ?? `skill ${Date.now()}`;
-  return slugify(seed);
-}
-
-function slugify(value: string): string {
-  const slug = value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 48);
-  return slug || `skill-${Date.now().toString(36)}`;
 }
 
 function summarizeTitle(message: string): string {

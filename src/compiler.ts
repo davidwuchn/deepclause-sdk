@@ -329,17 +329,17 @@ function lintDML(dml: string): { errors: string[]; warnings: string[] } {
 
   // W2: No tool definitions — model probably wrote pure Prolog
   if (!/\btool\s*\(/.test(dml)) {
-    warnings.push('WARNING: No tool() definitions found. Most DML skills need 2-4 tools for the LLM to use during task() calls.');
+    warnings.push('WARNING: No tool() definitions found. This is fine for pure Prolog or direct exec()-only skills, but LLM-driven skills usually need tool()/3 wrappers for task() calls.');
   }
 
   // W3: No task() call — model probably wrote pure Prolog logic
   if (!/\btask\s*\(/.test(stripped)) {
-    warnings.push('WARNING: No task() call found. DML skills should use task() to let the LLM reason, not pure Prolog logic.');
+    warnings.push('WARNING: No task() call found. This is fine for deterministic or simple skills. Skills that need open-ended reasoning, summarization, extraction, or classification should usually use task().');
   }
 
   // W4: No system() call — LLM has no instructions
   if (!/\bsystem\s*\(/.test(stripped)) {
-    warnings.push('WARNING: No system() call found. Use system() inside agent_main to tell the LLM how to use the tools.');
+    warnings.push('WARNING: No system() call found. Add system() when the skill uses task()/prompt() and the LLM needs instructions on how to use tools.');
   }
 
   // W5: No answer() call — skill completes silently
@@ -866,13 +866,11 @@ export function extractParameters(dml: string): Array<{ name: string; position: 
     .filter(arg => arg.length > 0);
   
   return args
-    .map((arg) => ({
+    .map((arg, index) => ({
       name: arg.replace(/([A-Z])/g, (_m, c, i) => (i > 0 ? '_' : '') + c.toLowerCase()).replace(/^_/, ''),
-      position: 0,
+      position: index,
       required: true
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((param, index) => ({ ...param, position: index }));
+    }));
 }
 
 /**

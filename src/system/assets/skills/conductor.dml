@@ -13,6 +13,10 @@ tool(run_skill(Slug, Args, Result), "Run an existing skill. Slug is the skill sl
 
     exec(run_skill(slug: Slug, args: Args), Result).
 
+tool(consult_recipes(Query, Result), "Search the recipe library for workflow guidance and conventions. Query is a natural-language description. Returns matching recipe metadata and content.") :-
+
+    exec(consult_recipes(query: Query, max_results: 3), Result).
+
 tool(search_web(Query, Results), "Search the web for current information. Returns search results.") :-
     exec(web_search(query: Query), Results).
 
@@ -42,29 +46,31 @@ tool(inform_user(Message, Result), "Send a status update or progress report to t
     output(Message),
     Result = "ok".
 
-tool(save_memory(Content, Result), "Update task memory with technical learnings from this execution: what tools/approaches worked, what failed, useful commands, patterns discovered. Pass the COMPLETE updated memory in markdown (old + new learnings). This is technical memory - things that help future tasks.") :-
-    exec(update_memory(content: Content), Result).
-
 % --- Main entry point ---
 
 agent_main(UserMessage) :-
     param(system_prompt, "Conductor system prompt", SysPrompt),
     system(SysPrompt),
     system("When using bash or similar tools, avoid dumping large outputs directly into the conversation context. Write large or uncertain outputs to temporary files first, then inspect them with focused commands such as wc, grep, head, tail, sed, or similar narrow follow-up commands so the context stays small and relevant."),
-    format(string(TaskPrompt), "Task instructions: ~w\n\nComplete this task autonomously using your tools.\n\nIf you can complete the task, do so and report the result.\nIf you are blocked by a task-specific, tool-specific, external-service, environment, permission, dependency, or data issue that is not an LLM/provider/API/transport failure, do not go silent. Diagnose the blocker and explain clearly to the user why the task could not be completed. Do not call save_memory from this main task.\nIf the problem appears to be an LLM/provider/API/transport failure, do not invent a speculative diagnosis.\n\nReturn a good final answer in all non-LLM cases, including when the task is blocked.", [UserMessage]),
-    task(TaskPrompt, string(Answer)),
-    update_session_memory(UserMessage, Answer),
-    answer(Answer).
+    format(string(TaskPrompt), "Task instructions: ~w\n\nComplete this task autonomously using your tools.\n\nIf you can complete the task, do so and report the result.\nIf you are blocked by a task-specific, tool-specific, external-service, environment, permission, dependency, or data issue that is not an LLM/provider/API/transport failure, do not go silent. Diagnose the blocker and explain clearly to the user why the task could not be completed.\nIf the problem appears to be an LLM/provider/API/transport failure, do not invent a speculative diagnosis.\n\nStore the user-facing response in FinalAnswer.\nStore the COMPLETE updated task memory markdown in MemoryUpdate only if this execution produced useful technical insights such as what worked, what failed, useful commands, error resolutions, or reusable lessons from a non-LLM task failure.\nIf nothing technically noteworthy should be recorded, store exactly NONE in MemoryUpdate.\nDo not call update_memory or any separate memory tool from this main task.\n\nReturn a good final answer in all non-LLM cases, including when the task is blocked.", [UserMessage]),
+    task(TaskPrompt, string(FinalAnswer), string(MemoryUpdate)),
+    maybe_update_session_memory(MemoryUpdate),
+    answer(FinalAnswer).
 
 % Fallback for technical failures where the main task itself cannot run to completion
 agent_main(_) :-
     answer("Task failed. Please try again.").
 
-% Memory update: extract technical learnings and persist to task-memory.md
-update_session_memory(UserMessage, Answer) :-
-    format(string(MemoryPrompt), "You just completed:\nTask: ~w\nResult: ~w\n\nReview the task memory in your context (technical learnings). If this execution produced useful technical insights - what worked, what failed, useful commands, error resolutions, or reusable lessons from a non-LLM task failure - call save_memory with the COMPLETE updated memory. Only use the save_memory tool and no other tools. If nothing technically noteworthy, reply 'ok'.", [UserMessage, Answer]),
-    with_tools([save_memory], (
-        task(MemoryPrompt, string(_))
-    )),
+% Memory update is best-effort and uses the already-produced MemoryUpdate output.
+maybe_update_session_memory("NONE") :-
     !.
-update_session_memory(_, _).
+maybe_update_session_memory("none") :-
+    !.
+maybe_update_session_memory("ok") :-
+    !.
+maybe_update_session_memory("") :-
+    !.
+maybe_update_session_memory(Content) :-
+    catch(exec(update_memory(content: Content), _), _, true),
+    !.
+maybe_update_session_memory(_).

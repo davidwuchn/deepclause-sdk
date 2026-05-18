@@ -10,6 +10,16 @@ import { anthropic, createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { LanguageModel } from 'ai';
 
+export interface RawProviderResponseSnapshot {
+  requestId: string;
+  url: string;
+  status: number;
+  contentType: string | null;
+  transport: 'https-one-shot' | 'undici';
+  bodyText: string;
+  captureError?: string;
+}
+
 function describeFetchError(error: unknown): string {
   if (!(error instanceof Error)) {
     return String(error);
@@ -293,6 +303,7 @@ export function createModelProvider(
   model: string,
   baseUrl?: string,
   debugLog?: (...args: unknown[]) => void,
+  onRawResponse?: (snapshot: Promise<RawProviderResponseSnapshot>) => void,
 ): LanguageModel {
   let proxyRequestSeq = 0;
 
@@ -339,6 +350,31 @@ export function createModelProvider(
         }
         const ttfb = Date.now() - fetchT0;
         debugLog?.(`[fetch] Response requestId=${requestId} seq=${proxyRequestSeq}: ${response.status} in ${ttfb}ms (TTFB) content-type=${response.headers.get('content-type')} content-encoding=${response.headers.get('content-encoding')}`);
+
+        if (onRawResponse) {
+          onRawResponse((async () => {
+            try {
+              return {
+                requestId,
+                url,
+                status: response.status,
+                contentType: response.headers.get('content-type'),
+                transport,
+                bodyText: await response.clone().text(),
+              } satisfies RawProviderResponseSnapshot;
+            } catch (error) {
+              return {
+                requestId,
+                url,
+                status: response.status,
+                contentType: response.headers.get('content-type'),
+                transport,
+                bodyText: '',
+                captureError: describeFetchError(error),
+              } satisfies RawProviderResponseSnapshot;
+            }
+          })());
+        }
 
         // Wrap response.body to track when chunks actually arrive
         if (response.body) {

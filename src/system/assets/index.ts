@@ -11,6 +11,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SKILLS_DIR = join(__dirname, 'skills');
 const DOCS_DIR = join(__dirname, 'docs');
+const RECIPES_DIR = join(__dirname, 'recipes');
 const SYSTEM_OVERRIDE_DIR = '.deepclause/system';
 
 function getSystemSkillFileName(name: SystemSkillAssetName): string {
@@ -48,6 +49,14 @@ function getWorkspaceDocFileName(name: WorkspaceDocAssetName): string {
 
 export function getWorkspaceDocAssetPath(name: WorkspaceDocAssetName): string {
   return join(DOCS_DIR, getWorkspaceDocFileName(name));
+}
+
+export function getPackagedRecipeAssetsDir(): string {
+  return RECIPES_DIR;
+}
+
+export function getWorkspaceRecipeAssetsDir(workspaceRoot: string): string {
+  return join(workspaceRoot, SYSTEM_OVERRIDE_DIR, 'recipes');
 }
 
 function getWorkspaceOverridePath(workspaceRoot: string, fileName: string): string {

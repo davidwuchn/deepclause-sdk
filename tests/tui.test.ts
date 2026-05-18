@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const conductorMocks = vi.hoisted(() => ({
+  createSessionExecutionLogWriter: vi.fn(),
   createLocalSkill: vi.fn(),
   createConductorSession: vi.fn(),
   getConductorSessionDetail: vi.fn(),
@@ -17,6 +18,7 @@ const runMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/system/runtime/conductor.js', () => ({
+  createSessionExecutionLogWriter: conductorMocks.createSessionExecutionLogWriter,
   createLocalSkill: conductorMocks.createLocalSkill,
   createConductorSession: conductorMocks.createConductorSession,
   getConductorSessionDetail: conductorMocks.getConductorSessionDetail,
@@ -40,6 +42,7 @@ import {
   ellipsize,
   
   filterPickerItems,
+  formatDisplayMessageBodyLines,
   formatDisplayMessageHeader,
   LiveExecutionPrinter,
   measureDisplayWidth,
@@ -55,6 +58,7 @@ import {
   previewQuestionMessage,
   reconcileEphemeralMessages,
   runPromptHeadless,
+  runSkillCommand,
   sessionMessagesContainCompletedTaskPreview,
   selectMenuItemByTypeahead,
   wrapPlainText,
@@ -258,7 +262,35 @@ describe('formatDisplayMessageHeader', () => {
       content: '',
       pending: true,
       tag: 'skill-creator',
-    }, ' /')).toBe('[Assistant: skill-creator /]');
+    }, ' /')).toBe('[Thinking: skill-creator /]');
+  });
+});
+
+describe('formatDisplayMessageBodyLines', () => {
+  it('marks pending assistant previews as intermediate output', () => {
+    expect(formatDisplayMessageBodyLines({
+      role: 'assistant',
+      content: 'first line\nsecond line',
+      pending: true,
+    })).toEqual([
+      'thinking> first line',
+      'thinking> second line',
+    ]);
+
+    expect(formatDisplayMessageBodyLines({
+      role: 'assistant',
+      content: '',
+      pending: true,
+    })).toEqual([
+      'thinking> generating intermediate output...',
+    ]);
+  });
+
+  it('leaves completed messages unchanged', () => {
+    expect(formatDisplayMessageBodyLines({
+      role: 'assistant',
+      content: 'final answer',
+    })).toEqual(['final answer']);
   });
 });
 
@@ -341,6 +373,11 @@ describe('sessionMessagesContainCompletedTaskPreview', () => {
 describe('runPromptHeadless', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    conductorMocks.createSessionExecutionLogWriter.mockReturnValue({
+      recordEvent: vi.fn(),
+      finish: vi.fn().mockResolvedValue(undefined),
+      flush: vi.fn().mockResolvedValue(undefined),
+    });
     conductorMocks.createConductorSession.mockResolvedValue({
       id: 'session-123',
       title: 'Session',
@@ -388,6 +425,52 @@ describe('runPromptHeadless', () => {
     expect(output[0]).toBe('Session: session-123');
     expect(output).toContain('status line');
     expect(output).toContain('final answer');
+  });
+
+  it('logs direct skill executions to the active session log writer', async () => {
+    commandMocks.listCommands.mockResolvedValue([{ name: 'research', path: '/tmp/workspace/.deepclause/tools/research.dml' }]);
+    runMocks.run.mockImplementation(async (file, args, options: any) => {
+      options.onEvent?.({ type: 'output', content: 'skill output' });
+      options.onChildEvent?.('child-step', { type: 'error', content: 'child failure' });
+      return { output: ['skill output'], answer: 'skill answer' };
+    });
+
+    const logWriter = {
+      recordEvent: vi.fn(),
+      finish: vi.fn().mockResolvedValue(undefined),
+      flush: vi.fn().mockResolvedValue(undefined),
+    };
+    conductorMocks.createSessionExecutionLogWriter.mockReturnValue(logWriter);
+
+    const result = await runSkillCommand('/tmp/workspace', 'research', ['alpha'], {
+      sessionId: 'session-123',
+    });
+
+    expect(conductorMocks.createSessionExecutionLogWriter).toHaveBeenCalledWith({
+      workspaceRoot: '/tmp/workspace',
+      sessionId: 'session-123',
+      executionKind: 'skill',
+      inputText: '/research alpha',
+      skillName: 'research',
+      args: ['alpha'],
+    });
+    expect(logWriter.recordEvent).toHaveBeenCalledWith({
+      scope: 'child',
+      childSlug: 'research',
+      event: { type: 'output', content: 'skill output' },
+    });
+    expect(logWriter.recordEvent).toHaveBeenCalledWith({
+      scope: 'child',
+      childSlug: 'child-step',
+      event: { type: 'error', content: 'child failure' },
+    });
+    expect(logWriter.finish).toHaveBeenCalledWith({
+      status: 'success',
+      answer: 'skill answer',
+      error: undefined,
+      outputCount: 1,
+    });
+    expect(result).toEqual({ output: ['skill output'], answer: 'skill answer' });
   });
 });
 

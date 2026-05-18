@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'fs/promises';
+import { mkdtemp, readFile, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import * as path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -120,7 +120,7 @@ describe('compileWithSkillCreator', () => {
 
         await registeredTools.get('deploy_skill')?.execute({
           dml_file: 'demo-skill.dml',
-          spec_markdown: '# Demo Skill\n\nSummarize a topic.\n',
+          spec_markdown: '# Demo Skill\n\nSummarize a topic.\n\n## Parameters\n\n- `topic` (required): Topic to summarize\n',
           metadata_json: JSON.stringify({
             slug: 'demo-skill',
             name: 'Demo Skill',
@@ -203,7 +203,7 @@ describe('compileWithSkillCreator', () => {
     }) as Record<string, unknown>;
 
     expect(runtimeMocks.executeDml).toHaveBeenCalledWith(expect.objectContaining({
-      onEvent,
+      onEvent: expect.any(Function),
       headless: true,
       stream: false,
     }));
@@ -217,21 +217,118 @@ describe('compileWithSkillCreator', () => {
     }));
   });
 
+  it('uses metadata slug when deploying instead of the temporary base name', async () => {
+    const registeredTools = mockSdk();
+    const options = await createOptions();
+    const dmlPath = path.join(options.workspacePath, 'demo-skill.dml');
+
+    compilerMocks.extractDescription.mockReturnValue('Hello world helper.');
+    compilerMocks.extractParameters.mockReturnValue([]);
+    compilerMocks.analyzeDML.mockResolvedValue({
+      valid: true,
+      warnings: [],
+      capabilities: [],
+    });
+
+    await writeFile(dmlPath, 'agent_main(_):-answer("ok").\n', 'utf8');
+    await expect(compileWithSkillCreator('Create a demo skill', options))
+      .rejects.toThrow('Skill creator finished without producing a published artifact');
+
+    const deployTool = registeredTools.get('deploy_skill');
+    expect(deployTool).toBeDefined();
+
+    const result = await deployTool!.execute({
+      dml_file: 'demo-skill.dml',
+      spec_markdown: '# Hello World Multi\n\nA concise helper skill.\n',
+      metadata_json: JSON.stringify({
+        slug: 'hello-world-multi',
+        name: 'Hello World Multi',
+        description: 'A concise helper skill.',
+        trigger_phrases: ['hello world multi'],
+      }),
+    }) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      ok: true,
+      slug: 'hello-world-multi',
+    });
+
+    const persistedMeta = JSON.parse(await readFile(path.join(options.outputDir, 'hello-world-multi.meta.json'), 'utf8'));
+    expect(persistedMeta).toMatchObject({
+      name: 'Hello World Multi',
+      triggerPhrases: ['hello world multi'],
+    });
+  });
+
+  it('derives a shorter auto-deploy slug from the requested skill name', async () => {
+    const registeredTools = new Map<string, { execute: (args: Record<string, unknown>) => Promise<unknown> }>();
+    let deploymentMetadataJson = '';
+
+    sdkMocks.createDeepClause.mockResolvedValue({
+      registerTool: vi.fn((name: string, tool: { execute: (args: Record<string, unknown>) => Promise<unknown> }) => {
+        registeredTools.set(name, tool);
+      }),
+      runDML: vi.fn(async function* (_dml: string, runOptions: { args?: unknown[]; params?: Record<string, unknown> }) {
+        deploymentMetadataJson = String(runOptions.params?.deployment_metadata_json ?? '');
+
+        await registeredTools.get('write_file')?.execute({
+          path: 'hello-world-multi.dml',
+          content: 'agent_main(_):-answer("ok").\n',
+        });
+
+        await registeredTools.get('deploy_skill')?.execute({
+          dml_file: 'hello-world-multi.dml',
+          spec_markdown: String(runOptions.args?.[0] ?? ''),
+          metadata_json: deploymentMetadataJson,
+        });
+
+        yield { type: 'answer', content: 'compiled' };
+      }),
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    compilerMocks.extractDescription.mockReturnValue('Hello world helper.');
+    compilerMocks.extractParameters.mockReturnValue([]);
+    compilerMocks.analyzeDML.mockResolvedValue({
+      valid: true,
+      warnings: [],
+      capabilities: [],
+    });
+    compilerMocks.analyzeAndAuditDML.mockResolvedValue({
+      valid: true,
+      warnings: [],
+      capabilities: [],
+      auditorReport: '## Audit\n\nNo critical issues found.',
+    });
+
+    const options = await createOptions();
+    const result = await compileWithSkillCreator('Create a hello world multi skill that takes exactly two arguments.', {
+      ...options,
+      baseName: 'create-a-hello-world-multi-skill-that-takes-exac',
+    });
+
+    expect(JSON.parse(deploymentMetadataJson)).toMatchObject({
+      slug: 'hello-world-multi',
+      name: 'Hello World Multi',
+    });
+    expect(result.outputPath).toBe(path.join(options.outputDir, 'hello-world-multi.dml'));
+  });
+
   it('runs the shared analysis and LLM audit for published skills', async () => {
     mockPublishingSdk();
     const options = await createOptions();
 
     compilerMocks.extractDescription.mockReturnValue('Demo skill description');
-    compilerMocks.extractParameters.mockReturnValue([{ name: 'topic', position: 1, required: true }]);
+    compilerMocks.extractParameters.mockReturnValue([{ name: 'topic', position: 0, required: true }]);
     compilerMocks.analyzeDML.mockResolvedValue({
       valid: true,
       warnings: [],
-      capabilities: ['tool_use(web_search)'],
+      capabilities: ['tool_use(web_search)', 'network'],
     });
     compilerMocks.analyzeAndAuditDML.mockResolvedValue({
       valid: true,
       warnings: [],
-      capabilities: ['tool_use(web_search)'],
+      capabilities: ['tool_use(web_search)', 'network'],
       auditorReport: '## Audit\n\nNo critical issues found.',
     });
 
@@ -249,5 +346,11 @@ describe('compileWithSkillCreator', () => {
       }),
     );
     expect(result.analysis.auditorReport).toContain('No critical issues found');
+    expect(result.meta).toMatchObject({
+      name: 'Demo Skill',
+      triggerPhrases: ['demo skill'],
+      capabilities: ['network'],
+      parameters: [{ name: 'topic', position: 0, required: true, description: 'Topic to summarize' }],
+    });
   });
 });

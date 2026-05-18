@@ -59,14 +59,22 @@ All commands except `init`, `help`, `--help`, `--version`, and `-V` expect a `.d
 
 - `.deepclause/config.json`
 - `.deepclause/tools/`
+- `.deepclause/docs/`
+- `.deepclause/docs/TUI.md`
 - `.deepclause/system/`
+- `.deepclause/system/recipes/`
 - `.deepclause/.gitignore`
 - seeded local skills: `deep-research` and `research-search-reader`
+- seeded example recipe: `deepclause-coding-workflow`
 - editable system overrides:
     - `conductor.dml`
     - `skill-creator.dml`
     - `CONDUCTOR_PROMPT.md`
     - `DML_COMPILER_PROMPT.md`
+
+The default recipe is created at `.deepclause/system/recipes/deepclause-coding-workflow/SKILL.md`. It is a real example, not a placeholder: it teaches the conductor how to approach local repository changes with small edits and focused validation. You can edit it, remove it, or add your own recipes next to it.
+
+Recipes are plain markdown guidance, not executable DML. If you want to add or update one, edit `.deepclause/system/recipes/<slug>/SKILL.md` directly. The conductor can search those recipe files on future turns via `consult_recipes`.
 
 ## TUI Agent
 
@@ -87,17 +95,74 @@ The TUI is the interface around a single built-in agent: the conductor.
 - The TUI itself is just the UI shell: session browser, messages pane, execution log, and context view.
 - The conductor is the actual agent that receives your prompt each turn and decides what to do.
 - The conductor is implemented as a system DML skill plus a system prompt.
-- The conductor can answer directly, call an existing local skill, invoke the skill creator to make a new skill, use shell tools, or do web research.
+- The conductor can answer directly, call an existing local skill, consult the recipe library for workflow guidance, invoke the skill creator to make a new skill, use shell tools, or do web research.
 
 Conceptually, a TUI turn works like this:
 
 1. Load the current session from `.deepclause/sessions/<session-id>/`.
-2. Build the conductor prompt from the resolved conductor prompt template, the current skill catalog, assistant memory, task memory, and session transcript.
+2. Build the conductor prompt from the resolved conductor prompt template, the current skill catalog, the recipe library, assistant memory, task memory, and session transcript.
 3. Run the conductor DML with the `gateway` model slot.
 4. Stream the conductor's own activity and any child-skill events into the execution log on the right.
-5. Persist the final user/assistant messages and updated usage counters back into the session directory.
+5. Persist the final user/assistant messages, structured `execution-log.jsonl`, and updated usage counters back into the session directory.
 
 The conductor is the router and orchestrator for the CLI runtime. Normal compiled skills are the workers it delegates to. When the conductor launches a normal skill, that skill runs with the `run` model slot. When it launches the skill creator, that child run uses the `compile` model slot instead.
+
+### Skills, Recipes, and the Conductor
+
+DeepClause separates three things that other agent systems often collapse into one prompt surface.
+
+- **Conductor**: the built-in router. It owns the conversation, inspects the workspace context, and decides whether to solve directly, run a skill, consult a recipe, or create a new skill.
+- **Skills**: executable DML workers stored in `.deepclause/tools/`. These are compiled programs with explicit tool calls, branching, retries, recursion, and parameters.
+- **Recipes**: markdown guidance stored in `.deepclause/system/recipes/`. These are instruction packs for workflows, conventions, checklists, and examples. They are searched via `consult_recipes`, not executed as child workers.
+- **Skill creator**: the built-in compiler/orchestrator that turns a natural-language spec into a tested local skill.
+
+That distinction matters in practice:
+
+- Use a **recipe** when you need to know how to approach a task.
+- Use a **skill** when you need a reusable automation that should actually execute.
+- Use the **conductor** when you want the system to choose between those options for the current turn.
+
+If the task is to create or refine workflow guidance itself, add or edit a recipe markdown file under `.deepclause/system/recipes/<slug>/SKILL.md`. Do not send recipe authoring through `deepclause compile` unless you actually want an executable skill instead of a guidance document.
+
+Minimal recipe example:
+
+```md
+---
+name: DeepClause Coding Workflow
+description: Guidance for implementing and validating local repository changes.
+tags: [coding, tests, docs]
+when_to_use:
+    - implementing a feature or bug fix in the current repository
+priority: high
+---
+
+# Workflow
+
+1. Start from a concrete anchor.
+2. Make the smallest grounded edit.
+3. Run the narrowest validation that can falsify it.
+```
+
+Minimal skill example:
+
+```text
+deepclause compile fix-imports.md
+deepclause run .deepclause/tools/fix-imports.dml src/index.ts
+```
+
+The recipe is guidance. The skill is an executable worker.
+
+### How This Differs From Other Agent Systems
+
+Systems like `AGENTS.md`, Cursor rules, Claude Skills, or other instruction-pack formats are mostly about giving the model reusable context. DeepClause supports that same need through **recipes**, but it does not stop there.
+
+What is different here:
+
+- DeepClause keeps **guidance** and **execution** separate. Recipes are markdown guidance; skills are compiled programs.
+- A DeepClause skill is not just a saved prompt. It is a DML program that the runtime executes with Prolog semantics.
+- The conductor can decide between **consulting a recipe**, **running a compiled skill**, or **creating a new skill**.
+- Model choice is split by role: `gateway` for orchestration, `run` for worker execution, and `compile` for skill creation.
+- The compiled `.dml` is inspectable and versionable, so the automation logic is explicit instead of hidden in a long prompt.
 
 ### Memory Tools
 
@@ -107,7 +172,12 @@ The memory tools are there so the conductor can keep durable technical notes acr
 - `assistant-memory.md` is long-lived assistant context that gets injected into the conductor prompt each turn.
 - `task-memory.md` is technical working memory: commands that worked, failure modes, local architecture notes, repair strategies, and other distilled learnings.
 
-In the conductor DML, the LLM-facing tool is `save_memory`. That tool does not write arbitrary files directly. Instead, it calls the runtime tool `update_memory`, which replaces `task-memory.md` with the complete updated memory contents.
+In the current conductor, memory updates are produced as part of the main `task(...)` call. The conductor asks the model for two outputs:
+
+- `FinalAnswer`: the user-facing reply
+- `MemoryUpdate`: the complete updated task-memory markdown, or `NONE`
+
+When `MemoryUpdate` contains actual content, the runtime persists it through `update_memory`, which replaces `task-memory.md` with the complete updated memory contents.
 
 That distinction matters:
 
@@ -127,6 +197,7 @@ Each TUI session lives under `.deepclause/sessions/<session-id>/`:
         <session-id>/
             session.json
             messages.jsonl
+            execution-log.jsonl
             assistant-memory.md
             task-memory.md
             usage.json
@@ -135,12 +206,15 @@ Each TUI session lives under `.deepclause/sessions/<session-id>/`:
 
 - `session.json` stores the session title and timestamps.
 - `messages.jsonl` is the append-only user/assistant transcript that gets replayed into future conductor turns.
+- `execution-log.jsonl` stores structured JSONL records for conductor turns, direct `/skill` runs, direct `/skill-creator` runs, child-skill events, tool calls, streamed model output, errors, and completion summaries.
 - `assistant-memory.md` is loaded into the conductor prompt as stable assistant context.
 - `task-memory.md` is loaded into the conductor prompt as technical working memory.
 - `usage.json` stores token usage summaries by model.
 - `specs/` is used when the conductor invokes the skill creator and saves generated spec drafts for that session.
 
-In the CLI runtime today, task memory is the actively updated memory channel: the conductor can call `save_memory`, which persists through `update_memory` into `task-memory.md`. `assistant-memory.md` is still loaded every turn, but it is primarily something you inspect or edit manually unless you build additional tooling around it.
+When a task fails, looks stuck, or needs to be retried, `execution-log.jsonl` is the first file to inspect. It gives you the concrete failing tool call, streamed model behavior, and any successful prior pattern in the same session instead of forcing you to guess from the final transcript alone.
+
+In the CLI runtime today, task memory is the actively updated memory channel: the conductor can emit a `MemoryUpdate`, which persists through `update_memory` into `task-memory.md`. `assistant-memory.md` is still loaded every turn, but it is primarily something you inspect or edit manually unless you build additional tooling around it.
 
 ### Hacking the Conductor and Skill Creator
 
@@ -154,8 +228,9 @@ If you want to customize behavior for one workspace without modifying the packag
 - `.deepclause/system/skill-creator.dml`
 - `.deepclause/system/CONDUCTOR_PROMPT.md`
 - `.deepclause/system/DML_COMPILER_PROMPT.md`
+- `.deepclause/system/recipes/<recipe-slug>/SKILL.md`
 
-When present, the CLI runtime prefers those files over the packaged system DML and system prompt markdown.
+When present, the CLI runtime prefers those files over the packaged system DML and system prompt markdown. For recipes, workspace files override packaged recipes with the same slug.
 
 #### 2. Source-level hacking in this repository
 
@@ -165,8 +240,10 @@ If you are developing DeepClause itself, these are the main files to edit:
 - `src/system/assets/skills/skill-creator.dml` - the skill creator's DML logic
 - `src/system/assets/docs/CONDUCTOR_PROMPT.md` - the conductor system prompt template
 - `src/system/assets/docs/DML_COMPILER_PROMPT.md` - the skill creator/compiler system prompt template
+- `src/system/assets/recipes/` - packaged default recipes copied into new workspaces
 - `src/system/runtime/conductor.ts` - session loading, memory injection, tool registration, child-skill routing
 - `src/system/runtime/skill-creator.ts` - compile-slot execution, skill-creator tool registration, validation/testing/deploy flow
+- `src/system/runtime/catalog-recipes.ts` - recipe discovery, frontmatter parsing, and query matching
 
 Notes:
 

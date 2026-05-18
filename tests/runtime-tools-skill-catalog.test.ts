@@ -84,4 +84,39 @@ describe('runtime skill catalog tools', () => {
       { type: 'log', content: 'bash[1234] stderr warn' },
     ]);
   });
+
+  it('truncates large url_fetch text bodies and preserves truncation metadata', async () => {
+    const registerTool = vi.fn();
+    const originalFetch = globalThis.fetch;
+    const longBody = 'x'.repeat(25_000);
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(longBody, {
+      status: 200,
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    })));
+
+    try {
+      registerLocalRuntimeTools({ registerTool } as never, {
+        workspacePath: '/tmp/workspace',
+        shell: { exec: vi.fn() } as never,
+      });
+
+      const registrations = new Map(registerTool.mock.calls.map(([name, definition]) => [name, definition]));
+      const result = await registrations.get('url_fetch').execute({ url: 'https://example.com/docs' });
+
+      expect(result).toMatchObject({
+        status: 200,
+        truncated: true,
+        original_length: 25_000,
+      });
+      expect(result.body).toContain('... (truncated from 25000 chars to 20000 chars; use save_to to keep the full response)');
+      expect(result.body.startsWith('x'.repeat(20_000))).toBe(true);
+      expect(result.returned_length).toBe(result.body.length);
+    } finally {
+      vi.unstubAllGlobals();
+      if (originalFetch) {
+        vi.stubGlobal('fetch', originalFetch);
+      }
+    }
+  });
 });

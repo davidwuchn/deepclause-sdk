@@ -67,6 +67,27 @@ function toJsValue(value: unknown): unknown {
   return value;
 }
 
+export function decodeAgentOutputVars(rawOutputVars: unknown): (string | TypedVar)[] {
+  const normalized = toJsValue(rawOutputVars);
+  if (!Array.isArray(normalized)) {
+    return [];
+  }
+
+  return normalized.map((value) => {
+    if (
+      typeof value === 'object'
+      && value !== null
+      && 'name' in value
+      && 'type' in value
+      && typeof (value as Record<string, unknown>).name === 'string'
+      && typeof (value as Record<string, unknown>).type === 'string'
+    ) {
+      return value as TypedVar;
+    }
+    return String(value);
+  });
+}
+
 export interface RunnerOptions {
   model: string;
   provider: string;
@@ -450,17 +471,7 @@ export class DMLRunner {
     const taskDescription = String(toJsValue(rawPayload.taskDescription) ?? '');
     
     // Ensure outputVars is an array of either strings or TypedVar objects
-    let outputVars: (string | TypedVar)[] = [];
-    const rawOutputVars = toJsValue(rawPayload.outputVars);
-    if (Array.isArray(rawOutputVars)) {
-      outputVars = rawOutputVars.map(v => {
-        const val = toJsValue(v);
-        if (typeof val === 'object' && val !== null && 'name' in val && 'type' in val) {
-          return val as unknown as TypedVar;
-        }
-        return String(val);
-      });
-    }
+    const outputVars = decodeAgentOutputVars(rawPayload.outputVars);
     
     // Parse userTools - now contains schema info as array of tool_info dicts
     const userTools: UserToolInfo[] = [];
@@ -1071,11 +1082,7 @@ export class DMLRunner {
             const taskDescription = String(payload?.taskDescription ?? '');
             
             // Parse output vars
-            let outputVars: string[] = [];
-            const rawOutputVars = toJsValue(payload?.outputVars);
-            if (Array.isArray(rawOutputVars)) {
-              outputVars = rawOutputVars.map(v => String(v));
-            }
+            const outputVars = decodeAgentOutputVars(payload?.outputVars);
             
             // Parse userTools for the nested agent
             const userTools: UserToolInfo[] = [];

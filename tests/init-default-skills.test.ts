@@ -69,19 +69,24 @@ describe('deepclause init defaults', () => {
 
     const systemDir = getSystemDir('/workspace');
     const docsDir = getDocsDir('/workspace');
+    const recipePath = `${systemDir}/recipes/deepclause-coding-workflow/SKILL.md`;
 
     expect(vol.existsSync(`${systemDir}/conductor.dml`)).toBe(true);
     expect(vol.existsSync(`${systemDir}/skill-creator.dml`)).toBe(true);
     expect(vol.existsSync(`${systemDir}/CONDUCTOR_PROMPT.md`)).toBe(true);
     expect(vol.existsSync(`${systemDir}/DML_COMPILER_PROMPT.md`)).toBe(true);
+    expect(vol.existsSync(recipePath)).toBe(true);
     expect(vol.existsSync(`${docsDir}/TUI.md`)).toBe(true);
 
     const conductorPrompt = vol.readFileSync(`${systemDir}/CONDUCTOR_PROMPT.md`, 'utf8') as string;
     const compilerPrompt = vol.readFileSync(`${systemDir}/DML_COMPILER_PROMPT.md`, 'utf8') as string;
+    const recipe = vol.readFileSync(recipePath, 'utf8') as string;
     const tuiGuide = vol.readFileSync(`${docsDir}/TUI.md`, 'utf8') as string;
 
     expect(conductorPrompt).toContain('# Who you are');
     expect(compilerPrompt).toContain('DeepClause Meta Language');
+    expect(recipe).toContain('DeepClause Coding Workflow');
+    expect(recipe).toContain('create a proper skill instead');
     expect(tuiGuide).toContain('# DeepClause TUI Guide');
   });
 });

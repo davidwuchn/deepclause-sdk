@@ -17,6 +17,7 @@ const BUILT_IN_RUNTIME_TOOLS = new Set([
 ]);
 
 const INTERNAL_TOOLS = new Set(['ask_user', 'finish', 'set_result', 'store']);
+const DEFAULT_URL_FETCH_MAX_TEXT_CHARS = 20_000;
 
 export function getBuiltInRuntimeToolNames(): string[] {
   return [...BUILT_IN_RUNTIME_TOOLS].sort();
@@ -207,10 +208,42 @@ export async function urlFetch(
     };
   }
 
+  const body = await response.text();
+  const truncated = truncateUrlFetchTextBody(body);
+
   return {
-    body: await response.text(),
+    body: truncated.body,
+    truncated: truncated.truncated,
+    original_length: truncated.originalLength,
+    returned_length: truncated.returnedLength,
     status: response.status,
     headers: responseHeaders,
+  };
+}
+
+export function truncateUrlFetchTextBody(body: string, maxChars = DEFAULT_URL_FETCH_MAX_TEXT_CHARS): {
+  body: string;
+  truncated: boolean;
+  originalLength: number;
+  returnedLength: number;
+} {
+  const originalLength = body.length;
+  if (originalLength <= maxChars) {
+    return {
+      body,
+      truncated: false,
+      originalLength,
+      returnedLength: originalLength,
+    };
+  }
+
+  const notice = `\n... (truncated from ${originalLength} chars to ${maxChars} chars; use save_to to keep the full response)`;
+  const clipped = body.slice(0, maxChars) + notice;
+  return {
+    body: clipped,
+    truncated: true,
+    originalLength,
+    returnedLength: clipped.length,
   };
 }
 
