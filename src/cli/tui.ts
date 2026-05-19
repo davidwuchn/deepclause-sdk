@@ -20,7 +20,11 @@ import {
   type ConductorSessionSummary,
 } from '../system/runtime/conductor.js';
 import { getSystemAssetSourcePaths } from '../system/assets/index.js';
-import { createShellManager } from '../system/runtime/shell-manager.js';
+import {
+  createShellManager,
+  describeShellExecutionBackend,
+  type HostShellConfig,
+} from '../system/runtime/shell-manager.js';
 import type { ShellExecResult } from '../system/runtime/agentvm-manager.js';
 import {
   buildToolCompletionEvent,
@@ -288,6 +292,10 @@ export class LiveExecutionPrinter {
         this.handleToolCall(logEvent);
         break;
 
+      case 'memory_compaction':
+        this.writeLine(formatMemoryCompactionLine(logEvent));
+        break;
+
       case 'output':
         if (event.content) {
           this.writeLine(`${formatEventPrefix(logEvent)}output ${event.content}`);
@@ -386,6 +394,10 @@ export class ActivityBuffer {
     switch (event.type) {
       case 'tool_call':
         this.handleToolCall(logEvent);
+        break;
+
+      case 'memory_compaction':
+        this.pushLine(formatMemoryCompactionLine(logEvent));
         break;
 
       case 'output':
@@ -582,6 +594,7 @@ class FullscreenTui {
   private readonly recentFiles: string[] = [];
   private lastSubmittedInput: ParsedTuiInput | null = null;
   private shellWorkspacePath: string;
+  private shellConfig: HostShellConfig = { wrapper: 'auto', strictIsolation: false };
   private renderTimer: ReturnType<typeof setTimeout> | null = null;
   private animationTimer: ReturnType<typeof setInterval> | null = null;
   private closeResolver: (() => void) | null = null;
@@ -600,7 +613,7 @@ class FullscreenTui {
     try {
       await this.refreshCommands();
       await this.refreshSessions({ createIfMissing: true });
-      this.statusLine = 'Ready. F10 or Ctrl+G opens menus. Left/right changes pane when the menu is closed.';
+      this.statusLine = `Ready. Shell ${this.getShellBackend().backendLabel} in ${path.relative(this.workspaceRoot, this.shellWorkspacePath) || '.'}. F10 or Ctrl+G opens menus. Left/right changes pane when the menu is closed.`;
 
       emitKeypressEvents(input);
       if (input.isTTY) {
@@ -1762,7 +1775,7 @@ class FullscreenTui {
         this.closeMenuMode();
         this.inputValue = '!';
         this.cursor = this.inputValue.length;
-        this.statusLine = formatShellModeStatus(this.workspaceRoot, this.shellWorkspacePath, this.options.sandbox);
+        this.statusLine = formatShellModeStatus(this.workspaceRoot, this.shellWorkspacePath, this.options.sandbox, this.shellConfig);
         this.requestRender();
         return;
 
@@ -2830,6 +2843,11 @@ class FullscreenTui {
   private async refreshShellContext(): Promise<void> {
     const config = await loadConfig(this.workspaceRoot);
     this.shellWorkspacePath = path.resolve(this.workspaceRoot, config.workspace || './workspace');
+    this.shellConfig = config.shell;
+  }
+
+  private getShellBackend(): { backendLabel: string; description: string } {
+    return describeShellExecutionBackend(this.options.sandbox ?? false, this.shellConfig);
   }
 
   private refreshCommandBarStatus(previousInput = ''): void {
@@ -2840,7 +2858,7 @@ class FullscreenTui {
     const wasShell = previousInput.trimStart().startsWith('!');
     const isShell = this.inputValue.trimStart().startsWith('!');
     if (isShell) {
-      this.statusLine = formatShellModeStatus(this.workspaceRoot, this.shellWorkspacePath, this.options.sandbox);
+      this.statusLine = formatShellModeStatus(this.workspaceRoot, this.shellWorkspacePath, this.options.sandbox, this.shellConfig);
       return;
     }
 
@@ -3172,7 +3190,8 @@ class FullscreenTui {
       'Changes apply on the next turn or /compile run. No TUI reload is required.',
       '',
       'Shell Execution',
-      `Backend ${this.options.sandbox ? 'sandbox' : 'host'}`,
+      `Backend ${this.getShellBackend().backendLabel}`,
+      `Mode ${this.getShellBackend().description}`,
       `CWD ${this.shellWorkspacePath}`,
       '',
       'Session Token Usage',
@@ -3614,8 +3633,11 @@ async function startLineTui(
       }
 
       if (parsed.kind === 'shell') {
+        const config = await loadConfig(workspaceRoot);
+        const shellWorkspacePath = path.resolve(workspaceRoot, config.workspace || './workspace');
         console.log(divider('-'));
         console.log(`${paint('shell', ANSI.dim)} !${parsed.command}`);
+        console.log(formatShellModeStatus(workspaceRoot, shellWorkspacePath, options.sandbox, config.shell));
         console.log(divider('-'));
         const printer = new LiveExecutionPrinter();
 
@@ -3879,6 +3901,7 @@ async function runShellCommand(
     shellManager = createShellManager({
       workspacePath,
       sandbox: options.sandbox,
+      hostConfig: config.shell,
     });
 
     const observer = createShellToolEventBridge({
@@ -4404,6 +4427,20 @@ function formatToolEventLine(logEvent: ConductorLogEvent): string | null {
   return `${prefix}tool ${callLabel} ${event.toolState}${formatToolEventDetails(event)}`;
 }
 
+function formatMemoryCompactionLine(logEvent: ConductorLogEvent): string {
+  const { event } = logEvent;
+  const prefix = formatEventPrefix(logEvent);
+  if (event.content) {
+    return `${prefix}${event.content}`;
+  }
+
+  const action = event.compactionAction ?? 'skipped';
+  const binding = event.compactionBindingName ?? 'compactor';
+  const before = typeof event.beforeTokens === 'number' ? event.beforeTokens : '?';
+  const after = typeof event.afterTokens === 'number' ? event.afterTokens : '?';
+  return `${prefix}compact ${event.compactionScope ?? 'loop'}.${event.compactionTrigger ?? 'before_model_call'} ${action} via ${binding} ${before} -> ${after} tokens`;
+}
+
 function formatToolEventDetails(event: DMLEvent): string {
   const details: string[] = [];
 
@@ -4443,9 +4480,11 @@ function formatShellModeStatus(
   workspaceRoot: string,
   shellWorkspacePath: string,
   sandbox?: boolean,
+  shellConfig: HostShellConfig = { wrapper: 'auto', strictIsolation: false },
 ): string {
   const displayPath = path.relative(workspaceRoot, shellWorkspacePath) || '.';
-  return `Shell mode: ${sandbox ? 'AgentVM sandbox' : 'host shell'} in ${displayPath}. Enter runs, /cancel stops.`;
+  const shellBackend = describeShellExecutionBackend(sandbox ?? false, shellConfig);
+  return `Shell mode: ${shellBackend.description} (${shellBackend.backendLabel}) in ${displayPath}. Enter runs, /cancel stops.`;
 }
 
 function buildHelpLines(): string[] {

@@ -578,9 +578,16 @@ destroy_engine(SessionId) :-
 %% ============================================================
 
 %% post_agent_result(+SessionId, +Success, +Variables, +Messages)
-%% Messages is a list of message{role: Role, content: Content} dicts
+%% Legacy form without a full memory replacement snapshot.
 post_agent_result(SessionId, Success, Variables, Messages) :-
-    assertz(session_agent_result(SessionId, result{success: Success, variables: Variables, messages: Messages})),
+    post_agent_result(SessionId, Success, Variables, Messages, none).
+
+%% post_agent_result(+SessionId, +Success, +Variables, +Messages, +FullMemory)
+%% Messages is a list of message{role: Role, content: Content} dicts.
+%% FullMemory optionally replaces the entire state memory, including compacted system summaries.
+post_agent_result(SessionId, Success, Variables, Messages, FullMemory) :-
+    retractall(session_agent_result(SessionId, _)),
+    assertz(session_agent_result(SessionId, result{success: Success, variables: Variables, messages: Messages, full_memory: FullMemory})),
     post_signal_to_engine(SessionId, agent_done).
 
 %% post_exec_result(+SessionId, +Status, +Result)
@@ -936,12 +943,17 @@ destroy_tool_engine(ToolEngineId) :-
     retractall(tool_engine(ToolEngineId, _)).
 
 %% post_tool_agent_result(+SessionId, +ToolEngineId, +Success, +Variables, +Messages)
+%% Legacy form without a full memory replacement snapshot.
+post_tool_agent_result(SessionId, ToolEngineId, Success, Variables, Messages) :-
+    post_tool_agent_result(SessionId, ToolEngineId, Success, Variables, Messages, none).
+
+%% post_tool_agent_result(+SessionId, +ToolEngineId, +Success, +Variables, +Messages, +FullMemory)
 %% Posts the result of a nested agent loop back to the tool engine.
 %% Also stores in session_agent_result so the meta-interpreter can retrieve it.
 :- dynamic tool_engine_agent_result/2.  % tool_engine_agent_result(ToolEngineId, Result)
 
-post_tool_agent_result(SessionId, ToolEngineId, Success, Variables, Messages) :-
-    Result = result{success: Success, variables: Variables, messages: Messages},
+post_tool_agent_result(SessionId, ToolEngineId, Success, Variables, Messages, FullMemory) :-
+    Result = result{success: Success, variables: Variables, messages: Messages, full_memory: FullMemory},
     % Store in tool_engine_agent_result (for future use)
     retractall(tool_engine_agent_result(ToolEngineId, _)),
     assertz(tool_engine_agent_result(ToolEngineId, Result)),
@@ -1031,8 +1043,11 @@ mi_call(task(Desc), StateIn, StateOut) :-
         engine_yield(output(WarnMsg)),
         fail
     ),
-    % Use full messages from agent loop result
-    (   get_dict(messages, Result, Messages), Messages \= []
+    % Use full memory from agent loop result when available
+    (   get_dict(full_memory, Result, FullMemory), is_list(FullMemory)
+    ->  set_memory(StateAfterAgent, FullMemory, StateOut),
+        add_trace_entry(SessionId, exit, task, [InterpDesc], Depth)
+    ;   get_dict(messages, Result, Messages), Messages \= []
     ->  % Preserve system messages from current memory (agent only returns user/assistant)
         get_memory(StateAfterAgent, OldMemory),
         include(is_system_memory_message, OldMemory, SystemMessages),
@@ -1156,8 +1171,12 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
         fail
     ),
     bind_task_variables(Result.variables, VarNames, Vars),
-    % Use full messages from agent loop result
-    (   get_dict(messages, Result, Messages), Messages \= []
+    % Use full memory from agent loop result when available
+    (   get_dict(full_memory, Result, FullMemory), is_list(FullMemory)
+    ->  set_memory(StateAfterAgent, FullMemory, StateOut),
+        % Add exit trace for task_n
+        add_trace_entry(SessionId, exit, task, [InterpDesc], Depth)
+    ;   get_dict(messages, Result, Messages), Messages \= []
     ->  % Preserve system messages from current memory (agent only returns user/assistant)
         get_memory(StateAfterAgent, OldMemory),
         include(is_system_memory_message, OldMemory, SystemMessages),

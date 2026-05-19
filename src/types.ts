@@ -29,6 +29,50 @@ export interface CreateOptions {
   /** Provider-specific options passed to the AI SDK (e.g. Google thinkingConfig, OpenAI reasoningEffort) */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   providerOptions?: Record<string, Record<string, any>>;
+  /** Optional memory compaction settings for task()/prompt() execution */
+  compaction?: CompactionOptions;
+}
+
+export type CompactorSourceType = 'inline' | 'file' | 'auto';
+export type CompactionScope = 'session' | 'loop' | 'run';
+export type CompactionTrigger = 'before_user_message' | 'before_model_call' | 'before_task' | 'after_task';
+export type CompactionAction = 'applied' | 'skipped' | 'failed';
+
+export interface CompactorDefinition {
+  /** Inline DML source or a path to a DML file */
+  source: string;
+  /** How to interpret the source field. Defaults to 'auto'. */
+  sourceType?: CompactorSourceType;
+  /** Timeout for the DML compactor run in milliseconds. */
+  timeoutMs?: number;
+  /** Optional gas limit for the compactor DML run. */
+  gasLimit?: number;
+  /** Optional model override for compactor task()/prompt() calls. */
+  model?: string;
+  /** Optional provider override for the compactor model. */
+  provider?: 'openai' | 'anthropic' | 'google' | 'openrouter';
+  /** Whether the compactor may access the caller's registered exec() tools. Defaults to false. */
+  inheritTools?: boolean;
+  /** Optional tool policy applied to the compactor run. */
+  toolPolicy?: ToolPolicy | null;
+}
+
+export interface CompactorBinding {
+  /** Optional binding label used in logs and events. */
+  name?: string;
+  /** Runtime scope to which this compactor is attached. */
+  scope: CompactionScope;
+  /** Trigger point within the scope. */
+  trigger: CompactionTrigger;
+  /** The DML compactor to run when this binding is evaluated. */
+  compactor: CompactorDefinition;
+}
+
+export interface CompactionOptions {
+  /** Enables compactor evaluation. Defaults to false. */
+  enabled?: boolean;
+  /** Compactor bindings evaluated at specific runtime hook points. */
+  bindings?: CompactorBinding[];
 }
 
 /**
@@ -50,6 +94,8 @@ export interface RunOptions {
   /** Initial conversation messages seeded into memory before DML execution.
    *  These appear as proper user/assistant turns, not in the system prompt. */
   initialMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** Per-run override for SDK compaction settings. */
+  compaction?: CompactionOptions;
 }
 
 /**
@@ -86,7 +132,7 @@ export interface LLMUsage {
 }
 
 export interface DMLEvent {
-  type: 'output' | 'log' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'tool_call' | 'usage';
+  type: 'output' | 'log' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'tool_call' | 'usage' | 'memory_compaction';
   content?: string;
   prompt?: string;
   /** Execution trace (only present in 'finished' event when trace mode enabled) */
@@ -113,6 +159,20 @@ export interface DMLEvent {
   toolError?: string;
   /** Token usage from an LLM call (only for 'usage' events) */
   usage?: LLMUsage;
+  /** Compaction scope (only for 'memory_compaction' events) */
+  compactionScope?: CompactionScope;
+  /** Compaction trigger (only for 'memory_compaction' events) */
+  compactionTrigger?: CompactionTrigger;
+  /** Compaction action outcome (only for 'memory_compaction' events) */
+  compactionAction?: CompactionAction;
+  /** Binding label used for the compaction event when available */
+  compactionBindingName?: string;
+  /** Estimated tokens before compaction (only for 'memory_compaction' events) */
+  beforeTokens?: number;
+  /** Estimated tokens after compaction (only for 'memory_compaction' events) */
+  afterTokens?: number;
+  /** Optional failure reason when compaction could not be applied */
+  compactionError?: string;
 }
 
 /**

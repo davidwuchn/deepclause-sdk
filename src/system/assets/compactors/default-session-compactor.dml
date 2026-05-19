@@ -1,0 +1,20 @@
+should_skip_session_compaction(MessageCount, _EstimatedTokens) :-
+    MessageCount < 8.
+
+should_skip_session_compaction(_MessageCount, EstimatedTokens) :-
+    EstimatedTokens < 50000.
+
+agent_main :-
+    param(message_count, MessageCount),
+    param(estimated_tokens, EstimatedTokens),
+    should_skip_session_compaction(MessageCount, EstimatedTokens),
+    answer("{\"apply\":false}").
+
+agent_main :-
+    param(message_count, MessageCount),
+    param(estimated_tokens, EstimatedTokens),
+    param(messages_json, MessagesJSON),
+    system("You decide whether a DeepClause conductor session history should be compacted before the next user turn. Return only strict JSON with keys apply and messages. If no compaction is needed, return {\"apply\":false}. If compaction is needed, return {\"apply\":true,\"messages\":[...]}. Messages must be an array of objects with role and content string fields. For conductor session persistence, returned messages must use only role=user or role=assistant. Preserve important user goals, constraints, decisions, open questions, and actionable next steps."),
+    format(string(ReviewPrompt), "Review this existing session message history and decide whether it should be compacted before the next user message is added.\n\nMessage count: ~w\nEstimated tokens: ~w\n\nHistory JSON:\n~w\n\nReturn strict JSON only. If the history is already compact enough or there is little to preserve, return exactly {\"apply\":false}. Otherwise return a smaller replacement message array in the shape {\"apply\":true,\"messages\":[{\"role\":\"user|assistant\",\"content\":\"...\"}, ...]}. The replacement must be materially smaller than the original while preserving durable context.", [MessageCount, EstimatedTokens, MessagesJSON]),
+    task(ReviewPrompt, string(ResultJSON)),
+    answer(ResultJSON).

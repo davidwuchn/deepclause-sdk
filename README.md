@@ -381,6 +381,17 @@ DeepClause executes DML in a local CLI runtime:
 
 This keeps the default workflow simple for local development while still supporting an isolated shell backend when needed.
 
+The active shell backend also appears in the TUI and runtime events with labels such as `host[bwrap]`, `host[clean-room]`, `host[bwrap strict]`, and `sandbox[agentvm]`.
+
+Host-shell isolation details:
+
+- `shell.wrapper: "auto"` prefers `bwrap` on Linux and `sandbox-exec` on macOS when available, then falls back to `clean-room`.
+- `shell.wrapper` can also force `clean-room`, `bwrap`, or `sandbox-exec` when you want deterministic behavior across machines.
+- `shell.strictIsolation: true` requests stricter host-shell isolation. On Linux with `bwrap`, that adds `--unshare-net` so shell commands lose outbound network access.
+- The Linux `bwrap` path preserves common DNS setups where `/etc/resolv.conf` is a symlink into `/run`, so resolver lookups continue to work on `systemd-resolved` hosts.
+
+Linux note: when `bubblewrap` is available, DeepClause will prefer it for host-shell isolation. On some Ubuntu/AppArmor systems, `kernel.apparmor_restrict_unprivileged_userns=1` blocks the unprivileged user-namespace path that `bwrap` needs, which surfaces as `bwrap: setting up uid map: Permission denied`. In that case DeepClause correctly falls back to the clean-room host shell. If you want `bwrap` on those hosts, you need a permitted AppArmor/userns configuration, a setuid-capable `bwrap` install, or `--sandbox` with AgentVM instead.
+
 ## Beyond Markdown: Why Logic Programming?
 
 Markdown skills are great for simple, linear workflows. But real-world tasks often need:
@@ -667,6 +678,37 @@ Other useful config fields:
     "agentvm": {
         "network": false
     },
+    "shell": {
+        "wrapper": "auto",
+        "strictIsolation": false
+    },
+    "compaction": {
+        "enabled": true,
+        "bindings": [
+            {
+                "name": "default-session",
+                "scope": "session",
+                "trigger": "before_user_message",
+                "compactor": {
+                    "source": ".deepclause/system/default-session-compactor.dml",
+                    "sourceType": "file",
+                    "timeoutMs": 15000,
+                    "inheritTools": false
+                }
+            },
+            {
+                "name": "default-loop",
+                "scope": "loop",
+                "trigger": "before_model_call",
+                "compactor": {
+                    "source": ".deepclause/system/default-loop-compactor.dml",
+                    "sourceType": "file",
+                    "timeoutMs": 15000,
+                    "inheritTools": false
+                }
+            }
+        ]
+    },
     "workspace": "./workspace",
     "dmlBase": ".deepclause/tools",
     "mcp": {
@@ -681,9 +723,31 @@ Other useful config fields:
 ```
 
 - `agentvm.network` controls whether shell commands in `--sandbox` mode get outbound network access.
+- `shell.wrapper` chooses the host-shell isolation backend: `auto`, `clean-room`, `bwrap`, or `sandbox-exec`.
+- `shell.strictIsolation` requests stricter host execution. On Linux with `bwrap`, that disables network access with a separate network namespace.
+- `compaction.enabled` toggles the compaction system for session and loop memory.
+- `compaction.bindings` attaches DML compactors to runtime hook points such as `before_user_message` and `before_model_call`.
 - `workspace` sets the default working directory used by shell/file tools.
 - `dmlBase` changes where compiled local skills are written.
 - `mcp.servers` registers MCP servers that then appear in `deepclause list-tools`.
+
+### Compaction Is Hackable
+
+The default compaction bindings point at seeded DML files in `.deepclause/system/default-session-compactor.dml` and `.deepclause/system/default-loop-compactor.dml`. Those are ordinary workspace files, so you can edit them directly instead of treating compaction as a black box.
+
+At the moment, the packaged defaults are intentionally conservative: they skip compaction until the history is at least `8`/`12` messages and roughly `50000` estimated tokens for session/loop history respectively.
+
+For example, the default session compactor currently gates on:
+
+```prolog
+should_skip_session_compaction(_MessageCount, EstimatedTokens) :-
+    EstimatedTokens < 50000.
+```
+
+If you want compaction to kick in earlier or later, you have two straightforward options:
+
+- Edit the seeded DML compactor files in `.deepclause/system/` and change the heuristics directly.
+- Repoint `compaction.bindings` in `.deepclause/config.json` to a different file, an inline compactor, or a binding with its own `model`, `provider`, `gasLimit`, `timeoutMs`, `inheritTools`, or `toolPolicy` settings.
 
 ## Understanding DML
 

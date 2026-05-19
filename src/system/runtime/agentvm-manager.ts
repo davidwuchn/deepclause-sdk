@@ -10,12 +10,14 @@ export interface ShellExecResult {
   summary: string;
   pid?: number;
   backend: 'host' | 'sandbox';
+  backendLabel?: string;
 }
 
 export interface ShellExecStartEvent {
   command: string;
   pid?: number;
   backend: 'host' | 'sandbox';
+  backendLabel?: string;
 }
 
 export interface ShellExecChunkEvent {
@@ -23,12 +25,14 @@ export interface ShellExecChunkEvent {
   chunk: string;
   pid?: number;
   backend: 'host' | 'sandbox';
+  backendLabel?: string;
 }
 
 export interface ShellExecExitEvent {
   command: string;
   pid?: number;
   backend: 'host' | 'sandbox';
+  backendLabel?: string;
   success: boolean;
   exitCode: number;
   summary: string;
@@ -60,7 +64,7 @@ export class AgentVMManager {
     }
 
     const vm = await this.getVM();
-    observer?.onStart?.({ command, backend: this.kind });
+    observer?.onStart?.({ command, backend: this.kind, backendLabel: 'sandbox[agentvm]' });
     const result = signal
       ? await new Promise<Awaited<ReturnType<AgentVM['exec']>>>((resolve, reject) => {
           let settled = false;
@@ -116,18 +120,20 @@ export class AgentVMManager {
       stderr,
       exitCode,
       backend: this.kind,
+      backendLabel: 'sandbox[agentvm]',
       summary: exitCode === 0 ? 'Command completed successfully' : (stderr || `Command failed with exit code ${exitCode}`),
     };
 
     if (stdout) {
-      observer?.onStdout?.({ command, chunk: stdout, backend: this.kind });
+      observer?.onStdout?.({ command, chunk: stdout, backend: this.kind, backendLabel: execResult.backendLabel });
     }
     if (stderr) {
-      observer?.onStderr?.({ command, chunk: stderr, backend: this.kind });
+      observer?.onStderr?.({ command, chunk: stderr, backend: this.kind, backendLabel: execResult.backendLabel });
     }
     observer?.onExit?.({
       command,
       backend: this.kind,
+      backendLabel: execResult.backendLabel,
       success: execResult.success,
       exitCode,
       summary: execResult.summary,

@@ -7,6 +7,13 @@
 
 export { createDeepClause } from './sdk.js';
 export type { 
+  CompactionAction,
+  CompactionOptions,
+  CompactionScope,
+  CompactionTrigger,
+  CompactorBinding,
+  CompactorDefinition,
+  CompactorSourceType,
   CreateOptions,
   DeepClauseSDK,
   RunOptions,

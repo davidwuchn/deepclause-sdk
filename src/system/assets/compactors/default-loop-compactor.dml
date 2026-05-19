@@ -1,0 +1,20 @@
+should_skip_loop_compaction(MessageCount, _EstimatedTokens) :-
+    MessageCount < 12.
+
+should_skip_loop_compaction(_MessageCount, EstimatedTokens) :-
+    EstimatedTokens < 50000.
+
+agent_main :-
+    param(message_count, MessageCount),
+    param(estimated_tokens, EstimatedTokens),
+    should_skip_loop_compaction(MessageCount, EstimatedTokens),
+    answer("{\"apply\":false}").
+
+agent_main :-
+    param(message_count, MessageCount),
+    param(estimated_tokens, EstimatedTokens),
+    param(messages_json, MessagesJSON),
+    system("You compact the live prompt history of a long-running DeepClause task loop. Return only strict JSON with keys apply and messages. If no compaction is needed, return {\"apply\":false}. If compaction is needed, return {\"apply\":true,\"messages\":[...]}. Messages must be an array of objects with role and content string fields. Preserve the current objective, the latest working state, unfinished tool findings, user constraints, and the most recent actionable context needed for the next model call."),
+    format(string(ReviewPrompt), "Review this live task-loop message history and decide whether it should be compacted before the next model call.\n\nMessage count: ~w\nEstimated tokens: ~w\n\nMessages JSON:\n~w\n\nReturn strict JSON only. If the history is already compact enough, return exactly {\"apply\":false}. Otherwise return a materially smaller replacement message array in the shape {\"apply\":true,\"messages\":[{\"role\":\"system|user|assistant\",\"content\":\"...\"}, ...]}. Preserve the task objective, the latest assistant state, crucial tool results, and anything the next model step still needs.", [MessageCount, EstimatedTokens, MessagesJSON]),
+    task(ReviewPrompt, string(ResultJSON)),
+    answer(ResultJSON).

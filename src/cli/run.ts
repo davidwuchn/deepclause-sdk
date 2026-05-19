@@ -178,6 +178,7 @@ export async function run(
   const result = await executeDml({
     dmlCode,
     config,
+    workspaceRoot: configRoot,
     workspacePath,
     selection: runSelection,
     args,

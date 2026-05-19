@@ -8,11 +8,20 @@ import {
   getConfigDir,
   getToolsDir,
   loadConfig,
+  resolveCompactionConfig,
   resolveModelSlot,
   type Config,
 } from '../../cli/config.js';
 import { promptUser } from '../../cli/interactive.js';
-import type { DMLEvent, DeepClauseSDK } from '../../types.js';
+import type { DMLEvent, DeepClauseSDK, MemoryMessage } from '../../types.js';
+import { createDeepClause } from '../../sdk.js';
+import {
+  executeCompactor,
+  getCompactionBindings,
+  resolveCompactionOptions,
+  type CompactorExecutionRequest,
+  type CompactorExecutionResponse,
+} from '../../compaction.js';
 import {
   getWorkspaceRecipeAssetsDir,
   readSystemPromptAsset,
@@ -275,11 +284,24 @@ export async function runConductorTurn(
     options.onEvent?.(event);
   };
 
+  const compactedSessionMessages = await maybeCompactSessionMessages({
+    config,
+    workspaceRoot,
+    workspacePath,
+    selection: gatewaySelection,
+    signal: options.signal,
+    verbose: options.verbose,
+    messagesPath: session.paths.messagesPath,
+    messages: session.messages,
+    onCompactionEvent: (event) => emitLogEvent({ scope: 'main', modelId: gatewaySelection.id, event }),
+  });
+
   let result;
   try {
     result = await executeDml({
       dmlCode: conductorDml,
       config,
+      workspaceRoot,
       workspacePath,
       selection: gatewaySelection,
       args: [userMessage],
@@ -294,7 +316,7 @@ export async function runConductorTurn(
       sandbox: options.sandbox,
       signal: options.signal,
       onUserInput,
-      initialMessages: session.messages,
+      initialMessages: compactedSessionMessages,
       skillCatalog: {
         workspaceRoot,
         currentSkillSlug: '_conductor',
@@ -749,6 +771,11 @@ async function readSessionMessages(messagesPath: string): Promise<SessionMessage
     .filter((message) => message.role === 'user' || message.role === 'assistant');
 }
 
+async function rewriteSessionMessages(messagesPath: string, messages: SessionMessage[]): Promise<void> {
+  const content = messages.map((message) => JSON.stringify(message)).join('\n');
+  await fs.writeFile(messagesPath, content ? `${content}\n` : '', 'utf8');
+}
+
 async function readSessionUsage(usagePath: string): Promise<TokenUsageByModel> {
   const content = await readOptionalText(usagePath);
   if (!content.trim()) {
@@ -765,6 +792,172 @@ async function readSessionUsage(usagePath: string): Promise<TokenUsageByModel> {
 
 async function appendSessionMessage(messagesPath: string, message: SessionMessage): Promise<void> {
   await fs.appendFile(messagesPath, JSON.stringify(message) + '\n', 'utf8');
+}
+
+function detectProviderFromModel(model: string): 'openai' | 'anthropic' | 'google' | 'openrouter' {
+  const lower = model.toLowerCase();
+  if (lower.includes('gpt') || lower.includes('o1') || lower.includes('o3')) {
+    return 'openai';
+  }
+  if (lower.includes('claude')) {
+    return 'anthropic';
+  }
+  if (lower.includes('gemini') || lower.includes('palm')) {
+    return 'google';
+  }
+  return 'openrouter';
+}
+
+function normalizeSessionCompactionMessages(messages: MemoryMessage[]): SessionMessage[] | null {
+  const timestamp = new Date().toISOString();
+  const normalized: SessionMessage[] = [];
+  for (const message of messages) {
+    if ((message.role !== 'user' && message.role !== 'assistant') || typeof message.content !== 'string') {
+      return null;
+    }
+    normalized.push({
+      role: message.role,
+      content: message.content,
+      timestamp,
+    });
+  }
+  return normalized;
+}
+
+async function runSessionCompactorBinding(options: {
+  request: CompactorExecutionRequest;
+  config: Config;
+  selection: ReturnType<typeof resolveModelSlot>;
+  workspacePath: string;
+  signal?: AbortSignal;
+  verbose?: boolean;
+}): Promise<CompactorExecutionResponse> {
+  const binding = options.request.binding;
+  if (binding.compactor.inheritTools) {
+    return { error: 'Session compactors cannot inherit tools' };
+  }
+
+  const model = binding.compactor.model ?? options.selection.model;
+  const provider = binding.compactor.provider
+    ?? (binding.compactor.model ? detectProviderFromModel(model) : options.selection.provider);
+  const providerConfig = provider === options.selection.provider
+    ? { apiKey: options.selection.apiKey, baseUrl: options.selection.baseUrl }
+    : {
+      apiKey: options.config.providers?.[provider]?.apiKey,
+      baseUrl: options.config.providers?.[provider]?.baseUrl,
+    };
+
+  const sdk = await createDeepClause({
+    model,
+    provider,
+    apiKey: providerConfig.apiKey,
+    baseUrl: providerConfig.baseUrl,
+    temperature: options.selection.temperature,
+    debug: options.verbose,
+    maxTokens: 65536,
+    compaction: { enabled: false },
+  });
+
+  try {
+    let code = binding.compactor.source;
+    if (binding.compactor.sourceType !== 'inline') {
+      try {
+        code = await fs.readFile(binding.compactor.source, 'utf8');
+      } catch (error) {
+        if (binding.compactor.sourceType === 'file') {
+          throw error;
+        }
+      }
+    }
+    let answer = '';
+    let error = '';
+    for await (const event of sdk.runDML(code, {
+      workspacePath: options.workspacePath,
+      gasLimit: binding.compactor.gasLimit,
+      params: options.request.params,
+      signal: options.signal,
+      onUserInput: async (prompt) => {
+        throw new Error(`Compactor requested unexpected input: ${prompt}`);
+      },
+      compaction: { enabled: false },
+    })) {
+      if (event.type === 'answer' && event.content) {
+        answer = event.content;
+      } else if (event.type === 'error' && event.content) {
+        error = event.content;
+      }
+    }
+
+    return {
+      answer,
+      error: error || undefined,
+    };
+  } finally {
+    await sdk.dispose();
+  }
+}
+
+async function maybeCompactSessionMessages(options: {
+  config: Config;
+  workspaceRoot: string;
+  workspacePath: string;
+  selection: ReturnType<typeof resolveModelSlot>;
+  signal?: AbortSignal;
+  verbose?: boolean;
+  messagesPath: string;
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  onCompactionEvent?: (event: DMLEvent) => void;
+}): Promise<Array<{ role: 'user' | 'assistant'; content: string }>> {
+  const resolvedConfig = resolveCompactionConfig(options.config, options.workspaceRoot);
+  const resolved = resolveCompactionOptions(resolvedConfig, undefined);
+  const bindings = getCompactionBindings(resolved, 'session', 'before_user_message');
+  if (bindings.length === 0) {
+    return options.messages;
+  }
+
+  let messages: MemoryMessage[] = options.messages.map((message) => ({
+    role: message.role,
+    content: message.content,
+  }));
+
+  for (const binding of bindings) {
+    const priorMessages = messages;
+    const result = await executeCompactor({
+      binding,
+      messages: priorMessages,
+      execute: (request) => runSessionCompactorBinding({
+        request,
+        config: options.config,
+        selection: options.selection,
+        workspacePath: options.workspacePath,
+        signal: options.signal,
+        verbose: options.verbose,
+      }),
+    });
+
+    const normalized = normalizeSessionCompactionMessages(result.messages);
+    if (!normalized) {
+      options.onCompactionEvent?.({
+        ...result.event,
+        content: `compact ${binding.scope}.${binding.trigger} failed ${result.event.beforeTokens ?? 0} -> ${result.event.afterTokens ?? 0} tokens: session compactors must return only user/assistant messages`,
+        compactionAction: 'failed',
+        compactionError: 'Session compactors must return only user/assistant messages',
+      });
+      continue;
+    }
+
+    options.onCompactionEvent?.(result.event);
+
+    const beforeSerialized = JSON.stringify(priorMessages);
+    const afterSerialized = JSON.stringify(normalized.map(({ role, content }) => ({ role, content })));
+    if (beforeSerialized !== afterSerialized) {
+      await rewriteSessionMessages(options.messagesPath, normalized);
+    }
+
+    messages = normalized.map((message) => ({ role: message.role, content: message.content }));
+  }
+
+  return messages.map((message) => ({ role: message.role as 'user' | 'assistant', content: message.content }));
 }
 
 async function mergeSessionUsage(

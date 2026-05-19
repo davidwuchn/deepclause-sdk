@@ -6,6 +6,7 @@ import type { AnalysisResult, DMLEvent, DeepClauseSDK } from '../../types.js';
 import { analyzeAndAuditDML, analyzeDML, extractDescription, extractParameters, validateWithProlog } from '../../compiler.js';
 import { newsSearch, webSearch } from '../../cli/search.js';
 import type { Config } from '../../cli/config.js';
+import { resolveCompactionConfig } from '../../cli/config.js';
 import type { MetaFile } from '../../cli/compile.js';
 import type { ResolvedModelConfig } from '../config/model-slots.js';
 import { readSystemPromptAsset, readSystemSkillAsset } from '../assets/index.js';
@@ -97,6 +98,7 @@ async function compileWithSkillCreatorInternal(
     workspacePath,
     sandbox: options.sandbox,
     network: options.config.agentvm?.network ?? false,
+    hostConfig: options.config.shell,
   });
   const sdk = await createDeepClause({
     model: options.compileSelection.model,
@@ -108,6 +110,7 @@ async function compileWithSkillCreatorInternal(
     trace: !!options.trace,
     streaming: (options.stream ?? false) || !!options.onEvent,
     maxTokens: 65536,
+    compaction: resolveCompactionConfig(options.config, path.resolve(options.workspaceRoot ?? workspacePath)),
   });
 
   let published: PublishResult | undefined;

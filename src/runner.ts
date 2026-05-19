@@ -2,10 +2,26 @@
  * DML Runner - Executes DML code using SWI-Prolog WASM
  */
 
+import * as fs from 'fs/promises';
+import * as path from 'path';
 import type { SWIPLModule } from './prolog/loader.js';
-import type { DMLEvent, ToolDefinition, ToolPolicy, MemoryMessage, TypedVar } from './types.js';
+import type {
+  CompactionOptions,
+  DMLEvent,
+  MemoryMessage,
+  ToolDefinition,
+  ToolPolicy,
+  TypedVar,
+} from './types.js';
 import { mountWorkspace } from './prolog/loader.js';
 import { runAgentLoop } from './agent.js';
+import {
+  executeCompactor,
+  getCompactionBindings,
+  resolveCompactionOptions,
+  type CompactorExecutionRequest,
+  type CompactorExecutionResponse,
+} from './compaction.js';
 import {
   buildToolCompletionEvent,
   buildToolFailureEvent,
@@ -67,6 +83,53 @@ function toJsValue(value: unknown): unknown {
   return value;
 }
 
+function detectProvider(model: string): 'openai' | 'anthropic' | 'google' | 'openrouter' {
+  const lower = model.toLowerCase();
+  if (lower.includes('gpt') || lower.includes('o1') || lower.includes('o3')) {
+    return 'openai';
+  }
+  if (lower.includes('claude')) {
+    return 'anthropic';
+  }
+  if (lower.includes('gemini') || lower.includes('palm')) {
+    return 'google';
+  }
+  return 'openrouter';
+}
+
+function createChildAbortController(
+  parentSignal: AbortSignal | undefined,
+  timeoutMs: number,
+): { signal: AbortSignal; dispose: () => void } {
+  const controller = new AbortController();
+  const disposers: Array<() => void> = [];
+
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      controller.abort(parentSignal.reason);
+    } else {
+      const onAbort = () => controller.abort(parentSignal.reason);
+      parentSignal.addEventListener('abort', onAbort, { once: true });
+      disposers.push(() => parentSignal.removeEventListener('abort', onAbort));
+    }
+  }
+
+  let timeout: NodeJS.Timeout | undefined;
+  if (timeoutMs > 0) {
+    timeout = setTimeout(() => controller.abort(new Error(`Compactor timed out after ${timeoutMs}ms`)), timeoutMs);
+    disposers.push(() => clearTimeout(timeout));
+  }
+
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      for (const dispose of disposers) {
+        dispose();
+      }
+    },
+  };
+}
+
 export function decodeAgentOutputVars(rawOutputVars: unknown): (string | TypedVar)[] {
   const normalized = toJsValue(rawOutputVars);
   if (!Array.isArray(normalized)) {
@@ -99,6 +162,7 @@ export interface RunnerOptions {
   debug?: boolean;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   providerOptions?: Record<string, Record<string, any>>;
+  compaction?: CompactionOptions;
 }
 
 export interface InternalRunOptions {
@@ -111,6 +175,14 @@ export interface InternalRunOptions {
   onInputRequired: (prompt: string) => Promise<string>;
   signal?: AbortSignal;
   initialMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  compaction?: CompactionOptions;
+}
+
+interface RunnerExecutionContext {
+  workspacePath?: string;
+  signal?: AbortSignal;
+  compaction?: CompactionOptions;
+  toolPolicy?: ToolPolicy | null;
 }
 
 /**
@@ -220,7 +292,13 @@ export class DMLRunner {
       while (true) {
         // Check for abort
         if (options.signal?.aborted) {
-          yield { type: 'error', content: 'Execution aborted' };
+          const reason = options.signal.reason;
+          const abortMessage = reason instanceof Error
+            ? reason.message
+            : typeof reason === 'string' && reason.trim().length > 0
+              ? reason
+              : 'Execution aborted';
+          yield { type: 'error', content: abortMessage };
           break;
         }
 
@@ -489,6 +567,18 @@ export class DMLRunner {
       }
     }
 
+    // Queue for streaming and internal runtime events
+    const streamQueue: DMLEvent[] = [];
+    let streamResolve: (() => void) | null = null;
+
+    const emitRunnerEvent = (event: DMLEvent) => {
+      streamQueue.push(event);
+      if (streamResolve) {
+        streamResolve();
+        streamResolve = null;
+      }
+    };
+
     // Extract memory from payload (now passed via state threading)
     const memory = this.extractMemoryFromPayload(rawPayload);
 
@@ -501,16 +591,14 @@ export class DMLRunner {
       ? [...initialMsgs, ...memory]
       : memory;
     if (initialMsgs) this.initialMessagesApplied = true;
+
+    const preparedMemory = fullMemory;
     
     // Store current memory for getMemory() access
-    this.currentMemory = fullMemory;
+    this.currentMemory = preparedMemory;
 
     const emitToolEvent = (event: DMLEvent) => {
-      streamQueue.push(event);
-      if (streamResolve) {
-        streamResolve();
-        streamResolve = null;
-      }
+      emitRunnerEvent(event);
     };
 
     // Callback for tool output events
@@ -558,19 +646,29 @@ export class DMLRunner {
       options.toolPolicy,
       // executeToolIsolated callback - runs tool in separate engine (no state sharing)
       async (toolName: string, args: Record<string, unknown>) => {
-        return this.executeToolIsolated(toolName, args, augmentedTools, onToolOutput, [], emitToolCall, emitToolEvent);
+        return this.executeToolIsolated(
+          toolName,
+          args,
+          augmentedTools,
+          onToolOutput,
+          {
+            workspacePath: options.workspacePath,
+            signal: options.signal,
+            compaction: options.compaction,
+            toolPolicy: options.toolPolicy,
+          },
+          [],
+          emitToolCall,
+          emitToolEvent,
+        );
       }
     );
-
-    // Queue for streaming events
-    const streamQueue: DMLEvent[] = [];
-    let streamResolve: (() => void) | null = null;
 
     // Run agent loop with streaming support
     const resultPromise = runAgentLoop({
       taskDescription,
       outputVars,
-      memory: fullMemory,
+      memory: preparedMemory,
       tools: availableTools,
       modelOptions: {
         model: this.options.model,
@@ -604,6 +702,20 @@ export class DMLRunner {
           streamResolve = null;
         }
       },
+      onBeforeModelCall: async (messages) => this.applyCompactionBindings({
+        messages,
+        scope: 'loop',
+        trigger: 'before_model_call',
+        options,
+        executionContext: {
+          workspacePath: options.workspacePath,
+          signal: options.signal,
+          compaction: options.compaction,
+        },
+        registeredTools: options.tools,
+        toolPolicy: options.toolPolicy,
+        emitEvent: emitRunnerEvent,
+      }),
       onAskUser: options.onInputRequired,
       signal: options.signal,
     });
@@ -633,11 +745,20 @@ export class DMLRunner {
           // In streaming mode, output was already shown via onStream - don't repeat it
           // The outputs array is kept for memory/history purposes only
 
+          const finalizedMemory = [
+            ...preparedMemory.filter((message) => message.role === 'system'),
+            ...raceResult.result.messages,
+          ];
+
+          while (streamQueue.length > 0) {
+            yield streamQueue.shift()!;
+          }
+
           // Update memory with full agent conversation
-          this.currentMemory = raceResult.result.messages;
+          this.currentMemory = finalizedMemory;
 
           // Post result back to Prolog
-          this.postAgentResult(raceResult.result);
+          this.postAgentResult(raceResult.result, finalizedMemory);
           return;
         }
         // Otherwise continue loop to yield queued stream events
@@ -666,11 +787,20 @@ export class DMLRunner {
         yield { type: 'output', content: output };
       }
 
+      const finalizedMemory = [
+        ...preparedMemory.filter((message) => message.role === 'system'),
+        ...result.messages,
+      ];
+
+      while (streamQueue.length > 0) {
+        yield streamQueue.shift()!;
+      }
+
       // Update memory with full agent conversation
-      this.currentMemory = result.messages;
+      this.currentMemory = finalizedMemory;
 
       // Post result back to Prolog
-      this.postAgentResult(result);
+      this.postAgentResult(result, finalizedMemory);
     }
   }
 
@@ -979,6 +1109,7 @@ export class DMLRunner {
     args: Record<string, unknown>,
     registeredTools: Map<string, ToolDefinition>,
     onOutput: (text: string) => void,
+    runContext: RunnerExecutionContext,
     excludedTools: string[] = [],
     onToolCall?: (toolName: string, args: Record<string, unknown>) => void,
     onToolEvent?: (event: DMLEvent) => void,
@@ -1159,6 +1290,7 @@ export class DMLRunner {
             
             // Extract memory
             const memory = this.extractMemoryFromPayload(payload as Record<string, unknown>);
+            const preparedMemory = memory;
             
             if (process.env.DEBUG_RUNNER) {
               console.log('[RUNNER] Tool agent loop request:', taskDescription.substring(0, 100));
@@ -1174,11 +1306,12 @@ export class DMLRunner {
             
             // Build tools for nested agent with filtered tool list
             const nestedToolCallback = async (nestedToolName: string, nestedArgs: Record<string, unknown>) => {
-              return this.executeToolIsolated(
+                return this.executeToolIsolated(
                 nestedToolName,
                 nestedArgs,
                 registeredTools,
                 onOutput,
+                  runContext,
                 nestedExcludedTools,
                 onToolCall,
                 onToolEvent,
@@ -1196,7 +1329,7 @@ export class DMLRunner {
               const result = await runAgentLoop({
                 taskDescription,
                 outputVars,
-                memory,
+                memory: preparedMemory,
                 tools: availableTools,
                 modelOptions: {
                   model: this.options.model,
@@ -1214,19 +1347,35 @@ export class DMLRunner {
                 },
                 onStream: () => {}, // No streaming for nested
                 onToolCall: onToolCall ?? (() => {}), // Forward tool call events to parent
+                onBeforeModelCall: async (messages) => this.applyCompactionBindings({
+                  messages,
+                  scope: 'loop',
+                  trigger: 'before_model_call',
+                  options: { compaction: runContext.compaction },
+                  executionContext: runContext,
+                  registeredTools,
+                  toolPolicy: runContext.toolPolicy ?? null,
+                  emitEvent: onToolEvent,
+                }),
                 onAskUser: async () => { 
                   // Nested agent loops don't support ask_user directly
                   // If needed, the tool should use exec(ask_user, ...) instead
                   return ''; 
                 },
+                signal: runContext.signal,
               });
               
               if (process.env.DEBUG_RUNNER) {
                 console.log('[RUNNER] Nested agent loop completed:', result.success);
               }
+
+              const finalizedMemory = [
+                ...preparedMemory.filter((message) => message.role === 'system'),
+                ...result.messages,
+              ];
               
               // Post result back to tool engine
-              this.postToolAgentResult(toolEngineId, result);
+              this.postToolAgentResult(toolEngineId, result, finalizedMemory);
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               if (process.env.DEBUG_RUNNER) {
@@ -1237,7 +1386,7 @@ export class DMLRunner {
                 success: false,
                 outputs: [],
                 variables: {},
-                messages: memory,
+                messages: preparedMemory.filter((message) => message.role !== 'system'),
               });
             }
             break;
@@ -1279,6 +1428,120 @@ export class DMLRunner {
     }
   }
 
+  private async applyCompactionBindings(params: {
+    messages: MemoryMessage[];
+    scope: 'loop' | 'session' | 'run';
+    trigger: 'before_model_call' | 'before_user_message' | 'before_task' | 'after_task';
+    options: { compaction?: CompactionOptions };
+    executionContext: RunnerExecutionContext;
+    registeredTools: Map<string, ToolDefinition>;
+    toolPolicy: ToolPolicy | null;
+    emitEvent?: (event: DMLEvent) => void;
+  }): Promise<MemoryMessage[]> {
+    const resolved = resolveCompactionOptions(this.options.compaction, params.options.compaction);
+    const bindings = getCompactionBindings(resolved, params.scope, params.trigger);
+    if (bindings.length === 0) {
+      return params.messages;
+    }
+
+    let messages = params.messages;
+    for (const binding of bindings) {
+      const result = await executeCompactor({
+        binding,
+        messages,
+        execute: (request) => this.runBoundCompactor({
+          request,
+          executionContext: params.executionContext,
+          registeredTools: params.registeredTools,
+          toolPolicy: params.toolPolicy,
+        }),
+      });
+      params.emitEvent?.(result.event);
+      messages = result.messages;
+    }
+
+    return messages;
+  }
+
+  private async runBoundCompactor(params: {
+    request: CompactorExecutionRequest;
+    executionContext: RunnerExecutionContext;
+    registeredTools: Map<string, ToolDefinition>;
+    toolPolicy: ToolPolicy | null;
+  }): Promise<CompactorExecutionResponse> {
+    const { binding, params: compactorParams } = params.request;
+    const code = await this.resolveCompactorSource(
+      binding.compactor.source,
+      binding.compactor.sourceType,
+      params.executionContext.workspacePath,
+    );
+
+    const model = binding.compactor.model ?? this.options.model;
+    const provider = binding.compactor.provider
+      ?? (binding.compactor.model ? detectProvider(model) : this.options.provider);
+    const compactorRunner = new DMLRunner(this.swipl, {
+      ...this.options,
+      model,
+      provider,
+      streaming: false,
+      compaction: { enabled: false },
+    });
+    const { signal, dispose } = createChildAbortController(params.executionContext.signal, binding.compactor.timeoutMs);
+
+    try {
+      const tools = binding.compactor.inheritTools ? params.registeredTools : new Map<string, ToolDefinition>();
+      let answer = '';
+      let errorContent = '';
+      for await (const event of compactorRunner.run(code, {
+        workspacePath: params.executionContext.workspacePath,
+        gasLimit: binding.compactor.gasLimit,
+        params: compactorParams,
+        tools,
+        toolPolicy: binding.compactor.toolPolicy ?? (binding.compactor.inheritTools ? params.toolPolicy : null) ?? null,
+        onInputRequired: async (prompt) => {
+          throw new Error(`Compactor requested unexpected input: ${prompt}`);
+        },
+        signal,
+        compaction: { enabled: false },
+      })) {
+        if (event.type === 'answer' && event.content) {
+          answer = event.content;
+        } else if (event.type === 'error' && event.content) {
+          errorContent = event.content;
+        }
+      }
+
+      return {
+        answer,
+        error: errorContent || undefined,
+      };
+    } finally {
+      dispose();
+      await compactorRunner.dispose();
+    }
+  }
+
+  private async resolveCompactorSource(
+    source: string,
+    sourceType: 'inline' | 'file' | 'auto',
+    workspacePath?: string,
+  ): Promise<string> {
+    if (sourceType === 'inline') {
+      return source;
+    }
+
+    const basePath = workspacePath ?? process.cwd();
+    const candidatePath = path.isAbsolute(source) ? source : path.resolve(basePath, source);
+    try {
+      return await fs.readFile(candidatePath, 'utf8');
+    } catch (error) {
+      if (sourceType === 'file') {
+        throw error;
+      }
+      return source;
+    }
+  }
+
   /**
    * Extract memory from payload (now passed via state threading)
    */
@@ -1302,6 +1565,12 @@ export class DMLRunner {
     });
   }
 
+  private serializeMemoryMessages(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>): string {
+    return messages
+      .map((message) => `message{role: ${message.role}, content: ${this.toPrologTerm(message.content)}}`)
+      .join(', ');
+  }
+
   /**
    * Post agent loop result back to Prolog
    */
@@ -1310,19 +1579,18 @@ export class DMLRunner {
     outputs: string[];
     variables: Record<string, unknown>;
     messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
-  }): void {
+  }, fullMemory?: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>): void {
     // Keys need to be quoted because they start with uppercase (Var1, Var2, etc.)
     const varsStr = Object.entries(result.variables)
       .map(([k, v]) => `'${k}': ${this.toPrologTerm(v)}`)
       .join(', ');
 
     // Convert messages to Prolog list format
-    const messagesStr = result.messages
-      .map(m => `message{role: ${m.role}, content: ${this.toPrologTerm(m.content)}}`)
-      .join(', ');
+    const messagesStr = this.serializeMemoryMessages(result.messages);
+    const fullMemoryStr = this.serializeMemoryMessages(fullMemory ?? []);
 
     this.query(
-      `deepclause_mi:post_agent_result('${this.sessionId}', ${result.success}, vars{${varsStr}}, [${messagesStr}])`
+      `deepclause_mi:post_agent_result('${this.sessionId}', ${result.success}, vars{${varsStr}}, [${messagesStr}], [${fullMemoryStr}])`
     );
   }
 
@@ -1357,7 +1625,8 @@ export class DMLRunner {
       outputs: string[];
       variables: Record<string, unknown>;
       messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
-    }
+    },
+    fullMemory?: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   ): void {
     // Keys need to be quoted because they start with uppercase (Var1, Var2, etc.)
     const varsStr = Object.entries(result.variables)
@@ -1365,12 +1634,11 @@ export class DMLRunner {
       .join(', ');
 
     // Convert messages to Prolog list format
-    const messagesStr = result.messages
-      .map(m => `message{role: ${m.role}, content: ${this.toPrologTerm(m.content)}}`)
-      .join(', ');
+    const messagesStr = this.serializeMemoryMessages(result.messages);
+    const fullMemoryStr = this.serializeMemoryMessages(fullMemory ?? []);
 
     this.query(
-      `deepclause_mi:post_tool_agent_result('${this.sessionId}', '${toolEngineId}', ${result.success}, vars{${varsStr}}, [${messagesStr}])`
+      `deepclause_mi:post_tool_agent_result('${this.sessionId}', '${toolEngineId}', ${result.success}, vars{${varsStr}}, [${messagesStr}], [${fullMemoryStr}])`
     );
   }
 

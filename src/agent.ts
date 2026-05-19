@@ -65,6 +65,7 @@ export interface AgentLoopOptions {
   onStream?: (chunk: string, done: boolean) => void;
   onToolCall?: (toolName: string, args: Record<string, unknown>) => void;
   onUsage?: (usage: import('./types.js').LLMUsage) => void;
+  onBeforeModelCall?: (messages: MemoryMessage[]) => Promise<MemoryMessage[]>;
   onAskUser: (prompt: string) => Promise<string>;
   signal?: AbortSignal;
   streaming?: boolean;
@@ -89,6 +90,27 @@ interface ResponseMessagesResolution {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeMessageContent(content: unknown): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return String(content);
+  }
+}
+
+function normalizeMessagesForCompaction(messages: Array<{ role: string; content: unknown }>): MemoryMessage[] {
+  return messages
+    .filter((message) => message.role === 'system' || message.role === 'user' || message.role === 'assistant')
+    .map((message) => ({
+      role: message.role as 'system' | 'user' | 'assistant',
+      content: normalizeMessageContent(message.content),
+    }));
 }
 
 function getStreamResponseAwaitTimeoutMs(): number {
@@ -452,6 +474,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
     try {
       await tick();
+
+      if (options.onBeforeModelCall) {
+        messages = await options.onBeforeModelCall(normalizeMessagesForCompaction(messages));
+      }
       
       if (streaming && onStream) {
         latestRawProviderResponse = null;

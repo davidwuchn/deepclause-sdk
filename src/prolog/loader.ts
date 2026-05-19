@@ -3,7 +3,7 @@
  */
 
 import { readFileSync, existsSync, mkdirSync } from 'fs';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, join, resolve } from 'path';
 
 // Query interface matching swipl-wasm
@@ -49,6 +49,11 @@ const PROLOG_SRC_DIR = (() => {
   const sibling = join(__dirname, 'prolog-src');
   if (existsSync(sibling)) return sibling;
   return join(__dirname, '..', 'prolog-src');
+})();
+
+const SWIPL_WASM_ENTRY_URL = (() => {
+  const entryPath = join(__dirname, '..', '..', 'vendor', 'swipl-wasm', 'dist', 'index.js');
+  return pathToFileURL(entryPath).href;
 })();
 
 /**
@@ -127,8 +132,9 @@ export function getWorkspacePath(): string | null {
  * Initialize SWI-Prolog WASM
  */
 async function initializeProlog(): Promise<SWIPLModule> {
-  // Dynamic import of swipl-wasm (CommonJS module)
-  const SWIPL = await import('swipl-wasm');
+  // Load the vendored CommonJS entry directly so published installs do not depend
+  // on npm resolving a local file: dependency at consumer install time.
+  const SWIPL = await import(SWIPL_WASM_ENTRY_URL);
   const initSWIPL = SWIPL.default || SWIPL;
   
   // Create WASM instance

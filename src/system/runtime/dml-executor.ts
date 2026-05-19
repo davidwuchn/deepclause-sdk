@@ -1,6 +1,7 @@
+import * as path from 'path';
 import { createDeepClause } from '../../sdk.js';
 import type { Config } from '../../cli/config.js';
-import { applyResolvedModelConfig } from '../../cli/config.js';
+import { applyResolvedModelConfig, resolveCompactionConfig } from '../../cli/config.js';
 import type { DMLEvent, DeepClauseSDK } from '../../types.js';
 import {
   createLocalSkillCatalogRuntime,
@@ -21,6 +22,7 @@ export interface DmlExecutionContext {
 export interface ExecuteDmlOptions {
   dmlCode: string;
   config: Config;
+  workspaceRoot?: string;
   workspacePath: string;
   selection: ResolvedModelConfig;
   args?: string[];
@@ -70,11 +72,13 @@ export async function executeDml(options: ExecuteDmlOptions): Promise<ExecuteDml
 
 async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDmlResult> {
   applyResolvedModelConfig(options.selection);
+  const resolvedWorkspaceRoot = path.resolve(options.workspaceRoot ?? process.cwd());
 
   const shell = createShellManager({
     workspacePath: options.workspacePath,
     sandbox: options.sandbox,
     network: options.config.agentvm?.network ?? false,
+    hostConfig: options.config.shell,
   });
 
   const sdk = await createDeepClause({
@@ -87,6 +91,7 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
     streaming: options.stream,
     debug: options.verbose,
     maxTokens: 65536,
+    compaction: resolveCompactionConfig(options.config, resolvedWorkspaceRoot),
   });
 
   const result: ExecuteDmlResult = {
