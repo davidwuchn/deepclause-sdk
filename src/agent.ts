@@ -11,10 +11,12 @@ import { generateText, streamText, hasToolCall, tool as aiTool } from 'ai';
 import { z } from 'zod';
 import type { ToolDefinition, MemoryMessage, TypedVar } from './types.js';
 import { createModelProvider, type RawProviderResponseSnapshot } from './prolog/bridge.js';
+import { readSystemPromptAsset } from './system/assets/index.js';
 
 /** Maximum number of retries for LLM error finish reasons */
 const MAX_ERROR_RETRIES = 3;
 const DEFAULT_STREAM_RESPONSE_AWAIT_TIMEOUT_MS = 2_000;
+const MAX_STALLED_ITERATIONS = 3;
 
 /**
  * Clean Prolog dict markers ($tag, $t) from tool results
@@ -52,6 +54,7 @@ export interface AgentLoopOptions {
   outputVars: (string | TypedVar)[];
   memory: MemoryMessage[];
   tools: Map<string, ToolDefinition>;
+  workspacePath?: string;
   modelOptions: {
     model: string;
     provider: string;
@@ -111,6 +114,77 @@ function normalizeMessagesForCompaction(messages: Array<{ role: string; content:
       role: message.role as 'system' | 'user' | 'assistant',
       content: normalizeMessageContent(message.content),
     }));
+}
+
+function normalizeLoopText(text: string): string {
+  return text.trim().replace(/\s+/g, ' ').toLowerCase().slice(0, 400);
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortJsonValue);
+  }
+
+  if (!isPlainObject(value)) {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entryValue]) => [key, sortJsonValue(entryValue)]),
+  );
+}
+
+function stableSerialize(value: unknown): string {
+  try {
+    return JSON.stringify(sortJsonValue(value));
+  } catch {
+    return String(value);
+  }
+}
+
+function buildIterationSignature(options: {
+  finishReason: string;
+  text: string;
+  toolCalls: Array<{ toolName: string; input: unknown }>;
+  variables: Record<string, unknown>;
+}): string {
+  return stableSerialize({
+    finishReason: options.finishReason,
+    text: normalizeLoopText(options.text),
+    toolCalls: options.toolCalls.map((toolCall) => ({
+      toolName: toolCall.toolName,
+      input: toolCall.input,
+    })),
+    variables: options.variables,
+  });
+}
+
+function buildRecoveryPrompt(outputVars: TypedVar[], repeatedStallCount: number, noToolCalls: boolean): string | null {
+  const resultInstruction = outputVars.length > 0
+    ? `If you can answer now, call set_result for ${outputVars.map((variable) => variable.name).join(', ')} and then finish(true).`
+    : 'If you can answer now, call finish(true).';
+
+  if (repeatedStallCount > 0) {
+    return [
+      'You are repeating the same response or action without making progress.',
+      'Do not repeat the previous step.',
+      resultInstruction,
+      'Otherwise call one different tool, or call finish(false) if the task is blocked.',
+    ].join(' ');
+  }
+
+  if (noToolCalls) {
+    return [
+      'You did not call any tool and you did not finish the subtask.',
+      resultInstruction,
+      'If more information is required, call exactly one relevant tool.',
+      'If the task cannot be completed, call finish(false).',
+    ].join(' ');
+  }
+
+  return null;
 }
 
 function getStreamResponseAwaitTimeoutMs(): number {
@@ -288,6 +362,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let finished = false;
   let success = false;
   let errorRetryCount = 0;
+  let previousIterationSignature: string | null = null;
+  let repeatedStallCount = 0;
 
   // Build the AI SDK tools using Zod schemas
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -361,7 +437,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const reservedToolNames = ['finish', 'set_result'];
 
   // Add user-defined tools - convert JSON Schema to Zod
-  for (const [name, tool] of tools) {
+  for (const [name, tool] of options.tools) {
     if (reservedToolNames.includes(name)) {
       continue;
     }
@@ -385,7 +461,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   }
 
   // Build the base system prompt with task instructions and tools
-  const baseSystemPrompt = buildSystemPrompt(taskDescription, normalizedOutputVars, tools);
+  const baseSystemPrompt = await buildSystemPrompt({
+    taskDescription,
+    outputVars: normalizedOutputVars,
+    tools,
+    workspacePath: options.workspacePath,
+  });
 
   // Extract system context from memory (user-defined system() calls)
   const systemContext = memory
@@ -516,6 +597,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
         // Collect results from fullStream
         let fullText = '';
+        const toolCallsThisIteration: Array<{ toolName: string; input: unknown }> = [];
         let ttftMs: number | null = null;       // time to first TEXT token
         let ttfeMs: number | null = null;       // time to first event (any type)
         let ttfrMs: number | null = null;       // time to first reasoning token
@@ -527,7 +609,6 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         let toolInputChunks = 0;
         let toolInputChars = 0;
         let finishReason: string = 'other';
-        let lastToolCallName: string | null = null;
         let stepUsage: { inputTokens?: number; outputTokens?: number; totalTokens?: number; inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number }; outputTokenDetails?: { reasoningTokens?: number } } | null = null;
         let lastEventMs = apiCallMs;
         const eventCounts: Record<string, number> = {};
@@ -565,7 +646,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
             case 'tool-call':
               if (firstToolCallMs === null) firstToolCallMs = nowMs - apiCallMs;
-              lastToolCallName = part.toolName;
+              toolCallsThisIteration.push({ toolName: part.toolName, input: part.input });
               debugLog(`Tool call: ${part.toolName}`, JSON.stringify(part.input));
               if (onToolCall) {
                 onToolCall(part.toolName, part.input as Record<string, unknown>);
@@ -672,12 +753,28 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           messages.push({ role: 'assistant', content: fullText });
         }
 
+        const iterationSignature = buildIterationSignature({
+          finishReason,
+          text: fullText,
+          toolCalls: toolCallsThisIteration,
+          variables,
+        });
+        repeatedStallCount = iterationSignature === previousIterationSignature ? repeatedStallCount + 1 : 0;
+        previousIterationSignature = iterationSignature;
+
+        if (!finished && repeatedStallCount >= MAX_STALLED_ITERATIONS) {
+          success = false;
+          outputs.push('Agent loop detected repeated non-progressing responses and stopped early.');
+          break;
+        }
+
         // If no tool calls were made, nudge the model to act.
         // This handles 'stop', 'other', and any unexpected finish reason.
-        if (lastToolCallName === null && !finished) {
+        const recoveryPrompt = buildRecoveryPrompt(normalizedOutputVars, repeatedStallCount, toolCallsThisIteration.length === 0);
+        if (recoveryPrompt && !finished) {
           messages.push({
             role: 'user',
-            content: 'Please take action using the available tools, or call finish() when done.',
+            content: recoveryPrompt,
           });
         }
 
@@ -777,12 +874,32 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         // This is the key change - let the SDK handle message formatting
         messages = [...messages, ...getResponseMessages(result.response)];
 
+        const toolCallsThisIteration = (result.toolCalls ?? []).map((toolCall) => ({
+          toolName: toolCall.toolName,
+          input: toolCall.input,
+        }));
+        const iterationSignature = buildIterationSignature({
+          finishReason: result.finishReason,
+          text: result.text,
+          toolCalls: toolCallsThisIteration,
+          variables,
+        });
+        repeatedStallCount = iterationSignature === previousIterationSignature ? repeatedStallCount + 1 : 0;
+        previousIterationSignature = iterationSignature;
+
+        if (!finished && repeatedStallCount >= MAX_STALLED_ITERATIONS) {
+          success = false;
+          outputs.push('Agent loop detected repeated non-progressing responses and stopped early.');
+          break;
+        }
+
         // If no tool calls were made, nudge the model to act.
         // This handles 'stop', 'other', and any unexpected finish reason.
-        if ((!result.toolCalls || result.toolCalls.length === 0) && !finished) {
+        const recoveryPrompt = buildRecoveryPrompt(normalizedOutputVars, repeatedStallCount, toolCallsThisIteration.length === 0);
+        if (recoveryPrompt && !finished) {
           messages.push({
             role: 'user',
-            content: 'Please take action using the available tools, or call finish() when done.',
+            content: recoveryPrompt,
           });
         }
       }
@@ -881,17 +998,14 @@ function getResponseMessages(response: unknown): ResponseMessage[] {
 /**
  * Build the system prompt for the agent
  */
-function buildSystemPrompt(
-  taskDescription: string,
-  outputVars: (string | TypedVar)[],
-  tools: Map<string, ToolDefinition>
-): string {
+async function buildSystemPrompt(options: {
+  taskDescription: string;
+  outputVars: TypedVar[];
+  tools: Map<string, ToolDefinition>;
+  workspacePath?: string;
+}): Promise<string> {
   const toolDescriptions: string[] = [];
-  
-  // Normalize outputVars to TypedVar[]
-  const normalizedOutputVars: TypedVar[] = outputVars.map(v => 
-    typeof v === 'string' ? { name: v, type: 'string' } : v
-  );
+  const normalizedOutputVars = options.outputVars;
   
   // Add finish tool description
   toolDescriptions.push('- finish(success: boolean): Signal task completion. Call finish(true) when done successfully, or finish(false) if the task cannot be completed.');
@@ -906,7 +1020,7 @@ function buildSystemPrompt(
   }
   
   // Add user-defined tools
-  for (const [name, tool] of tools) {
+  for (const [name, tool] of options.tools) {
     if (name === 'finish' || name === 'set_result') continue;
     
     // Build parameter signature from schema
@@ -924,53 +1038,26 @@ function buildSystemPrompt(
     toolDescriptions.push(`- ${name}(${paramList}): ${tool.description}`);
   }
   
-  let prompt = `You are an AI agent executing a subtask within a larger workflow. Your job is to complete the following subtask:
+  const resultSection = normalizedOutputVars.length > 0
+    ? [
+        'You must set all named results before finishing successfully.',
+        ...normalizedOutputVars.map((variable) => {
+          const typeStr = variable.type === 'array' && variable.itemType ? `array<${variable.itemType}>` : variable.type;
+          return `- ${variable.name}: ${typeStr}`;
+        }),
+      ].join('\n')
+    : 'No named result variables are required. Call finish(true) as soon as the subtask is complete.';
 
-Subtask: ${taskDescription}
+  const stallGuidance = [
+    '- Do not repeat the same explanation or identical tool call if the previous turn did not change the state.',
+    '- If you are stuck, either choose one different tool or call finish(false).',
+    '- Once enough information exists, stop planning, set results if needed, and finish.',
+  ].join('\n');
 
-Available tools:
-
-${toolDescriptions.join('\n')}
-
-Workflow:
-1. Analyze the task and gather any needed information using available tools.
-2. Once the task is complete, call finish(true).
-
-If you determine the task cannot be completed, call finish(false) immediately.`;
-
-  if (normalizedOutputVars.length > 0) {
-    const varList = normalizedOutputVars.map(v => {
-      const typeStr = v.type === 'array' && v.itemType ? `array<${v.itemType}>` : v.type;
-      return `"${v.name}" (${typeStr})`;
-    }).join(', ');
-    
-    prompt += `
-
-IMPORTANT: You MUST use set_result() to store values for: ${varList}
-Call set_result for each variable before calling finish.
-The tool will enforce strict type checking based on the variable type.`;
-  }
-
-  prompt += `
-
-CRITICAL INSTRUCTIONS:
-- You MUST use the structured tool-calling interface to invoke tools.
-- NEVER write code syntax like print(), default_api.X(), or function_name() in your text response.
-- NEVER describe tool calls in text - actually invoke them using the tool interface.
-- Each tool call should be a separate structured function call, not embedded in text.
-- When storing values, pass simple strings without code formatting or escaping unless the type is 'string'.
-
-EXAMPLES OF CORRECT TOOL USAGE:
-
-To complete a task successfully, invoke the finish tool with:
-  Tool: finish
-  Arguments: { "success": true }
-
-WRONG (do NOT do this):
-- print(finish(success=true))
-- default_api.set_result(variable="X", value="Y")
-- I will now call finish(true)
-- \`\`\`finish(success=true)\`\`\``;
-
-  return prompt;
+  const template = await readSystemPromptAsset('task', { workspacePath: options.workspacePath });
+  return template
+    .replace('{TASK_DESCRIPTION}', options.taskDescription)
+    .replace('{TOOL_DESCRIPTIONS}', toolDescriptions.join('\n'))
+    .replace('{RESULT_SECTION}', resultSection)
+    .replace('{STALL_GUIDANCE}', stallGuidance);
 }

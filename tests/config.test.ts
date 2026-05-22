@@ -129,6 +129,7 @@ describe('Config Module', () => {
       
       expect(result.dmlBase).toBe('.deepclause/tools');
       expect(result.workspace).toBe('./');
+        expect(result.shell).toEqual({ wrapper: 'auto', strictIsolation: false });
     });
   });
 
@@ -178,6 +179,24 @@ describe('Config Module', () => {
       expect(config.model).toBe('claude-3-opus');
     });
 
+
+    describe('loadConfig shell settings', () => {
+      it('should load shell wrapper preferences from config', async () => {
+        vol.fromJSON({
+          '/workspace/.deepclause/config.json': JSON.stringify({
+            model: 'gpt-4o',
+            shell: {
+              wrapper: 'bwrap',
+              strictIsolation: true,
+            },
+          }),
+        });
+
+        const config = await loadConfig('/workspace');
+
+        expect(config.shell).toEqual({ wrapper: 'bwrap', strictIsolation: true });
+      });
+    });
     it('should fail if config exists without --force', async () => {
       vol.fromJSON({
         '/workspace/.deepclause/config.json': JSON.stringify({ model: 'existing' })

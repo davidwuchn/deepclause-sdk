@@ -133,7 +133,7 @@ interface SessionExecutionStartRecord {
   executionKind: SessionExecutionKind;
   inputText: string;
   skillName?: string;
-  args?: string[];
+  args?: unknown[];
   modelId?: string;
 }
 
@@ -242,6 +242,37 @@ export async function getConductorSessionDetail(
     usageByModel,
     executionLogPath: paths.executionLogPath,
   };
+}
+
+export async function appendConductorSessionMessages(
+  workspaceRoot = process.cwd(),
+  sessionId: string,
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+): Promise<void> {
+  if (messages.length === 0) {
+    return;
+  }
+
+  const paths = getSessionPaths(workspaceRoot, sessionId);
+  await readRequiredSessionMetadata(paths.dir);
+
+  let appended = false;
+  for (const message of messages) {
+    if ((message.role !== 'user' && message.role !== 'assistant') || !message.content.trim()) {
+      continue;
+    }
+
+    await appendSessionMessage(paths.messagesPath, {
+      role: message.role,
+      content: message.content,
+      timestamp: new Date().toISOString(),
+    });
+    appended = true;
+  }
+
+  if (appended) {
+    await touchSession(workspaceRoot, sessionId);
+  }
 }
 
 export async function runConductorTurn(
@@ -665,7 +696,7 @@ export function createSessionExecutionLogWriter(options: {
   executionKind: SessionExecutionKind;
   inputText: string;
   skillName?: string;
-  args?: string[];
+  args?: unknown[];
   modelId?: string;
 }): SessionExecutionLogWriter {
   const logPath = getSessionPaths(options.workspaceRoot, options.sessionId).executionLogPath;

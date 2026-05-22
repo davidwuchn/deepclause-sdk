@@ -33,7 +33,7 @@ export interface LocalSkillCatalogEntry {
 export interface ExecuteNestedSkillRequest {
   slug: string;
   dmlCode: string;
-  args: string[];
+  args: unknown[];
   params: Record<string, unknown>;
   currentSkillSlug: string;
   invocationStack: string[];
@@ -117,7 +117,7 @@ export function createLocalSkillCatalogRuntime(
         throw new Error(`run_skill exceeded maximum depth of ${maxDepth}`);
       }
 
-      const childArgs = normalizeStringArray(args.args);
+      const childArgs = normalizeRuntimeArgList(args.args);
       const { dmlCode, meta } = await loadSkillProgram(options.workspaceRoot, slug);
       const toolCheck = verifyRuntimeToolsAvailable(options.config, meta?.tools ?? []);
       if (!toolCheck.available) {
@@ -155,14 +155,33 @@ function isSystemSkillSlug(slug: string): boolean {
   return slug.startsWith('_');
 }
 
-function normalizeStringArray(value: unknown): string[] {
-  if (!value) {
+function normalizeRuntimeArgList(value: unknown): unknown[] {
+  if (value === undefined || value === null) {
     return [];
   }
+
   if (Array.isArray(value)) {
-    return value.map(String);
+    return value;
   }
-  return [String(value)];
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (
+      (trimmed.startsWith('[') && trimmed.endsWith(']'))
+      || (trimmed.startsWith('{') && trimmed.endsWith('}'))
+    ) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return Array.isArray(parsed) ? parsed : [parsed];
+      } catch {
+        return [value];
+      }
+    }
+
+    return [value];
+  }
+
+  return [value];
 }
 
 async function loadSkillProgram(

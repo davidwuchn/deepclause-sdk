@@ -99,13 +99,13 @@ describe('extractParameters', () => {
     ]);
   });
 
-  it('should extract multiple parameters sorted alphabetically', () => {
+  it('should preserve agent_main parameter order', () => {
     const dml = `agent_main(URL, Depth, Format) :- crawl(URL, Depth, Format).`;
     const params = extractParameters(dml);
     expect(params).toHaveLength(3);
-    expect(params[0].name).toBe('depth');
-    expect(params[1].name).toBe('format');
-    expect(params[2].name).toBe('u_r_l'); // URL becomes u_r_l due to uppercase handling
+    expect(params[0]).toEqual({ name: 'u_r_l', position: 0, required: true });
+    expect(params[1]).toEqual({ name: 'depth', position: 1, required: true });
+    expect(params[2]).toEqual({ name: 'format', position: 2, required: true });
   });
 
   it('should handle no parameters', () => {
@@ -116,7 +116,7 @@ describe('extractParameters', () => {
   it('should convert PascalCase to snake_case', () => {
     const dml = `agent_main(SearchQuery, MaxResults, OutputFormat) :- process.`;
     const params = extractParameters(dml);
-    expect(params.map(p => p.name)).toEqual(['max_results', 'output_format', 'search_query']);
+    expect(params.map(p => p.name)).toEqual(['search_query', 'max_results', 'output_format']);
   });
 
   it('should handle complex whitespace', () => {

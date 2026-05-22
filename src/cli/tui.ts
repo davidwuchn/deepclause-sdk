@@ -9,6 +9,7 @@ import { getConfigPath, loadConfig, resolveModelSlot, setModel, type ModelSlot }
 import { run, type RunResult as CliRunResult } from './run.js';
 import { formatToolArgs } from './tool-args.js';
 import {
+  appendConductorSessionMessages,
   createSessionExecutionLogWriter,
   createLocalSkill,
   createConductorSession,
@@ -46,6 +47,7 @@ const BUSY_RENDER_INTERVAL_MS = 40;
 const TYPING_RENDER_INTERVAL_MS = 90;
 const COMBINING_MARK_RE = /\p{Mark}/u;
 const EXTENDED_PICTOGRAPHIC_RE = /\p{Extended_Pictographic}/u;
+const MAX_PERSISTED_SHELL_STREAM_CHARS = 4000;
 const TEXT_FILE_EXTENSIONS = new Set([
   '.dml', '.md', '.txt', '.json', '.yaml', '.yml', '.toml', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
   '.css', '.scss', '.html', '.sql', '.py', '.sh', '.bash', '.zsh', '.pro', '.pl', '.csv', '.env', '.example',
@@ -256,7 +258,7 @@ export type ParsedTuiInput =
   | { kind: 'text'; prompt: string }
   | { kind: 'builtin'; name: BuiltinSlashCommand; rawArgs: string; args: string[] }
   | { kind: 'skill'; name: string; rawArgs: string; args: string[] }
-  | { kind: 'shell'; command: string };
+  | { kind: 'shell'; command: string; persistOutput: boolean };
 
 export interface SlashCompletionResult {
   value: string;
@@ -1379,17 +1381,17 @@ class FullscreenTui {
     }
   }
 
-  private async executeShellCommand(commandText: string): Promise<void> {
+  private async executeShellCommand(commandText: string, persistOutput = false): Promise<void> {
     const trimmedCommand = commandText.trim();
     if (!trimmedCommand) {
-      this.statusLine = 'Enter a shell command after !.';
+      this.statusLine = 'Enter a shell command after ! or !!.';
       this.requestRender();
       return;
     }
 
     const sessionId = this.selectedSessionId || 'global';
     const activity = this.activityFor(sessionId);
-    this.lastSubmittedInput = { kind: 'shell', command: trimmedCommand };
+    this.lastSubmittedInput = { kind: 'shell', command: trimmedCommand, persistOutput };
     this.focusedPane = 'messages';
     this.paneScroll.messages = 0;
     this.paneScroll.process = 0;
@@ -1397,14 +1399,15 @@ class FullscreenTui {
       role: 'system',
       kind: 'output',
       tag: 'shell',
-      content: `!${trimmedCommand}`,
+      content: `${persistOutput ? '!!' : '!'}${trimmedCommand}`,
     }, 'shell');
-    activity.pushLine(`shell !${trimmedCommand}`);
+    activity.pushLine(`shell ${persistOutput ? '!!' : '!'}${trimmedCommand}`);
     this.busy = true;
     this.currentAbortController = new AbortController();
     this.startAnimation();
-    this.statusLine = `Running !${trimmedCommand}...`;
+    this.statusLine = `Running ${persistOutput ? '!!' : '!'}${trimmedCommand}...`;
     this.requestRender();
+    let persistenceStarted = false;
 
     try {
       const result = await runShellCommand(this.workspaceRoot, trimmedCommand, {
@@ -1418,15 +1421,30 @@ class FullscreenTui {
 
       activity.finish();
       await this.refreshCommands();
-      this.finishExecutionPreview(result.success
-        ? { persist: true, finalText: formatShellCommandSummary(result) }
-        : { persist: true, error: formatShellCommandSummary(result) });
-      this.statusLine = result.success ? 'Shell command finished.' : 'Shell command failed.';
+
+      if (persistOutput) {
+        persistenceStarted = true;
+        const persistedSessionId = await this.persistShellCommandResult(trimmedCommand, result);
+        await this.refreshSessions({ createIfMissing: true, selectedSessionId: persistedSessionId });
+        this.finishExecutionPreview({ persist: false });
+        this.statusLine = result.success
+          ? 'Shell command finished and was added to the session.'
+          : 'Shell command failed and its output was added to the session.';
+      } else {
+        this.finishExecutionPreview(result.success
+          ? { persist: true, finalText: formatShellCommandSummary(result) }
+          : { persist: true, error: formatShellCommandSummary(result) });
+        this.statusLine = result.success ? 'Shell command finished.' : 'Shell command failed.';
+      }
     } catch (error) {
       activity.finish();
       const message = (error as Error).message;
       this.finishExecutionPreview({ persist: true, error: message });
-      this.statusLine = isAbortError(error) ? 'Shell command cancelled.' : 'Shell command failed.';
+      this.statusLine = isAbortError(error)
+        ? 'Shell command cancelled.'
+        : persistOutput && persistenceStarted
+          ? 'Shell command finished, but saving its transcript failed.'
+          : 'Shell command failed.';
     } finally {
       this.busy = false;
       this.currentAbortController = null;
@@ -1839,6 +1857,7 @@ class FullscreenTui {
             '',
             'Use F10 or Ctrl+G for the menu bar, Ctrl+W to cycle panes, and /cancel to stop a running execution.',
             'Type !<command> to run a direct shell command in the configured workspace shell.',
+            'Type !!<command> to run a shell command and append its transcript to the active session.',
             'The Skills and Files menus open searchable pickers, and Ctrl+P opens the action palette directly.',
           ].join('\n'),
           { preferredExtension: '.txt' },
@@ -2488,7 +2507,7 @@ class FullscreenTui {
       return;
     }
     if (this.lastSubmittedInput.kind === 'shell') {
-      await this.executeShellCommand(this.lastSubmittedInput.command);
+      await this.executeShellCommand(this.lastSubmittedInput.command, this.lastSubmittedInput.persistOutput);
       return;
     }
     if (this.lastSubmittedInput.kind === 'builtin') {
@@ -2926,6 +2945,26 @@ class FullscreenTui {
     return created;
   }
 
+  private async persistShellCommandResult(command: string, result: ShellExecResult): Promise<string> {
+    let sessionId = this.selectedSessionId;
+    if (!sessionId) {
+      await this.refreshSessions({ createIfMissing: true });
+      sessionId = this.selectedSessionId;
+    }
+
+    if (!sessionId) {
+      throw new Error('No conductor session available to persist shell output.');
+    }
+
+    await appendConductorSessionMessages(
+      this.workspaceRoot,
+      sessionId,
+      buildPersistedShellTranscript(command, result),
+    );
+
+    return sessionId;
+  }
+
   private requestRender(): void {
     if (this.renderTimer) {
       return;
@@ -3187,6 +3226,7 @@ class FullscreenTui {
       `Conductor Prompt ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.conductorPrompt)}`,
       `Skill Creator DML ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.skillCreatorDml)}`,
       `Skill Creator Prompt ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.skillCreatorPrompt)}`,
+      `Task Prompt ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.taskPrompt)}`,
       'Changes apply on the next turn or /compile run. No TUI reload is required.',
       '',
       'Shell Execution',
@@ -3939,6 +3979,50 @@ function formatShellCommandSummary(result: ShellExecResult): string {
   return result.summary || `Shell command failed with exit code ${result.exitCode}.`;
 }
 
+function buildPersistedShellTranscript(
+  command: string,
+  result: ShellExecResult,
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const sections = [
+    '[shell result]',
+    `Command: ${command}`,
+    `Summary: ${formatShellCommandSummary(result)}`,
+    `Backend: ${result.backendLabel ?? result.backend}`,
+    `Exit code: ${result.exitCode}`,
+  ];
+
+  const stdout = truncateShellTranscriptStream(result.stdout, 'stdout');
+  const stderr = truncateShellTranscriptStream(result.stderr, 'stderr');
+  if (stdout) {
+    sections.push(`stdout:\n${stdout}`);
+  }
+  if (stderr) {
+    sections.push(`stderr:\n${stderr}`);
+  }
+  if (!stdout && !stderr) {
+    sections.push('No stdout or stderr output.');
+  }
+
+  return [
+    { role: 'user', content: `[shell command]\n${command}` },
+    { role: 'assistant', content: sections.join('\n\n') },
+  ];
+}
+
+function truncateShellTranscriptStream(content: string, label: 'stdout' | 'stderr'): string {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  if (trimmed.length <= MAX_PERSISTED_SHELL_STREAM_CHARS) {
+    return trimmed;
+  }
+
+  const omitted = trimmed.length - MAX_PERSISTED_SHELL_STREAM_CHARS;
+  return `${trimmed.slice(0, MAX_PERSISTED_SHELL_STREAM_CHARS).trimEnd()}\n\n[${label} truncated: ${omitted} more chars omitted]`;
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
@@ -4044,8 +4128,11 @@ export function parseCommandBarInput(line: string): ParsedTuiInput {
   if (trimmedStart.startsWith('\\!')) {
     return { kind: 'text', prompt: trimmedStart.slice(1).trim() };
   }
+  if (trimmedStart.startsWith('!!')) {
+    return { kind: 'shell', command: trimmedStart.slice(2).trim(), persistOutput: true };
+  }
   if (trimmedStart.startsWith('!')) {
-    return { kind: 'shell', command: trimmedStart.slice(1).trim() };
+    return { kind: 'shell', command: trimmedStart.slice(1).trim(), persistOutput: false };
   }
 
   const trimmed = line.trim();
@@ -4500,6 +4587,7 @@ function buildHelpLines(): string[] {
     '/quit           exit the TUI',
     '/<skill> [args] run a compiled skill directly',
     '!<command>     run a shell command directly in the workspace shell',
+    '!!<command>    run a shell command and add its result to the session transcript',
     'keys',
     'F10 / Ctrl+G    open the menu bar',
     'Ctrl+P          open the action palette',

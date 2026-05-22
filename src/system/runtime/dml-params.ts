@@ -8,8 +8,8 @@ interface DmlMetaLike {
 }
 
 export function buildDmlParams(
-  args: string[],
-  namedParams: Record<string, string> | undefined,
+  args: unknown[],
+  namedParams: Record<string, unknown> | undefined,
   meta: DmlMetaLike | null | undefined,
 ): Record<string, unknown> {
   const params: Record<string, unknown> = {};
@@ -40,7 +40,11 @@ export function buildDmlParams(
   return params;
 }
 
-export function parseDmlArgValue(value: string): unknown {
+export function parseDmlArgValue(value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
   const num = Number(value);
   if (!Number.isNaN(num) && value.trim() !== '') {
     return num;

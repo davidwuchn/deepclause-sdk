@@ -458,12 +458,15 @@ GENERAL GUIDELINES:
   - Install missing packages during skill creation, not inside the final DML skill.
   - Use runtime tools (`web_search`, `news_search`, `url_fetch`) for web content instead of `curl` or `wget`.
   - Use the configured workspace for persistent task files.
-  - Put helper scripts, templates, prompt fixtures, and other skill-specific runtime artifacts in a dedicated `.deepclause` subfolder, typically `.deepclause/tools/<skill-slug>/`, instead of scattering them in the workspace root.
+  - Put helper scripts, templates, prompt fixtures, virtualenvs, and other non-DML runtime artifacts in `.deepclause/tools/lib/<skill-or-tool-name>/` instead of scattering them in the workspace root.
+  - If the helpers belong to a specific skill, use that skill slug for the directory name. If they are shared utilities or the request is not really a reusable skill, choose another descriptive directory name under `.deepclause/tools/lib/`.
+  - For Python dependencies, create a dedicated virtualenv inside that directory, typically `.deepclause/tools/lib/<skill-or-tool-name>/.venv`, instead of reusing one global environment for unrelated skills.
+  - Install packages into that virtualenv and invoke its interpreter or pip explicitly when testing helper scripts.
   - Reference those helper files from DML with workspace-relative paths.
   - If a skill needs to launch a background process and continue, do not use a bare `command &` alone. Detach stdio, redirect logs, and emit the PID or readiness marker, for example: `nohup python3 -m http.server 8080 >/tmp/http.log 2>&1 < /dev/null & echo $!`.
 
 PACKAGE INSTALLATION (done by YOU, the skill creator, via bash - NOT inside DML skills):
-  Python:  bash("pip install --no-cache-dir pandas numpy matplotlib")
+  Python:  bash("python3 -m venv .deepclause/tools/lib/<skill-slug>/.venv && .deepclause/tools/lib/<skill-slug>/.venv/bin/pip install --no-cache-dir pandas numpy matplotlib")
   Node.js: bash("npm install -g typescript")
   System:  bash("sudo apt-get update && sudo apt-get install -y pandoc")
 
@@ -471,6 +474,7 @@ PACKAGE INSTALLATION (done by YOU, the skill creator, via bash - NOT inside DML 
   - Install all required packages BEFORE writing and testing DML code.
   - The DML skill itself should NEVER install packages.
   - Package manager availability and permissions depend on the active shell environment; verify them first.
+  - Prefer one virtualenv per skill or helper bundle when Python dependencies differ.
 </runtime_environment>
 
 <examples>
@@ -692,5 +696,5 @@ BEFORE SUBMITTING YOUR DML CODE, VERIFY ALL OF THESE:
 [ ] No curl/wget in bash - url_fetch for web content
 [ ] No {word} placeholders in system() - use <word> angle brackets for template text
 [ ] No package installation in DML code - dependencies are pre-installed by the skill creator
-[ ] Helper scripts and other skill-specific artifacts live in a dedicated `.deepclause` subfolder
+[ ] Helper scripts, virtualenvs, and other non-DML artifacts live in `.deepclause/tools/lib/<skill-or-tool-name>/`
 </output_checklist>

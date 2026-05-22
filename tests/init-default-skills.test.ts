@@ -73,6 +73,8 @@ describe('deepclause init defaults', () => {
 
     expect(vol.existsSync(`${systemDir}/conductor.dml`)).toBe(true);
     expect(vol.existsSync(`${systemDir}/skill-creator.dml`)).toBe(true);
+    expect(vol.existsSync(`${systemDir}/default-session-compactor.dml`)).toBe(true);
+    expect(vol.existsSync(`${systemDir}/default-loop-compactor.dml`)).toBe(true);
     expect(vol.existsSync(`${systemDir}/CONDUCTOR_PROMPT.md`)).toBe(true);
     expect(vol.existsSync(`${systemDir}/DML_COMPILER_PROMPT.md`)).toBe(true);
     expect(vol.existsSync(recipePath)).toBe(true);
@@ -80,13 +82,36 @@ describe('deepclause init defaults', () => {
 
     const conductorPrompt = vol.readFileSync(`${systemDir}/CONDUCTOR_PROMPT.md`, 'utf8') as string;
     const compilerPrompt = vol.readFileSync(`${systemDir}/DML_COMPILER_PROMPT.md`, 'utf8') as string;
+    const sessionCompactor = vol.readFileSync(`${systemDir}/default-session-compactor.dml`, 'utf8') as string;
+    const loopCompactor = vol.readFileSync(`${systemDir}/default-loop-compactor.dml`, 'utf8') as string;
     const recipe = vol.readFileSync(recipePath, 'utf8') as string;
     const tuiGuide = vol.readFileSync(`${docsDir}/TUI.md`, 'utf8') as string;
 
     expect(conductorPrompt).toContain('# Who you are');
     expect(compilerPrompt).toContain('DeepClause Meta Language');
+    expect(compilerPrompt).toContain('.deepclause/tools/lib/<skill-or-tool-name>/');
+    expect(compilerPrompt).toContain('.venv');
+    expect(sessionCompactor).toContain('messages_json');
+    expect(sessionCompactor).toContain('param(message_count, MessageCount)');
+    expect(sessionCompactor).toContain('param(estimated_tokens, EstimatedTokens)');
+    expect(sessionCompactor).toContain('EstimatedTokens < 50000');
+    expect(loopCompactor).toContain('messages_json');
+    expect(loopCompactor).toContain('param(message_count, MessageCount)');
+    expect(loopCompactor).toContain('param(estimated_tokens, EstimatedTokens)');
+    expect(loopCompactor).toContain('EstimatedTokens < 50000');
     expect(recipe).toContain('DeepClause Coding Workflow');
     expect(recipe).toContain('create a proper skill instead');
     expect(tuiGuide).toContain('# DeepClause TUI Guide');
+  });
+
+  it('seeds the task prompt override during init', async () => {
+    await initConfig('/workspace');
+
+    const systemDir = getSystemDir('/workspace');
+    expect(vol.existsSync(`${systemDir}/TASK_PROMPT.md`)).toBe(true);
+
+    const taskPrompt = vol.readFileSync(`${systemDir}/TASK_PROMPT.md`, 'utf8') as string;
+    expect(taskPrompt).toContain('# DeepClause Task Harness');
+    expect(taskPrompt).toContain('{TASK_DESCRIPTION}');
   });
 });

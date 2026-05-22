@@ -24,7 +24,10 @@ describe('local skill catalog runtime', () => {
     await writeFile(
       join(workspaceRoot, '.deepclause', 'tools', 'search-arxiv.meta.json'),
       JSON.stringify({
+        name: 'Search arXiv',
         parameters: [{ name: 'query', position: 0 }],
+        triggerPhrases: ['search arxiv'],
+        capabilities: ['network'],
         tools: ['web_search'],
         description: 'Search arXiv.',
       }) + '\n',
@@ -53,6 +56,10 @@ describe('local skill catalog runtime', () => {
     expect(catalog.map((entry) => entry.slug)).toEqual(['search-arxiv']);
     expect(catalog[0]).toMatchObject({
       slug: 'search-arxiv',
+      name: 'Search arXiv',
+      usage: 'run_skill(slug: "search-arxiv", args: ["<query>"])',
+      trigger_phrases: ['search arxiv'],
+      capabilities: ['Uses network access'],
       tools: ['web_search'],
     });
   });

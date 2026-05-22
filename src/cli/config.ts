@@ -279,6 +279,10 @@ async function writeSystemOverrideSeeds(systemDir: string): Promise<void> {
       content: readFileSync(getSystemPromptAssetPath('skill-creator'), 'utf8'),
     },
     {
+      fileName: 'TASK_PROMPT.md',
+      content: readFileSync(getSystemPromptAssetPath('task'), 'utf8'),
+    },
+    {
       fileName: 'default-session-compactor.dml',
       content: readFileSync(getSystemCompactorAssetPath('default-session-compactor'), 'utf8'),
     },

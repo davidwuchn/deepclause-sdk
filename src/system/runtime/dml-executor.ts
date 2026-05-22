@@ -25,7 +25,7 @@ export interface ExecuteDmlOptions {
   workspaceRoot?: string;
   workspacePath: string;
   selection: ResolvedModelConfig;
-  args?: string[];
+  args?: unknown[];
   params?: Record<string, unknown>;
   gasLimit?: number;
   stream?: boolean;

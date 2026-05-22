@@ -1,22 +1,63 @@
+import * as fs from 'fs';
 import { EventEmitter } from 'events';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const childProcessMocks = vi.hoisted(() => ({
   spawn: vi.fn(),
+  spawnSync: vi.fn(),
 }));
 
 vi.mock('child_process', () => ({
   spawn: childProcessMocks.spawn,
+  spawnSync: childProcessMocks.spawnSync,
 }));
 
-import { HostShellManager } from '../src/system/runtime/shell-manager.js';
+import { HostShellManager, resolveHostShellStrategy, resolveHostShellWrapperKind } from '../src/system/runtime/shell-manager.js';
 
 describe('HostShellManager cancellation', () => {
+  beforeEach(() => {
+    childProcessMocks.spawnSync.mockReset();
+    childProcessMocks.spawnSync.mockReturnValue({ status: 1, error: undefined });
+  });
+
   afterEach(() => {
     delete process.env.DC_HOST_SHELL_IDLE_TIMEOUT_MS;
+    delete process.env.DC_HOST_SHELL_WRAPPER;
+    delete process.env.DEEPCLAUSE_TEST_SECRET;
     vi.useRealTimers();
     vi.restoreAllMocks();
     childProcessMocks.spawn.mockReset();
+  });
+
+  it('defaults to clean-room host execution and scrubs ambient env vars', async () => {
+    const child = createMockChildProcess(3210);
+    childProcessMocks.spawn.mockReturnValue(child);
+    process.env.DEEPCLAUSE_TEST_SECRET = 'should-not-leak';
+
+    const manager = new HostShellManager('/tmp/workspace');
+    const execPromise = manager.exec('printf hello');
+
+    child.emit('close', 0, null);
+
+    await expect(execPromise).resolves.toMatchObject({
+      success: true,
+      exitCode: 0,
+      pid: 3210,
+      backend: 'host',
+      backendLabel: 'host[clean-room]',
+      summary: 'Command completed successfully via host[clean-room]',
+    });
+
+    const [, args, options] = childProcessMocks.spawn.mock.calls[0];
+    expect(args).toEqual(['--noprofile', '--norc', '-c', 'printf hello']);
+    expect(options).toEqual(expect.objectContaining({
+      cwd: '/tmp/workspace',
+      detached: true,
+      env: expect.objectContaining({
+        PWD: '/tmp/workspace',
+      }),
+    }));
+    expect(options.env).not.toHaveProperty('DEEPCLAUSE_TEST_SECRET');
   });
 
   it('starts host commands in a separate process group and kills the whole group on abort', async () => {
@@ -30,7 +71,7 @@ describe('HostShellManager cancellation', () => {
     controller.abort();
 
     await expect(execPromise).rejects.toMatchObject({ name: 'AbortError' });
-    expect(childProcessMocks.spawn).toHaveBeenCalledWith('bash', ['-lc', 'sleep 10'], expect.objectContaining({
+    expect(childProcessMocks.spawn).toHaveBeenCalledWith(expect.stringMatching(/(^|\/)bash$/), ['--noprofile', '--norc', '-c', 'sleep 10'], expect.objectContaining({
       cwd: '/tmp/workspace',
       detached: true,
     }));
@@ -65,33 +106,38 @@ describe('HostShellManager cancellation', () => {
       exitCode: 0,
       pid: 9876,
       backend: 'host',
-      summary: 'Command completed successfully',
+      backendLabel: 'host[clean-room]',
+      summary: 'Command completed successfully via host[clean-room]',
     });
 
     expect(onStart).toHaveBeenCalledWith({
       command: 'printf hello',
       pid: 9876,
       backend: 'host',
+      backendLabel: 'host[clean-room]',
     });
     expect(onStdout).toHaveBeenCalledWith({
       command: 'printf hello',
       chunk: 'hello',
       pid: 9876,
       backend: 'host',
+      backendLabel: 'host[clean-room]',
     });
     expect(onStderr).toHaveBeenCalledWith({
       command: 'printf hello',
       chunk: 'warn',
       pid: 9876,
       backend: 'host',
+      backendLabel: 'host[clean-room]',
     });
     expect(onExit).toHaveBeenCalledWith({
       command: 'printf hello',
       pid: 9876,
       backend: 'host',
+      backendLabel: 'host[clean-room]',
       success: true,
       exitCode: 0,
-      summary: 'Command completed successfully',
+      summary: 'Command completed successfully via host[clean-room]',
     });
   });
 
@@ -117,7 +163,8 @@ describe('HostShellManager cancellation', () => {
       exitCode: 0,
       pid: 2468,
       backend: 'host',
-      summary: 'Command completed successfully',
+      backendLabel: 'host[clean-room]',
+      summary: 'Command completed successfully via host[clean-room]',
     });
 
     expect(child.stdout.destroy).toHaveBeenCalledTimes(1);
@@ -126,9 +173,10 @@ describe('HostShellManager cancellation', () => {
       command: 'python3 -m http.server 8080 &',
       pid: 2468,
       backend: 'host',
+      backendLabel: 'host[clean-room]',
       success: true,
       exitCode: 0,
-      summary: 'Command completed successfully',
+      summary: 'Command completed successfully via host[clean-room]',
     });
 
     vi.useRealTimers();
@@ -187,16 +235,18 @@ describe('HostShellManager cancellation', () => {
       exitCode: 124,
       pid: 8642,
       backend: 'host',
-      summary: 'Command timed out after 1000ms without output',
+      backendLabel: 'host[clean-room]',
+      summary: 'Command timed out after 1000ms without output via host[clean-room]',
     });
 
     expect(onExit).toHaveBeenCalledWith({
       command: 'uv pip install thing',
       pid: 8642,
       backend: 'host',
+      backendLabel: 'host[clean-room]',
       success: false,
       exitCode: 124,
-      summary: 'Command timed out after 1000ms without output',
+      summary: 'Command timed out after 1000ms without output via host[clean-room]',
     });
   });
 
@@ -229,7 +279,163 @@ describe('HostShellManager cancellation', () => {
       exitCode: 0,
       pid: 9753,
       backend: 'host',
-      summary: 'Command completed successfully',
+      summary: 'Command completed successfully via host[clean-room]',
+    });
+  });
+
+  it('uses setpriv-wrapped bwrap when direct probing hits uid-map permission denial', async () => {
+    const child = createMockChildProcess(5511);
+    childProcessMocks.spawn.mockReturnValue(child);
+    childProcessMocks.spawnSync
+      .mockReturnValueOnce({
+        status: 1,
+        error: undefined,
+        stdout: '',
+        stderr: 'bwrap: setting up uid map: Permission denied',
+      })
+      .mockReturnValueOnce({
+        status: 1,
+        error: undefined,
+        stdout: '',
+        stderr: 'bwrap: setting up uid map: Permission denied',
+      })
+      .mockReturnValueOnce({
+        status: 0,
+        error: undefined,
+        stdout: '',
+        stderr: '',
+      });
+
+    const manager = new HostShellManager('/tmp/workspace');
+    const execPromise = manager.exec('printf hello');
+
+    child.emit('close', 0, null);
+
+    await expect(execPromise).resolves.toMatchObject({
+      success: true,
+      exitCode: 0,
+      pid: 5511,
+      backend: 'host',
+      backendLabel: 'host[bwrap]',
+      summary: 'Command completed successfully via host[bwrap]',
+    });
+
+    expect(childProcessMocks.spawnSync).toHaveBeenCalledTimes(3);
+    expect(childProcessMocks.spawn).toHaveBeenCalledWith(
+      expect.stringMatching(/(^|\/)setpriv$/),
+      expect.arrayContaining([
+        '--no-new-privs',
+        expect.stringMatching(/(^|\/)bwrap$/),
+        '--die-with-parent',
+        '--new-session',
+        '--unshare-user-try',
+      ]),
+      expect.objectContaining({
+        cwd: '/tmp/workspace',
+        detached: true,
+      }),
+    );
+  });
+
+  it('bind-mounts resolver symlink targets outside the default read-only roots', async () => {
+    const child = createMockChildProcess(6644);
+    childProcessMocks.spawn.mockReturnValue(child);
+    childProcessMocks.spawnSync.mockReturnValue({
+      status: 0,
+      error: undefined,
+      stdout: '',
+      stderr: '',
+    });
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((value) => {
+      const filePath = String(value);
+      return filePath === '/etc/resolv.conf'
+        ? '/run/systemd/resolve/stub-resolv.conf'
+        : filePath;
+    });
+
+    const manager = new HostShellManager('/tmp/workspace');
+    const execPromise = manager.exec('printf hello');
+
+    child.emit('close', 0, null);
+
+    await expect(execPromise).resolves.toMatchObject({
+      success: true,
+      exitCode: 0,
+      pid: 6644,
+      backend: 'host',
+      backendLabel: 'host[bwrap]',
+    });
+
+    const [, args] = childProcessMocks.spawn.mock.calls[0];
+    expect(args).toContain('/run');
+    expect(args).toContain('/run/systemd');
+    expect(args).toContain('/run/systemd/resolve');
+
+    const resolverBindIndex = args.findIndex((value: string, index: number) => value === '--ro-bind'
+      && args[index + 1] === '/run/systemd/resolve/stub-resolv.conf'
+      && args[index + 2] === '/run/systemd/resolve/stub-resolv.conf');
+    expect(resolverBindIndex).toBeGreaterThan(-1);
+  });
+
+  it('prefers bwrap on linux when the probe succeeds', () => {
+    expect(resolveHostShellWrapperKind({
+      platform: 'linux',
+      probes: {
+        isBwrapUsable: () => true,
+        isSandboxExecUsable: () => false,
+      },
+    })).toBe('bwrap');
+  });
+
+  it('prefers sandbox-exec on macOS when available and bwrap is not in play', () => {
+    expect(resolveHostShellWrapperKind({
+      platform: 'darwin',
+      probes: {
+        isBwrapUsable: () => false,
+        isSandboxExecUsable: () => true,
+      },
+    })).toBe('sandbox-exec');
+  });
+
+  it('honors an explicit wrapper override', () => {
+    expect(resolveHostShellWrapperKind({
+      platform: 'linux',
+      probes: {
+        isBwrapUsable: () => false,
+        isSandboxExecUsable: () => false,
+      },
+      envOverride: 'clean-room',
+    })).toBe('clean-room');
+  });
+
+  it('uses strict bwrap mode when strict isolation is requested and supported', () => {
+    expect(resolveHostShellStrategy({
+      hostConfig: { strictIsolation: true },
+      platform: 'linux',
+      probes: {
+        isBwrapUsable: (strictIsolation) => strictIsolation,
+        isSandboxExecUsable: () => false,
+      },
+    })).toMatchObject({
+      wrapperKind: 'bwrap',
+      strictIsolation: true,
+      backendLabel: 'host[bwrap strict]',
+    });
+  });
+
+  it('falls back to clean-room when strict isolation is requested but unavailable', () => {
+    expect(resolveHostShellStrategy({
+      hostConfig: { strictIsolation: true },
+      platform: 'linux',
+      probes: {
+        isBwrapUsable: () => false,
+        isSandboxExecUsable: () => false,
+      },
+    })).toMatchObject({
+      wrapperKind: 'clean-room',
+      strictIsolation: false,
+      backendLabel: 'host[clean-room]',
     });
   });
 });

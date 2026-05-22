@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
+import * as os from 'os';
 import * as path from 'path';
 import { createDeepClause } from '../../sdk.js';
 import type { AnalysisResult, DMLEvent, DeepClauseSDK } from '../../types.js';
@@ -14,7 +15,7 @@ import { listLocalSkillCatalog } from './catalog-skills.js';
 import { withCapturedConsole } from './console-capture.js';
 import { executeDml } from './dml-executor.js';
 import { truncateUrlFetchTextBody } from './runtime-tools.js';
-import { createShellManager, type ShellManager } from './shell-manager.js';
+import { createShellManager, describeShellExecutionBackend, type ShellManager } from './shell-manager.js';
 import { createShellToolEventBridge } from './shell-tool-events.js';
 import { recordTokenUsage, type TokenUsageByModel } from './token-usage.js';
 
@@ -345,7 +346,7 @@ function registerSkillCreatorTools(
       properties: {
         dml_file: { type: 'string', description: 'Path to the DML file to test.' },
         test_input: { type: 'string', description: 'Single test input string.' },
-        test_args: { type: 'string', description: 'JSON array of string arguments.' },
+        test_args: { type: 'string', description: 'JSON array of test arguments. Structured JSON values are preserved.' },
       },
       required: ['dml_file'],
     },
@@ -384,6 +385,7 @@ async function buildSkillCreatorSystemPrompt(
   sandbox = false,
 ): Promise<string> {
   const promptTemplate = await readSystemPromptAsset('skill-creator', { workspaceRoot });
+  const shellBackend = describeShellExecutionBackend(sandbox, config.shell);
   const toolsTable = [
     '| Tool | Description |',
     '|------|-------------|',
@@ -400,16 +402,23 @@ async function buildSkillCreatorSystemPrompt(
 
   const runtimeSection = sandbox
     ? [
-        '## Runtime Shell',
+        '## Runtime Shell Context',
+        `- Shell backend currently resolves to \`${shellBackend.backendLabel}\` (${shellBackend.description}).`,
+        `- Host system for this compile run: \`${process.platform}\` / \`${process.arch}\` / \`${os.release()}\`.`,
         '- Shell commands run inside AgentVM because `--sandbox` is enabled.',
         `- AgentVM network access is ${config.agentvm?.network ? 'enabled' : 'disabled'}.`,
+        '- Bubblewrap or host-shell wrapper behavior does not apply in this mode; use the AgentVM assumptions instead.',
         '- Package installation and outbound network behavior follow that sandbox setting.',
         '- Web research still goes through web_search, news_search, and url_fetch.',
       ].join('\n')
     : [
-        '## Runtime Shell',
+        '## Runtime Shell Context',
+        `- Shell backend currently resolves to \`${shellBackend.backendLabel}\` (${shellBackend.description}).`,
+        `- Host system for this compile run: \`${process.platform}\` / \`${process.arch}\` / \`${os.release()}\`.`,
         '- Shell commands run in the local workspace shell by default.',
-        '- Package installation uses the local machine environment and permissions.',
+        '- If the backend label contains `bwrap`, bash runs inside bubblewrap on the host rather than inside AgentVM.',
+        '- If the backend label starts with `host[` and does not contain `bwrap`, commands run through the host shell executor/wrapper on the local machine.',
+        '- Package installation uses the local machine environment, wrapper, and permissions.',
         '- Web research still goes through web_search, news_search, and url_fetch.',
       ].join('\n');
 
@@ -421,14 +430,16 @@ async function buildSkillCreatorSystemPrompt(
     .replace('{TOOLS_TABLE}', toolsTable)
     .replace('{LLM_ACCESS_SECTION}', llmAccessSection)}
 
+${runtimeSection}
+
 ## Your Workflow
 1. **Understand**: Read the specification carefully. If anything is unclear, use ask_user to ask for clarification.
 2. **Research**: If the skill needs external APIs or domain knowledge, use search. If an existing local skill might already cover part of the task, call list_skills before re-implementing it.
 3. **Plan**: Create a step-by-step plan for the DML program, including any local skill reuse.
-4. **Prepare environment**: Use bash to install ALL packages the skill will need (pip install, apt-get install, npm install). Do this BEFORE writing any DML code. The skill itself must NOT install packages.
-5. **Write**: Use write_file(path='my-skill.dml', content='...') to create or overwrite the DML file.
+4. **Prepare environment**: Use bash to install ALL packages the skill will need (pip install, apt-get install, npm install). Create helper directories under '.deepclause/tools/lib/<skill-or-tool-name>/' before writing helpers. If the skill uses Python, create a dedicated virtualenv in that directory and install Python dependencies there. Do this BEFORE writing any DML code. The skill itself must NOT install packages.
+5. **Write**: Use write_file(path='my-skill.dml', content='...') to create or overwrite the DML file. Put helper scripts, templates, fixtures, and non-DML runtime assets in '.deepclause/tools/lib/<skill-or-tool-name>/'.
 6. **Validate**: Use validate_dml(dml_file='my-skill.dml') and fix errors by rewriting the file.
-7. **Test**: Use test_dml(dml_file='my-skill.dml', test_input='...') with a realistic test input and iterate until it works.
+7. **Test**: Use test_dml(dml_file='my-skill.dml', test_input='...') with a realistic test input and iterate until it works. When helper scripts depend on a virtualenv, test them through that virtualenv's interpreter.
 8. **Publish**: Use deploy_skill(dml_file='my-skill.dml', ...) exactly once when the DML is ready.
 
 ## File-Based DML Only
@@ -661,6 +672,48 @@ function extractSkillCapabilities(analysis: AnalysisResult): string[] {
   ));
 }
 
+function normalizeRuntimeArgList(value: unknown): unknown[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (
+      (trimmed.startsWith('[') && trimmed.endsWith(']'))
+      || (trimmed.startsWith('{') && trimmed.endsWith('}'))
+    ) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return Array.isArray(parsed) ? parsed : [parsed];
+      } catch {
+        return [value];
+      }
+    }
+
+    return [value];
+  }
+
+  return [value];
+}
+
+function resolveTestRunArgs(args: Record<string, unknown>): unknown[] {
+  const rawTestArgs = args.test_args;
+  if (
+    rawTestArgs !== undefined
+    && rawTestArgs !== null
+    && !(typeof rawTestArgs === 'string' && rawTestArgs.trim() === '')
+  ) {
+    return normalizeRuntimeArgList(rawTestArgs);
+  }
+
+  return [args.test_input ?? 'test'];
+}
+
 function readMetadataName(metadata: Record<string, unknown>, fallbackName: string): string {
   const name = metadata['name'];
   return typeof name === 'string' && name.trim() ? name.trim() : fallbackName;
@@ -723,18 +776,7 @@ async function runLocalTestDml(
 ): Promise<Record<string, unknown>> {
   const dmlPath = resolveWorkspacePath(context.workspacePath, String(args.dml_file ?? ''));
   const dmlCode = await fs.readFile(dmlPath, 'utf8');
-
-  let testArgs: string[];
-  if (typeof args.test_args === 'string' && args.test_args.trim()) {
-    try {
-      const parsed = JSON.parse(args.test_args);
-      testArgs = Array.isArray(parsed) ? parsed.map(String) : [String(parsed)];
-    } catch {
-      testArgs = [String(args.test_args)];
-    }
-  } else {
-    testArgs = [String(args.test_input ?? 'test')];
-  }
+  const testArgs = resolveTestRunArgs(args);
 
   const result = await executeDml({
     dmlCode,

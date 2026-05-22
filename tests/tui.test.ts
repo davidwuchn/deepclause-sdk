@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const conductorMocks = vi.hoisted(() => ({
+  appendConductorSessionMessages: vi.fn(),
   createSessionExecutionLogWriter: vi.fn(),
   createLocalSkill: vi.fn(),
   createConductorSession: vi.fn(),
@@ -18,6 +19,7 @@ const runMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/system/runtime/conductor.js', () => ({
+  appendConductorSessionMessages: conductorMocks.appendConductorSessionMessages,
   createSessionExecutionLogWriter: conductorMocks.createSessionExecutionLogWriter,
   createLocalSkill: conductorMocks.createLocalSkill,
   createConductorSession: conductorMocks.createConductorSession,
@@ -134,6 +136,27 @@ describe('LiveExecutionPrinter', () => {
       'tool bash(command=printf hello) completed pid=4321 exit=0',
     ]);
   });
+
+  it('prints memory compaction events', () => {
+    const lines: string[] = [];
+    const printer = new LiveExecutionPrinter(
+      () => {},
+      (text) => lines.push(text),
+    );
+
+    printer.handle({
+      scope: 'child',
+      childSlug: 'research',
+      event: {
+        type: 'memory_compaction',
+        content: 'compact post_task compacted 2 blocks via dml (hybrid) 120 -> 48 tokens',
+      },
+    });
+
+    expect(lines).toEqual([
+      '\t[research] compact post_task compacted 2 blocks via dml (hybrid) 120 -> 48 tokens',
+    ]);
+  });
 });
 
 describe('ActivityBuffer', () => {
@@ -207,6 +230,22 @@ describe('ActivityBuffer', () => {
     expect(activity.snapshotTail(2)).toEqual([
       'output second',
       'output third',
+    ]);
+  });
+
+  it('stores memory compaction lines in the activity feed', () => {
+    const activity = new ActivityBuffer();
+
+    activity.handle({
+      scope: 'main',
+      event: {
+        type: 'memory_compaction',
+        content: 'compact pre_task compacted 1 block via builtin (builtin) 60 -> 18 tokens',
+      },
+    });
+
+    expect(activity.snapshot()).toEqual([
+      'compact pre_task compacted 1 block via builtin (builtin) 60 -> 18 tokens',
     ]);
   });
 });
@@ -533,6 +572,13 @@ describe('slash command parsing', () => {
     expect(parseCommandBarInput('!git status')).toEqual({
       kind: 'shell',
       command: 'git status',
+      persistOutput: false,
+    });
+
+    expect(parseCommandBarInput('!!git status')).toEqual({
+      kind: 'shell',
+      command: 'git status',
+      persistOutput: true,
     });
 
     expect(parseCommandBarInput('  \\!this goes to the conductor')).toEqual({

@@ -71,6 +71,7 @@ All commands except `init`, `help`, `--help`, `--version`, and `-V` expect a `.d
     - `skill-creator.dml`
     - `CONDUCTOR_PROMPT.md`
     - `DML_COMPILER_PROMPT.md`
+    - `TASK_PROMPT.md`
 
 The default recipe is created at `.deepclause/system/recipes/deepclause-coding-workflow/SKILL.md`. It is a real example, not a placeholder: it teaches the conductor how to approach local repository changes with small edits and focused validation. You can edit it, remove it, or add your own recipes next to it.
 
@@ -85,6 +86,9 @@ Running `deepclause` with no subcommand starts the fullscreen TUI.
 - Execution log and context summary on the right
 - Slash commands such as `/new`, `/sessions`, `/set-model <model> [--slot <slot>]`, `/compile <spec>`, `/skill-creator <spec>`, `/cancel`, and `/<skill> [args]`
 - Direct shell commands with `!<command>`, streamed live in the execution pane and cancelled with `/cancel`
+- Persistent shell commands with `!!<command>`, which also append the command and its output to the active session transcript so the conductor can see them on the next turn
+
+Use `!<command>` when you just want an ephemeral shell escape in the execution pane. Use `!!<command>` when the shell result should become part of the conversation state for later conductor turns.
 
 For non-interactive use, `deepclause -p "..."` runs a single headless conductor turn with a fresh session.
 
@@ -228,9 +232,12 @@ If you want to customize behavior for one workspace without modifying the packag
 - `.deepclause/system/skill-creator.dml`
 - `.deepclause/system/CONDUCTOR_PROMPT.md`
 - `.deepclause/system/DML_COMPILER_PROMPT.md`
+- `.deepclause/system/TASK_PROMPT.md`
 - `.deepclause/system/recipes/<recipe-slug>/SKILL.md`
 
 When present, the CLI runtime prefers those files over the packaged system DML and system prompt markdown. For recipes, workspace files override packaged recipes with the same slug.
+
+`.deepclause/system/TASK_PROMPT.md` is the markdown template used for `task(...)` and `prompt(...)` harness calls. `deepclause init` seeds it into the workspace, and the runtime resolves that workspace copy before falling back to the packaged default.
 
 #### 2. Source-level hacking in this repository
 
@@ -240,6 +247,7 @@ If you are developing DeepClause itself, these are the main files to edit:
 - `src/system/assets/skills/skill-creator.dml` - the skill creator's DML logic
 - `src/system/assets/docs/CONDUCTOR_PROMPT.md` - the conductor system prompt template
 - `src/system/assets/docs/DML_COMPILER_PROMPT.md` - the skill creator/compiler system prompt template
+- `src/system/assets/docs/TASK_PROMPT.md` - the `task(...)` / `prompt(...)` harness template
 - `src/system/assets/recipes/` - packaged default recipes copied into new workspaces
 - `src/system/runtime/conductor.ts` - session loading, memory injection, tool registration, child-skill routing
 - `src/system/runtime/skill-creator.ts` - compile-slot execution, skill-creator tool registration, validation/testing/deploy flow
@@ -250,8 +258,8 @@ Notes:
 - The conductor uses the `gateway` model slot.
 - Normal compiled skills use the `run` model slot.
 - The skill creator uses the `compile` model slot.
-- The TUI context pane shows the resolved source paths for the conductor DML/prompt and skill creator DML/prompt.
-- Changes to those `.deepclause/system/` files are picked up on the next conductor turn or skill-creator run; a dedicated TUI reload is not required.
+- The TUI context pane shows the resolved source paths for the conductor DML/prompt, skill creator DML/prompt, and task prompt template.
+- Changes to those `.deepclause/system/` files are picked up on the next conductor turn, skill-creator run, or `task(...)` / `prompt(...)` execution; a dedicated TUI reload is not required.
 
 After source-level changes, rebuild the package:
 

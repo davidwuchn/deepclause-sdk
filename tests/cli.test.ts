@@ -96,10 +96,13 @@ const SAMPLE_META = {
   sourceHash: 'sha256:abc123',
   compiledAt: '2026-01-29T10:30:00Z',
   model: 'gpt-4o',
+  name: 'Research Agent',
+  triggerPhrases: ['research topic', 'run research'],
+  capabilities: ['network', 'file_io'],
   description: 'Research a topic and generate a comprehensive report',
   parameters: [
-    { name: 'topic', description: 'The topic to research', required: true },
-    { name: 'depth', description: 'Research depth', default: 'standard' }
+    { name: 'topic', position: 0, description: 'The topic to research', required: true },
+    { name: 'depth', position: 1, description: 'Research depth', required: false, default: 'standard' }
   ],
   tools: ['web_search', 'vm_exec'],
   history: [
@@ -624,6 +627,10 @@ describe('Tool Listing', () => {
       const commands = await listCommands('/workspace', { detailed: true });
       
       expect(commands[0]).toHaveProperty('parameters');
+      expect(commands[0].displayName).toBe('Research Agent');
+      expect(commands[0].usage).toBe('deepclause run .deepclause/tools/research <topic> [depth=standard]');
+      expect(commands[0].triggerPhrases).toEqual(['research topic', 'run research']);
+      expect(commands[0].capabilities).toEqual(['Uses network access', 'Reads or writes workspace files']);
       expect(commands[0]).toHaveProperty('tools');
       expect(commands[0].tools).toContain('web_search');
     });
@@ -860,8 +867,8 @@ Greet the user by name.
 
 describe('DML Parser', () => {
   describe('extractToolDependencies', () => {
-    it('should extract exec calls', () => {
-      const { extractToolDependencies } = require('../src/cli/compile');
+    it('should extract exec calls', async () => {
+      const { extractToolDependencies } = await import('../src/cli/compile.ts');
       
       const dml = `
 agent_main :-
@@ -873,8 +880,8 @@ agent_main :-
       expect(tools).toEqual(['web_search', 'vm_exec']);
     });
 
-    it('should handle nested exec in tool definitions', () => {
-      const { extractToolDependencies } = require('../src/cli/compile');
+    it('should handle nested exec in tool definitions', async () => {
+      const { extractToolDependencies } = await import('../src/cli/compile.ts');
       
       const dml = `
 tool(my_search(Q, R), "wrapper") :-
@@ -888,8 +895,8 @@ agent_main :-
       expect(tools).toEqual(['web_search']);
     });
 
-    it('should deduplicate tool names', () => {
-      const { extractToolDependencies } = require('../src/cli/compile');
+    it('should deduplicate tool names', async () => {
+      const { extractToolDependencies } = await import('../src/cli/compile.ts');
       
       const dml = `
 agent_main :-
@@ -904,20 +911,20 @@ agent_main :-
   });
 
   describe('extractParameters', () => {
-    it('should extract parameters from agent_main signature', () => {
-      const { extractParameters } = require('../src/cli/compile');
+    it('should extract parameters from agent_main signature', async () => {
+      const { extractParameters } = await import('../src/cli/compile.ts');
       
       const dml = `agent_main(Topic, Depth) :- ...`;
       
       const params = extractParameters(dml);
       expect(params).toEqual([
-        { name: 'depth', position: 0 },  // alphabetical
-        { name: 'topic', position: 1 }
+        { name: 'topic', position: 0, required: true },
+        { name: 'depth', position: 1, required: true }
       ]);
     });
 
-    it('should handle no parameters', () => {
-      const { extractParameters } = require('../src/cli/compile');
+    it('should handle no parameters', async () => {
+      const { extractParameters } = await import('../src/cli/compile.ts');
       
       const dml = `agent_main :- answer("done").`;
       

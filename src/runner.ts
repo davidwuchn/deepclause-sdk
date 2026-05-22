@@ -670,6 +670,7 @@ export class DMLRunner {
       outputVars,
       memory: preparedMemory,
       tools: availableTools,
+      workspacePath: options.workspacePath,
       modelOptions: {
         model: this.options.model,
         provider: this.options.provider,

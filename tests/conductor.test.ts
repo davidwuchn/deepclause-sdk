@@ -59,6 +59,7 @@ import { resolveModelSlot } from '../src/cli/config.js';
 import { executeDml } from '../src/system/runtime/dml-executor.js';
 import { readSystemPromptAsset, readSystemSkillAsset } from '../src/system/assets/index.js';
 import {
+  appendConductorSessionMessages,
   consultRecipes,
   createConductorSession,
   createLocalSkill,
@@ -167,6 +168,24 @@ Run focused tests after small edits.
         content: expect.stringContaining('Run focused tests after small edits.'),
       }),
     ]));
+  });
+});
+
+describe('appendConductorSessionMessages', () => {
+  it('appends user and assistant transcript entries to an existing session', async () => {
+    const workspaceRoot = await mkdtemp(path.join(tmpdir(), 'deepclause-conductor-append-'));
+    const session = await createConductorSession(workspaceRoot, 'Shell transcript session');
+
+    await appendConductorSessionMessages(workspaceRoot, session.id, [
+      { role: 'user', content: '[shell command]\npwd' },
+      { role: 'assistant', content: '[shell result]\n\nstdout:\n/workspace' },
+    ]);
+
+    const detail = await getConductorSessionDetail(workspaceRoot, session.id);
+    expect(detail.messages).toEqual([
+      expect.objectContaining({ role: 'user', content: '[shell command]\npwd' }),
+      expect.objectContaining({ role: 'assistant', content: '[shell result]\n\nstdout:\n/workspace' }),
+    ]);
   });
 });
 

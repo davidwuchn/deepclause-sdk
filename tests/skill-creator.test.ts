@@ -2,6 +2,7 @@ import { mkdtemp, readFile, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import * as path from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { Config } from '../src/cli/config.js';
 
 const sdkMocks = vi.hoisted(() => ({
   createDeepClause: vi.fn(),
@@ -36,6 +37,28 @@ vi.mock('../src/system/runtime/shell-manager.js', () => ({
   createShellManager: vi.fn().mockReturnValue({
     dispose: vi.fn().mockResolvedValue(undefined),
   }),
+  describeShellExecutionBackend: vi.fn((sandbox = false, hostConfig: { wrapper?: string; strictIsolation?: boolean } = {}) => {
+    if (sandbox) {
+      return {
+        backendLabel: 'sandbox[agentvm]',
+        description: 'AgentVM sandbox',
+      };
+    }
+
+    if (hostConfig.wrapper === 'bwrap') {
+      return {
+        backendLabel: `host[bwrap${hostConfig.strictIsolation ? ' strict' : ''}]`,
+        description: hostConfig.strictIsolation
+          ? 'bubblewrap sandbox with network disabled'
+          : 'bubblewrap sandbox',
+      };
+    }
+
+    return {
+      backendLabel: 'host[clean-room]',
+      description: 'clean-room host shell',
+    };
+  }),
 }));
 
 vi.mock('../src/system/runtime/catalog-skills.js', () => ({
@@ -57,6 +80,26 @@ vi.mock('../src/compiler.js', () => ({
 
 import { compileWithSkillCreator } from '../src/system/runtime/skill-creator.js';
 
+const TEST_CONFIG: Config = {
+  models: {
+    gateway: 'gateway-model',
+    run: 'run-model',
+    compile: 'compile-model',
+  },
+  temperatures: {
+    gateway: 0.7,
+    run: 0.7,
+    compile: 0,
+  },
+  providers: {},
+  mcp: { servers: {} },
+  agentvm: { network: false },
+  shell: { wrapper: 'auto', strictIsolation: false },
+  compaction: { bindings: [] },
+  dmlBase: '.deepclause/tools',
+  workspace: './workspace',
+};
+
 afterEach(() => {
   vi.clearAllMocks();
 });
@@ -70,11 +113,12 @@ describe('compileWithSkillCreator', () => {
       baseName: 'demo-skill',
       workspaceRoot: workspacePath,
       workspacePath,
-      config: {},
+      config: TEST_CONFIG,
       compileSelection: {
         id: 'compile-model',
         model: 'compile-model',
         provider: 'openai',
+        slot: 'compile',
         apiKey: 'test-key',
         baseUrl: undefined,
         temperature: 0,
@@ -83,6 +127,7 @@ describe('compileWithSkillCreator', () => {
         id: 'run-model',
         model: 'run-model',
         provider: 'openai',
+        slot: 'run',
         apiKey: 'test-key',
         baseUrl: undefined,
         temperature: 0,
@@ -90,19 +135,20 @@ describe('compileWithSkillCreator', () => {
     } as const;
   }
 
-  function mockSdk(): void {
+  function mockSdk() {
     const registeredTools = new Map<string, { execute: (args: Record<string, unknown>) => Promise<unknown> }>();
+    const runDML = vi.fn(async function* () {
+      yield { type: 'output', content: 'planning' };
+    });
     sdkMocks.createDeepClause.mockResolvedValue({
       registerTool: vi.fn((name: string, tool: { execute: (args: Record<string, unknown>) => Promise<unknown> }) => {
         registeredTools.set(name, tool);
       }),
-      runDML: vi.fn(async function* () {
-        yield { type: 'output', content: 'planning' };
-      }),
+      runDML,
       dispose: vi.fn().mockResolvedValue(undefined),
     });
 
-    return registeredTools;
+    return { registeredTools, runDML };
   }
 
   function mockPublishingSdk(): void {
@@ -161,8 +207,45 @@ describe('compileWithSkillCreator', () => {
     }));
   });
 
+  it('injects concrete shell backend and host system context into the compiler prompt', async () => {
+    const { runDML } = mockSdk();
+    const options = await createOptions();
+
+    await expect(compileWithSkillCreator('Create a demo skill', {
+      ...options,
+      config: {
+        ...TEST_CONFIG,
+        shell: {
+          wrapper: 'bwrap',
+          strictIsolation: true,
+        },
+      },
+    })).rejects.toThrow('Skill creator finished without producing a published artifact');
+
+    expect(runDML).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      params: expect.objectContaining({
+        system_prompt: expect.stringContaining('Shell backend currently resolves to `host[bwrap strict]`'),
+      }),
+    }));
+    expect(runDML).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      params: expect.objectContaining({
+        system_prompt: expect.stringContaining(`Host system for this compile run: \`${process.platform}\` / \`${process.arch}\``),
+      }),
+    }));
+    expect(runDML).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      params: expect.objectContaining({
+        system_prompt: expect.stringContaining('.deepclause/tools/lib/<skill-or-tool-name>/'),
+      }),
+    }));
+    expect(runDML).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      params: expect.objectContaining({
+        system_prompt: expect.stringContaining('create a dedicated virtualenv in that directory'),
+      }),
+    }));
+  });
+
   it('forwards live events from test_dml tool runs', async () => {
-    const registeredTools = mockSdk();
+    const { registeredTools } = mockSdk();
     const options = await createOptions();
     const onEvent = vi.fn();
     const dmlPath = path.join(options.workspacePath, 'demo-skill.dml');
@@ -217,8 +300,39 @@ describe('compileWithSkillCreator', () => {
     }));
   });
 
+  it('preserves structured JSON values in test_dml test_args', async () => {
+    const { registeredTools } = mockSdk();
+    const options = await createOptions();
+    const dmlPath = path.join(options.workspacePath, 'demo-skill.dml');
+
+    runtimeMocks.executeDml.mockResolvedValue({
+      events: [],
+      output: [],
+      answer: 'ok',
+      error: undefined,
+      trace: [],
+    });
+
+    await writeFile(dmlPath, 'agent_main(_):-answer("ok").\n', 'utf8');
+
+    await expect(compileWithSkillCreator('Create a demo skill', options))
+      .rejects.toThrow('Skill creator finished without producing a published artifact');
+
+    const testTool = registeredTools.get('test_dml');
+    expect(testTool).toBeDefined();
+
+    await testTool!.execute({
+      dml_file: 'demo-skill.dml',
+      test_args: JSON.stringify([{ topic: 'demo', nested: { count: 2 } }]),
+    });
+
+    expect(runtimeMocks.executeDml).toHaveBeenCalledWith(expect.objectContaining({
+      args: [{ topic: 'demo', nested: { count: 2 } }],
+    }));
+  });
+
   it('uses metadata slug when deploying instead of the temporary base name', async () => {
-    const registeredTools = mockSdk();
+    const { registeredTools } = mockSdk();
     const options = await createOptions();
     const dmlPath = path.join(options.workspacePath, 'demo-skill.dml');
 

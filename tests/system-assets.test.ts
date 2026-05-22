@@ -78,12 +78,37 @@ describe('system skill assets', () => {
     expect(content).toContain('custom compiler prompt');
   });
 
+  it('prefers a workspace task prompt override when present', async () => {
+    const workspaceRoot = await createWorkspace();
+    const systemDir = join(workspaceRoot, '.deepclause', 'system');
+    await mkdir(systemDir, { recursive: true });
+    await writeFile(join(systemDir, 'TASK_PROMPT.md'), '# custom task prompt\n', 'utf8');
+
+    const content = await readSystemPromptAsset('task', { workspaceRoot });
+
+    expect(content).toContain('custom task prompt');
+  });
+
+  it('finds a task prompt override by walking up from workspacePath', async () => {
+    const workspaceRoot = await createWorkspace();
+    const systemDir = join(workspaceRoot, '.deepclause', 'system');
+    const nestedWorkspacePath = join(workspaceRoot, 'workspace', 'nested');
+    await mkdir(systemDir, { recursive: true });
+    await mkdir(nestedWorkspacePath, { recursive: true });
+    await writeFile(join(systemDir, 'TASK_PROMPT.md'), '# task prompt from ancestor lookup\n', 'utf8');
+
+    const content = await readSystemPromptAsset('task', { workspacePath: nestedWorkspacePath });
+
+    expect(content).toContain('task prompt from ancestor lookup');
+  });
+
   it('reports the resolved system asset source paths for the workspace', async () => {
     const workspaceRoot = await createWorkspace();
     const systemDir = join(workspaceRoot, '.deepclause', 'system');
     await mkdir(systemDir, { recursive: true });
     await writeFile(join(systemDir, 'conductor.dml'), 'agent_main(_):-answer("override conductor").\n', 'utf8');
     await writeFile(join(systemDir, 'CONDUCTOR_PROMPT.md'), '# custom conductor prompt\n', 'utf8');
+    await writeFile(join(systemDir, 'TASK_PROMPT.md'), '# custom task prompt\n', 'utf8');
 
     const sources = getSystemAssetSourcePaths(workspaceRoot);
 
@@ -91,5 +116,6 @@ describe('system skill assets', () => {
     expect(sources.conductorPrompt).toBe(join(systemDir, 'CONDUCTOR_PROMPT.md'));
     expect(sources.skillCreatorDml).toContain('/src/system/assets/skills/skill-creator.dml');
     expect(sources.skillCreatorPrompt).toContain('/src/system/assets/docs/DML_COMPILER_PROMPT.md');
+    expect(sources.taskPrompt).toBe(join(systemDir, 'TASK_PROMPT.md'));
   });
 });

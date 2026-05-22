@@ -1,10 +1,10 @@
 import { existsSync } from 'fs';
 import { access, readFile } from 'fs/promises';
-import { dirname, join } from 'path';
+import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 export type SystemSkillAssetName = 'conductor' | 'skill-creator';
-export type SystemPromptAssetName = 'conductor' | 'skill-creator';
+export type SystemPromptAssetName = 'conductor' | 'skill-creator' | 'task';
 export type SystemCompactorAssetName = 'default-session-compactor' | 'default-loop-compactor';
 export type WorkspaceDocAssetName = 'tui';
 
@@ -15,6 +15,11 @@ const COMPACTORS_DIR = join(__dirname, 'compactors');
 const DOCS_DIR = join(__dirname, 'docs');
 const RECIPES_DIR = join(__dirname, 'recipes');
 const SYSTEM_OVERRIDE_DIR = '.deepclause/system';
+
+interface SystemAssetLookupOptions {
+  workspaceRoot?: string;
+  workspacePath?: string;
+}
 
 function getSystemSkillFileName(name: SystemSkillAssetName): string {
   switch (name) {
@@ -31,6 +36,8 @@ function getSystemPromptFileName(name: SystemPromptAssetName): string {
       return 'CONDUCTOR_PROMPT.md';
     case 'skill-creator':
       return 'DML_COMPILER_PROMPT.md';
+    case 'task':
+      return 'TASK_PROMPT.md';
   }
 }
 
@@ -78,12 +85,38 @@ function getWorkspaceOverridePath(workspaceRoot: string, fileName: string): stri
   return join(workspaceRoot, SYSTEM_OVERRIDE_DIR, fileName);
 }
 
+function findWorkspaceOverridePathSync(fileName: string, options: SystemAssetLookupOptions = {}): string | null {
+  if (options.workspaceRoot) {
+    const overridePath = getWorkspaceOverridePath(options.workspaceRoot, fileName);
+    return existsSync(overridePath) ? overridePath : null;
+  }
+
+  if (options.workspacePath) {
+    let current = resolve(options.workspacePath);
+
+    while (true) {
+      const overridePath = join(current, SYSTEM_OVERRIDE_DIR, fileName);
+      if (existsSync(overridePath)) {
+        return overridePath;
+      }
+
+      const parent = dirname(current);
+      if (parent === current) {
+        break;
+      }
+      current = parent;
+    }
+  }
+
+  return null;
+}
+
 async function resolveSystemSkillAssetPath(
   name: SystemSkillAssetName,
-  workspaceRoot?: string,
+  options: SystemAssetLookupOptions = {},
 ): Promise<string> {
-  if (workspaceRoot) {
-    const overridePath = getWorkspaceOverridePath(workspaceRoot, getSystemSkillFileName(name));
+  const overridePath = findWorkspaceOverridePathSync(getSystemSkillFileName(name), options);
+  if (overridePath) {
     try {
       await access(overridePath);
       return overridePath;
@@ -97,10 +130,10 @@ async function resolveSystemSkillAssetPath(
 
 async function resolveSystemPromptAssetPath(
   name: SystemPromptAssetName,
-  workspaceRoot?: string,
+  options: SystemAssetLookupOptions = {},
 ): Promise<string> {
-  if (workspaceRoot) {
-    const overridePath = getWorkspaceOverridePath(workspaceRoot, getSystemPromptFileName(name));
+  const overridePath = findWorkspaceOverridePathSync(getSystemPromptFileName(name), options);
+  if (overridePath) {
     try {
       await access(overridePath);
       return overridePath;
@@ -145,25 +178,27 @@ export function getSystemAssetSourcePaths(workspaceRoot?: string): {
   conductorPrompt: string;
   skillCreatorDml: string;
   skillCreatorPrompt: string;
+  taskPrompt: string;
 } {
   return {
     conductorDml: resolveSystemSkillAssetPathSync('conductor', workspaceRoot),
     conductorPrompt: resolveSystemPromptAssetPathSync('conductor', workspaceRoot),
     skillCreatorDml: resolveSystemSkillAssetPathSync('skill-creator', workspaceRoot),
     skillCreatorPrompt: resolveSystemPromptAssetPathSync('skill-creator', workspaceRoot),
+    taskPrompt: resolveSystemPromptAssetPathSync('task', workspaceRoot),
   };
 }
 
 export async function readSystemSkillAsset(
   name: SystemSkillAssetName,
-  options: { workspaceRoot?: string } = {},
+  options: SystemAssetLookupOptions = {},
 ): Promise<string> {
-  return readFile(await resolveSystemSkillAssetPath(name, options.workspaceRoot), 'utf8');
+  return readFile(await resolveSystemSkillAssetPath(name, options), 'utf8');
 }
 
 export async function readSystemPromptAsset(
   name: SystemPromptAssetName,
-  options: { workspaceRoot?: string } = {},
+  options: SystemAssetLookupOptions = {},
 ): Promise<string> {
-  return readFile(await resolveSystemPromptAssetPath(name, options.workspaceRoot), 'utf8');
+  return readFile(await resolveSystemPromptAssetPath(name, options), 'utf8');
 }
