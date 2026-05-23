@@ -28,8 +28,9 @@
     "lint": "eslint src --ext .ts",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run build",
-    "example": "tsx examples/quick-start.ts",
-    "examples": "tsx examples/basic-usage.ts",
+    "example": "tsx sdk-examples/quick-start.ts",
+    "examples": "tsx sdk-examples/basic-usage.ts",
+    "examples:smoke": "tsx sdk-examples/no-api-key.ts && npm run example && npm run examples && tsx sdk-examples/neurosymbolic.ts 1 && tsx sdk-examples/deep-research.ts \"test topic\"",
     "cli": "tsx src/cli/index.ts"
   },
   "dependencies": {

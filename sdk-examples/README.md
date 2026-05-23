@@ -11,10 +11,16 @@ This directory contains examples demonstrating how to use the DeepClause SDK.
 
 2. Set up API keys (environment variables):
    ```bash
-   export OPENAI_API_KEY="sk-..."
-   # or
-   export ANTHROPIC_API_KEY="sk-ant-..."
+  export GOOGLE_GENERATIVE_AI_API_KEY="..."
+  # optional, for deep-research.ts live web search
+  export BRAVE_API_KEY="..."
    ```
+
+For a no-key validation path, start with:
+
+```bash
+npx tsx sdk-examples/no-api-key.ts
+```
 
 ## Quick Start
 
@@ -23,7 +29,13 @@ The simplest example to get started:
 ```bash
 npm run example
 # or
-npx ts-node --esm examples/quick-start.ts
+npx tsx sdk-examples/quick-start.ts
+```
+
+To exercise the currently supported no-key paths end-to-end:
+
+```bash
+npm run examples:smoke
 ```
 
 ## Available Examples
@@ -32,7 +44,6 @@ npx ts-node --esm examples/quick-start.ts
 
 Minimal example showing core functionality:
 - Creating SDK instance
-- Registering a custom tool
 - Running DML code
 - Handling events
 
@@ -55,7 +66,7 @@ Comprehensive examples covering all SDK features:
 
 Run specific example:
 ```bash
-npx ts-node --esm examples/basic-usage.ts 3
+npx tsx sdk-examples/basic-usage.ts 3
 ```
 
 ### 3. Neurosymbolic (`neurosymbolic.ts`)
@@ -69,8 +80,29 @@ Advanced examples showcasing Prolog + LLM integration:
 | 3. Backtracking Reasoning | Prolog backtracking for fault tolerance |
 
 ```bash
-npx ts-node --esm examples/neurosymbolic.ts 1
+npx tsx sdk-examples/neurosymbolic.ts 1
 ```
+
+### 4. No-Key Example (`no-api-key.ts`)
+
+Runs without provider credentials and demonstrates:
+- Tool registration
+- Tool whitelist and blacklist policies
+- A Prolog-only DML run with no model call
+
+```bash
+npx tsx sdk-examples/no-api-key.ts
+```
+
+### 5. Deep Research (`deep-research.ts`)
+
+Longer interactive research workflow with optional Brave Search integration:
+
+```bash
+npx tsx sdk-examples/deep-research.ts "test topic"
+```
+
+Without `GOOGLE_GENERATIVE_AI_API_KEY`, this example now skips cleanly. Without `BRAVE_API_KEY`, it falls back to mock search results.
 
 ## DML Language Quick Reference
 

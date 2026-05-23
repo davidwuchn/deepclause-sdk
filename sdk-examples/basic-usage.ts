@@ -332,7 +332,7 @@ async function parametersAndBacktracking() {
     temperature: 0.7,
   });
 
-  // DML with parameters (note: parameter order may vary)
+  // DML with a positional agent_main argument
   const code = `
     agent_main(Topic) :-
         format(string(SystemMsg), "You are a research assistant studying: ~w", [Topic]),
@@ -344,9 +344,7 @@ async function parametersAndBacktracking() {
 
   try {
     for await (const event of dc.runDML(code, {
-      params: {
-        topic: 'quantum computing',
-      },
+      args: ['quantum computing'],
       ...defaultRunOptions,
     })) {
       switch (event.type) {
@@ -576,7 +574,7 @@ async function researchAgent() {
 
   try {
     for await (const event of dc.runDML(code, {
-      params: { Topic: 'sustainable energy' },
+      args: ['sustainable energy'],
       ...defaultRunOptions,
     })) {
       switch (event.type) {
@@ -631,8 +629,8 @@ async function main() {
     examples.forEach((ex, i) => {
       console.log(`  ${i + 1}. ${ex.name}`);
     });
-    console.log('\nUsage: npx ts-node examples/basic-usage.ts [example_number]');
-    console.log('\nExample: npx ts-node examples/basic-usage.ts 4');
+    console.log('\nUsage: npx tsx sdk-examples/basic-usage.ts [example_number]');
+    console.log('\nExample: npx tsx sdk-examples/basic-usage.ts 4');
     
     // Run example 4 (Tool Policy) as a demo since it doesn't need API keys
     console.log('\n--- Running Tool Policy demo (no API needed) ---');

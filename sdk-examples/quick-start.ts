@@ -2,18 +2,18 @@
  * DeepClause SDK - Quick Start Example
  * 
  * This is a minimal example showing the core functionality.
- * Run with: npx ts-node examples/quick-start.ts
+ * Run with: npx tsx sdk-examples/quick-start.ts
  */
 
 import { createDeepClause } from '../src/index.js';
-import { z } from 'zod';
 
 async function main() {
   // Check for API key
   const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) {
-    console.error('❌ Error: GOOGLE_GENERATIVE_AI_API_KEY environment variable not set');
-    process.exit(1);
+    console.log('Skipping quick-start: GOOGLE_GENERATIVE_AI_API_KEY is not set.');
+    console.log('Set it and rerun `npx tsx sdk-examples/quick-start.ts` to execute the live example.');
+    return;
   }
   
   // Create DeepClause instance
@@ -26,15 +26,11 @@ async function main() {
 
   // 3. Define DML code
   const dmlCode = `
-    % Tool wrapper for the agent
-    tool(current_time(Time)) :-
-        exec(get_time, Time).
-
     % Main entry point
     agent_main :-
         system("You are a helpful assistant."),
-        task("Get the current time and tell the user what time it is in a friendly way."),
-        answer("Done!").
+        task("Explain what DeepClause is in exactly one sentence.", Summary),
+        answer(Summary).
   `;
 
   // 4. Run and handle events

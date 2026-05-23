@@ -355,8 +355,9 @@ async function runResearchAgent(topic: string, debugMemory: boolean = false): Pr
   // Check for API key
   const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) {
-    console.error('❌ Error: GOOGLE_GENERATIVE_AI_API_KEY environment variable not set');
-    process.exit(1);
+    console.log('Skipping deep research run: GOOGLE_GENERATIVE_AI_API_KEY is not set.');
+    console.log('Set it and rerun this example to execute the live research workflow.');
+    return;
   }
   
   // Check for Brave API key

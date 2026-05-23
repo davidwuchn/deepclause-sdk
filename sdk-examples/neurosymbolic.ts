@@ -6,7 +6,6 @@
  */
 
 import { createDeepClause } from '../src/index.js';
-import { z } from 'zod';
 
 // =============================================================================
 // Example: Product Recommendation System
@@ -23,8 +22,8 @@ async function productRecommendation() {
  // Check for API key
   const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) {
-    console.error('❌ Error: GOOGLE_GENERATIVE_AI_API_KEY environment variable not set');
-    process.exit(1);
+    console.log('Skipping product recommendation: GOOGLE_GENERATIVE_AI_API_KEY is not set.');
+    return;
   }
   
   // Create DeepClause instance
@@ -38,9 +37,15 @@ async function productRecommendation() {
   // Register product database tool
   dc.registerTool('get_products', {
     description: 'Get all available products from the database',
-    parameters: z.object({
-      category: z.string().optional(),
-    }),
+    parameters: {
+      type: 'object',
+      properties: {
+        category: {
+          type: 'string',
+          description: 'Optional product category filter',
+        },
+      },
+    },
     execute: async (args) => {
       const { category } = args as { category?: string };
       const products = [
@@ -85,7 +90,6 @@ async function productRecommendation() {
         include(good_product(MaxPrice), Products, Filtered).
 
     % Main recommendation workflow
-    % Note: Parameters must be in alphabetical order since Prolog dicts sort keys alphabetically
     agent_main(Budget, Query) :-
         system("You are a product recommendation assistant."),
         
@@ -97,7 +101,7 @@ async function productRecommendation() {
         log("Identified category"),
         
         % Step 2: Fetch products (external tool)
-        tool(fetch_products(Category, AllProducts)),
+        exec(get_products(category: Category), AllProducts),
         yield("Fetched product catalog..."),
         
         % Step 3: Filter with Prolog rules (symbolic reasoning)
@@ -117,10 +121,7 @@ async function productRecommendation() {
 
   try {
     for await (const event of dc.runDML(code, {
-      params: {
-        Budget: 2000,
-        Query: "I need a good laptop for programming",
-      },
+      args: [2000, 'I need a good laptop for programming'],
     })) {
       switch (event.type) {
         case 'log':
@@ -152,8 +153,8 @@ async function puzzleSolver() {
   // Check for API key
   const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) {
-    console.error('❌ Error: GOOGLE_GENERATIVE_AI_API_KEY environment variable not set');
-    process.exit(1);
+    console.log('Skipping puzzle solver: GOOGLE_GENERATIVE_AI_API_KEY is not set.');
+    return;
   }
   
   // Create DeepClause instance
@@ -223,8 +224,8 @@ async function backtrackingReasoning() {
 // Check for API key
   const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) {
-    console.error('❌ Error: GOOGLE_GENERATIVE_AI_API_KEY environment variable not set');
-    process.exit(1);
+    console.log('Skipping backtracking reasoning: GOOGLE_GENERATIVE_AI_API_KEY is not set.');
+    return;
   }
   
   // Create DeepClause instance
@@ -238,10 +239,21 @@ async function backtrackingReasoning() {
   // Register a fallible search tool
   dc.registerTool('search_database', {
     description: 'Search a database for information',
-    parameters: z.object({
-      query: z.string(),
-      source: z.enum(['primary', 'secondary', 'archive']),
-    }),
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query',
+        },
+        source: {
+          type: 'string',
+          description: 'Database source to use',
+          enum: ['primary', 'secondary', 'archive'],
+        },
+      },
+      required: ['query', 'source'],
+    },
     execute: async (args) => {
       const { query, source } = args as { query: string; source: string };
       // Simulate: primary fails, secondary succeeds
@@ -272,7 +284,7 @@ async function backtrackingReasoning() {
         member(Source, [primary, secondary, archive]),
         format(string(SourceMsg), "Trying source: ~w", [Source]),
         log(SourceMsg),
-        tool(search(Query, Source, Response)),
+      exec(search_database(query: Query, source: Source), Response),
         get_dict(success, Response, Success),
         Success == true,  % Fail if not successful, triggering backtracking
         get_dict(data, Response, Result),
@@ -296,7 +308,7 @@ async function backtrackingReasoning() {
 
   try {
     for await (const event of dc.runDML(code, {
-      params: { Query: 'quantum computing breakthroughs' },
+      args: ['quantum computing breakthroughs'],
     })) {
       switch (event.type) {
         case 'log':
@@ -339,7 +351,7 @@ async function main() {
     examples.forEach((ex, i) => {
       console.log(`  ${i + 1}. ${ex.name}`);
     });
-    console.log('\nUsage: npx ts-node examples/neurosymbolic.ts [example_number]');
+    console.log('\nUsage: npx tsx sdk-examples/neurosymbolic.ts [example_number]');
   }
 }
 
