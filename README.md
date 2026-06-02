@@ -8,14 +8,19 @@ Compile markdown specs into executable logic programs. Guaranteed execution sema
 
 ## What This Is
 
-AI skills and tools are everywhere—but most are just prompts. When a prompt fails, you tweak it. When you need branching logic, you write wrapper code. When you want retry behavior, you build it yourself.
+AI skills and tools are everywhere, but most are still just prompts. When a prompt fails, you tweak it. When you need branching logic, you write wrapper code. When you want retry behavior, you build it yourself.
 
-DeepClause takes a different approach: **compile task descriptions into DML programs**—a Prolog-based language that handles control flow, error recovery, and tool orchestration automatically.
+DeepClause takes a different approach: **compile task descriptions into DML programs** - a Prolog-based language that handles control flow, error recovery, and tool orchestration automatically.
 
+The three main ways to use DeepClause are:
 
-```
-Markdown description  →  compile  →  Logic program  →  run  →  Output
-```
+1. Coding Agent
+    - Specialty: Create executable plans from specs and prompts
+2. General Purpose Automation
+    - Compile recurring tasks into skills, small logic programs that orchestrate agents, prompts, and deterministic code
+3. Testbed for LLM+Prolog
+    - Explore how constrained logic, tool calls, and model output interact in a reproducible runtime
+
 
 ## Install and Run
 
@@ -155,6 +160,20 @@ deepclause run .deepclause/tools/fix-imports.dml src/index.ts
 ```
 
 The recipe is guidance. The skill is an executable worker.
+
+### The `/plan` Command
+
+`plan` is a built-in system command that turns a request into a standalone DML plan file under `plans/` in the workspace.
+
+How it works:
+
+1. You provide a request, for example from the TUI as `/plan ...` or through the command listing interface.
+2. DeepClause uses the packaged or workspace-overridden `src/system/assets/skills/plan.dml` implementation to classify the request, collect any needed recipe guidance, and draft a numbered task list.
+3. The plan generator derives a system prompt for the resulting plan, includes the DeepClause coding workflow recipe, and assembles a deterministic `.dml` file.
+4. The generated file is written to `plans/<name>.dml`, validated, and then available to run like any other plan or skill.
+5. In the TUI, `/<plan> [args]` runs a plan from `plans/` when no compiled skill with the same name exists.
+
+The important design point is that `plan` does not try to invent a whole new agent architecture each time. It produces a small executable plan file from the request, with the runtime and recipes providing the reusable behavior.
 
 ### How This Differs From Other Agent Systems
 
