@@ -6,7 +6,7 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { getToolsDir } from './config.js';
+import { configExists, ensureSystemOverrideSeeds, getSystemDir, getToolsDir } from './config.js';
 
 // =============================================================================
 // Types
@@ -60,6 +60,22 @@ interface MetaFile {
   }>;
 }
 
+const SYSTEM_COMMAND_DEFINITIONS: ReadonlyArray<{
+  name: string;
+  description: string;
+  parameters: Parameter[];
+}> = [
+  {
+    name: 'plan',
+    description: 'Creates a simple standalone DML plan file from a request and saves it under plans/ in your workspace.',
+    parameters: [
+      { name: 'request', description: 'What the generated plan should do', required: true, position: 0 },
+    ],
+  },
+];
+
+const SYSTEM_COMMAND_NAMES = new Set(SYSTEM_COMMAND_DEFINITIONS.map((definition) => definition.name));
+
 // =============================================================================
 // Command Listing
 // =============================================================================
@@ -72,21 +88,28 @@ export async function listCommands(
   options: ListCommandsOptions = {}
 ): Promise<CommandInfo[]> {
   const toolsDir = getToolsDir(workspaceRoot);
+  const commands: CommandInfo[] = [];
+
+  if (await configExists(workspaceRoot)) {
+    await ensureSystemOverrideSeeds(workspaceRoot);
+  }
   
-  let files: string[];
+  let files: string[] = [];
   try {
     files = await fs.readdir(toolsDir);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return [];
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
     }
-    throw error;
   }
   
   // Find all .dml files
-  const dmlFiles = files.filter(f => f.endsWith('.dml'));
-  
-  const commands: CommandInfo[] = [];
+  const dmlFiles = files.filter((fileName) => {
+    if (!fileName.endsWith('.dml')) {
+      return false;
+    }
+    return !SYSTEM_COMMAND_NAMES.has(fileName.replace('.dml', ''));
+  });
   
   for (const dmlFile of dmlFiles) {
     const name = dmlFile.replace('.dml', '');
@@ -123,6 +146,8 @@ export async function listCommands(
     
     commands.push(command);
   }
+
+  commands.push(...await listSystemCommands(workspaceRoot, options));
   
   // Sort by name
   commands.sort((a, b) => a.name.localeCompare(b.name));
@@ -137,6 +162,11 @@ export async function getCommand(
   workspaceRoot: string,
   name: string
 ): Promise<CommandInfo | null> {
+  const systemCommand = await getSystemCommand(workspaceRoot, name);
+  if (systemCommand) {
+    return systemCommand;
+  }
+
   const toolsDir = getToolsDir(workspaceRoot);
   const dmlPath = path.join(toolsDir, `${name}.dml`);
   const metaPath = path.join(toolsDir, `${name}.meta.json`);
@@ -181,6 +211,10 @@ export async function commandExists(
   workspaceRoot: string,
   name: string
 ): Promise<boolean> {
+  if (await getSystemCommand(workspaceRoot, name)) {
+    return true;
+  }
+
   const toolsDir = getToolsDir(workspaceRoot);
   const dmlPath = path.join(toolsDir, `${name}.dml`);
   
@@ -190,6 +224,50 @@ export async function commandExists(
   } catch {
     return false;
   }
+}
+
+async function listSystemCommands(
+  workspaceRoot: string,
+  options: ListCommandsOptions,
+): Promise<CommandInfo[]> {
+  if (!await configExists(workspaceRoot)) {
+    return [];
+  }
+
+  const commands = await Promise.all(SYSTEM_COMMAND_DEFINITIONS.map((definition) => buildSystemCommand(workspaceRoot, definition, options)));
+  return commands.filter((command): command is CommandInfo => command !== null);
+}
+
+async function getSystemCommand(workspaceRoot: string, name: string): Promise<CommandInfo | null> {
+  const definition = SYSTEM_COMMAND_DEFINITIONS.find((entry) => entry.name === name);
+  if (!definition || !await configExists(workspaceRoot)) {
+    return null;
+  }
+
+  return buildSystemCommand(workspaceRoot, definition, { detailed: true });
+}
+
+async function buildSystemCommand(
+  workspaceRoot: string,
+  definition: { name: string; description: string; parameters: Parameter[] },
+  options: ListCommandsOptions,
+): Promise<CommandInfo | null> {
+  const dmlPath = path.join(getSystemDir(workspaceRoot), `${definition.name}.dml`);
+  try {
+    await fs.access(dmlPath);
+  } catch {
+    return null;
+  }
+
+  const commandPath = path.relative(workspaceRoot, dmlPath).replace(/\.dml$/, '');
+  const orderedParameters = orderParameters(definition.parameters);
+  return {
+    name: definition.name,
+    path: commandPath,
+    description: definition.description,
+    usage: buildCliUsage(commandPath, orderedParameters),
+    parameters: options.detailed ? orderedParameters : undefined,
+  };
 }
 
 function orderParameters(parameters: Parameter[] | undefined): Parameter[] | undefined {

@@ -3,10 +3,10 @@ import { access, readFile } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
-export type SystemSkillAssetName = 'conductor' | 'skill-creator';
+export type SystemSkillAssetName = 'conductor' | 'skill-creator' | 'plan';
 export type SystemPromptAssetName = 'conductor' | 'skill-creator' | 'task';
 export type SystemCompactorAssetName = 'default-session-compactor' | 'default-loop-compactor';
-export type WorkspaceDocAssetName = 'tui';
+export type WorkspaceDocAssetName = 'tui' | 'dml-reference';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -27,6 +27,8 @@ function getSystemSkillFileName(name: SystemSkillAssetName): string {
       return 'conductor.dml';
     case 'skill-creator':
       return 'skill-creator.dml';
+    case 'plan':
+      return 'plan.dml';
   }
 }
 
@@ -66,6 +68,8 @@ function getWorkspaceDocFileName(name: WorkspaceDocAssetName): string {
   switch (name) {
     case 'tui':
       return 'TUI.md';
+    case 'dml-reference':
+      return 'DML_REFERENCE.md';
   }
 }
 
@@ -176,6 +180,7 @@ function resolveSystemPromptAssetPathSync(
 export function getSystemAssetSourcePaths(workspaceRoot?: string): {
   conductorDml: string;
   conductorPrompt: string;
+  planDml: string;
   skillCreatorDml: string;
   skillCreatorPrompt: string;
   taskPrompt: string;
@@ -183,6 +188,7 @@ export function getSystemAssetSourcePaths(workspaceRoot?: string): {
   return {
     conductorDml: resolveSystemSkillAssetPathSync('conductor', workspaceRoot),
     conductorPrompt: resolveSystemPromptAssetPathSync('conductor', workspaceRoot),
+    planDml: resolveSystemSkillAssetPathSync('plan', workspaceRoot),
     skillCreatorDml: resolveSystemSkillAssetPathSync('skill-creator', workspaceRoot),
     skillCreatorPrompt: resolveSystemPromptAssetPathSync('skill-creator', workspaceRoot),
     taskPrompt: resolveSystemPromptAssetPathSync('task', workspaceRoot),

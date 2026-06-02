@@ -6,6 +6,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { vol } from 'memfs';
 import {
   ensureWorkspaceDocSeeds,
+  getSystemDir,
   initConfig,
   loadConfig,
   validateConfig,
@@ -196,6 +197,24 @@ describe('Config Module', () => {
 
         expect(config.shell).toEqual({ wrapper: 'bwrap', strictIsolation: true });
       });
+
+      it('backfills missing default local skills without requiring re-init', async () => {
+        vol.fromJSON({
+          '/workspace/.deepclause/config.json': JSON.stringify({
+            model: 'gpt-4o',
+          }),
+        });
+
+        await loadConfig('/workspace');
+
+        const toolsDir = getToolsDir('/workspace');
+        const systemDir = getSystemDir('/workspace');
+        const docsDir = getDocsDir('/workspace');
+        expect(vol.existsSync(`${systemDir}/plan.dml`)).toBe(true);
+        expect(vol.existsSync(`${docsDir}/DML_REFERENCE.md`)).toBe(true);
+        expect(vol.existsSync(`${toolsDir}/deep-research.dml`)).toBe(true);
+        expect(vol.existsSync(`${toolsDir}/research-search-reader.dml`)).toBe(true);
+      });
     });
     it('should fail if config exists without --force', async () => {
       vol.fromJSON({
@@ -227,6 +246,7 @@ describe('Config Module', () => {
       await ensureWorkspaceDocSeeds('/workspace');
 
       expect(vol.readFileSync('/workspace/.deepclause/docs/TUI.md', 'utf-8')).toBe('# Custom Guide\n');
+      expect(vol.existsSync('/workspace/.deepclause/docs/DML_REFERENCE.md')).toBe(true);
     });
   });
 

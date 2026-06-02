@@ -2,6 +2,7 @@ import * as path from 'path';
 import { createDeepClause } from '../../sdk.js';
 import type { Config } from '../../cli/config.js';
 import { applyResolvedModelConfig, resolveCompactionConfig } from '../../cli/config.js';
+import { formatToolArgs } from '../../cli/tool-args.js';
 import type { DMLEvent, DeepClauseSDK } from '../../types.js';
 import {
   createLocalSkillCatalogRuntime,
@@ -181,6 +182,7 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
       : undefined;
 
     registerLocalRuntimeTools(sdk, {
+      workspaceRoot: options.workspaceRoot,
       workspacePath: options.workspacePath,
       shell,
       signal: options.signal,
@@ -253,20 +255,4 @@ function executeNestedSkill(
       }
       : undefined,
   });
-}
-
-function formatToolArgs(args: Record<string, unknown> | undefined): string {
-  if (!args) {
-    return '';
-  }
-
-  const parts: string[] = [];
-  for (const [key, value] of Object.entries(args)) {
-    let rendered = typeof value === 'string' ? value : JSON.stringify(value);
-    if (rendered.length > 50) {
-      rendered = rendered.slice(0, 47) + '...';
-    }
-    parts.push(`${key}=${rendered}`);
-  }
-  return parts.join(', ');
 }

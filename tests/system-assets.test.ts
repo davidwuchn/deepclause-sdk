@@ -40,11 +40,31 @@ describe('system skill assets', () => {
     expect(content).toContain('override skill creator');
   });
 
+  it('prefers a workspace plan override when present', async () => {
+    const workspaceRoot = await createWorkspace();
+    const systemDir = join(workspaceRoot, '.deepclause', 'system');
+    await mkdir(systemDir, { recursive: true });
+    await writeFile(join(systemDir, 'plan.dml'), 'agent_main(_):-answer("override plan").\n', 'utf8');
+
+    const content = await readSystemSkillAsset('plan', { workspaceRoot });
+
+    expect(content).toContain('override plan');
+  });
+
   it('falls back to the packaged asset when no override exists', async () => {
     const workspaceRoot = await createWorkspace();
 
     const content = await readSystemSkillAsset('conductor', { workspaceRoot });
     const packaged = await readSystemSkillAsset('conductor');
+
+    expect(content).toBe(packaged);
+  });
+
+  it('falls back to the packaged plan asset when no override exists', async () => {
+    const workspaceRoot = await createWorkspace();
+
+    const content = await readSystemSkillAsset('plan', { workspaceRoot });
+    const packaged = await readSystemSkillAsset('plan');
 
     expect(content).toBe(packaged);
   });
@@ -114,6 +134,7 @@ describe('system skill assets', () => {
 
     expect(sources.conductorDml).toBe(join(systemDir, 'conductor.dml'));
     expect(sources.conductorPrompt).toBe(join(systemDir, 'CONDUCTOR_PROMPT.md'));
+    expect(sources.planDml).toContain('/src/system/assets/skills/plan.dml');
     expect(sources.skillCreatorDml).toContain('/src/system/assets/skills/skill-creator.dml');
     expect(sources.skillCreatorPrompt).toContain('/src/system/assets/docs/DML_COMPILER_PROMPT.md');
     expect(sources.taskPrompt).toBe(join(systemDir, 'TASK_PROMPT.md'));

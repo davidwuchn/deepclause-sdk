@@ -126,6 +126,34 @@ export async function writeDefaultSkillSeeds(toolsDir: string, modelId: string):
   }
 }
 
+export async function ensureDefaultSkillSeeds(toolsDir: string, modelId: string): Promise<string[]> {
+  const seeds = getDefaultSkillSeeds(modelId);
+  const written: string[] = [];
+
+  await fs.mkdir(toolsDir, { recursive: true });
+
+  for (const seed of seeds) {
+    const dmlPath = path.join(toolsDir, `${seed.slug}.dml`);
+    const metaPath = path.join(toolsDir, `${seed.slug}.meta.json`);
+    const dmlExists = await pathExists(dmlPath);
+    const metaExists = await pathExists(metaPath);
+
+    if (dmlExists && metaExists) {
+      continue;
+    }
+
+    if (!dmlExists) {
+      await fs.writeFile(dmlPath, seed.dml, 'utf8');
+    }
+    if (!metaExists) {
+      await fs.writeFile(metaPath, JSON.stringify(seed.meta, null, 2) + '\n', 'utf8');
+    }
+    written.push(seed.slug);
+  }
+
+  return written;
+}
+
 export function getDefaultSkillSeeds(modelId: string, compiledAt = new Date().toISOString()): DefaultSkillSeed[] {
   const provider = getProviderFromModelId(modelId);
 
@@ -195,6 +223,15 @@ function createSeed(
 function getProviderFromModelId(modelId: string): string {
   const [provider] = modelId.split(':', 1);
   return provider || 'openai';
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function ensureTrailingNewline(value: string): string {

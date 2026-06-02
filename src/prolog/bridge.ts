@@ -8,6 +8,7 @@ import { PassThrough, Readable } from 'stream';
 import { google, createGoogleGenerativeAI } from '@ai-sdk/google';
 import { anthropic, createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
+import { generateText } from 'ai';
 import type { LanguageModel } from 'ai';
 
 export interface RawProviderResponseSnapshot {
@@ -18,6 +19,22 @@ export interface RawProviderResponseSnapshot {
   transport: 'https-one-shot' | 'undici';
   bodyText: string;
   captureError?: string;
+}
+
+export interface SampleSingleTokenOptions {
+  prompt: string;
+  allowedTokens?: string[];
+  modelOptions: {
+    provider: string;
+    model: string;
+    temperature: number;
+    baseUrl?: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    providerOptions?: Record<string, Record<string, any>>;
+  };
+  signal?: AbortSignal;
+  debugLog?: (...args: unknown[]) => void;
+  onRawResponse?: (snapshot: Promise<RawProviderResponseSnapshot>) => void;
 }
 
 function describeFetchError(error: unknown): string {
@@ -510,6 +527,92 @@ export function createModelProvider(
       return baseUrl ? defaultProvider.chat(model) : defaultProvider(model);
     }
   }
+}
+
+function stripWrappingQuotes(token: string): string {
+  if (token.length < 2) {
+    return token;
+  }
+  const prefix = token[0];
+  const suffix = token[token.length - 1];
+  if ((prefix === '"' || prefix === "'") && prefix === suffix) {
+    return token.slice(1, -1);
+  }
+  return token;
+}
+
+function stripTerminalPunctuation(token: string): string {
+  if (token.length <= 1) {
+    return token;
+  }
+  const suffix = token[token.length - 1];
+  if (suffix === '.' || suffix === ',' || suffix === ';' || suffix === ':') {
+    return token.slice(0, -1);
+  }
+  return token;
+}
+
+function normalizeSampleTokenResponse(rawToken: string): string {
+  const trimmed = rawToken.trim();
+  if (!trimmed) {
+    throw new Error('Model returned an empty token response');
+  }
+  const [first] = trimmed.split(/\s+/);
+  if (!first) {
+    throw new Error('Model returned an empty token response');
+  }
+  return stripWrappingQuotes(first);
+}
+
+function chooseAllowedSampleToken(rawToken: string, allowedTokens: string[]): string {
+  if (allowedTokens.length === 0) {
+    throw new Error('Allowed token list must not be empty');
+  }
+
+  const candidate = normalizeSampleTokenResponse(rawToken);
+  if (allowedTokens.includes(candidate)) {
+    return candidate;
+  }
+
+  const punctuationStripped = stripTerminalPunctuation(candidate);
+  if (punctuationStripped !== candidate && allowedTokens.includes(punctuationStripped)) {
+    return punctuationStripped;
+  }
+
+  return allowedTokens[0];
+}
+
+function buildSampleTokenPrompt(prompt: string, allowedTokens?: string[]): string {
+  if (!allowedTokens || allowedTokens.length === 0) {
+    return prompt;
+  }
+
+  return `${prompt}\nAllowed tokens: ${JSON.stringify(allowedTokens)}`;
+}
+
+export async function sampleSingleToken(options: SampleSingleTokenOptions): Promise<string> {
+  const model = createModelProvider(
+    options.modelOptions.provider,
+    options.modelOptions.model,
+    options.modelOptions.baseUrl,
+    options.debugLog,
+    options.onRawResponse,
+  );
+
+  const result = await generateText({
+    model,
+    prompt: buildSampleTokenPrompt(options.prompt, options.allowedTokens),
+    temperature: options.modelOptions.temperature,
+    maxOutputTokens: 1,
+    abortSignal: options.signal,
+    providerOptions: options.modelOptions.providerOptions,
+  });
+
+  if (options.allowedTokens && options.allowedTokens.length > 0) {
+    return chooseAllowedSampleToken(result.text, options.allowedTokens);
+  }
+
+  return normalizeSampleTokenResponse(result.text);
 }
 
 /**

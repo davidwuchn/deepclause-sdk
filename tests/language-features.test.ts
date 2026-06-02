@@ -11,6 +11,10 @@
  * - Tool policies
  * - Output events (yield, log, output)
  */
+import { mkdtemp, rm, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
+
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { createDeepClause, DeepClauseSDK } from '../src/index.js';
 
@@ -685,6 +689,67 @@ describe('Args & Params', () => {
 
       expect(events.find(e => e.type === 'answer')?.content).toBe('/tmp/test');
     });
+  });
+});
+
+// ============================================================================
+// DCG SUPPORT
+// ============================================================================
+describe('DCG Support', () => {
+  let sdk: DeepClauseSDK;
+
+  beforeAll(async () => {
+    sdk = await createDeepClause({ model: 'gpt-4o-mini' });
+  });
+
+  afterAll(async () => {
+    await sdk.dispose();
+  });
+
+  it('should expand raw DCG rules in top-level DML and execute them via phrase/2', async () => {
+    const code = `
+      sentence --> ["hello"], ["world"].
+
+      agent_main :-
+          phrase(sentence, ["hello", "world"]),
+          answer("matched").
+    `;
+
+    const events: any[] = [];
+    for await (const event of sdk.runDML(code)) {
+      events.push(event);
+    }
+
+    expect(events.find(e => e.type === 'answer')?.content).toBe('matched');
+  });
+
+  it('should support DCGs in consulted files', async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), 'deepclause-dcg-'));
+
+    try {
+      await writeFile(
+        join(workspacePath, 'grammar.pl'),
+        'sentence --> ["alpha"], ["beta"].\n',
+        'utf8',
+      );
+
+      const code = `
+        :- consult('grammar.pl').
+
+        agent_main :-
+            phrase(sentence, ["alpha", "beta"]),
+            answer("consulted grammar matched").
+      `;
+
+      const events: any[] = [];
+      for await (const event of sdk.runDML(code, { workspacePath })) {
+        events.push(event);
+      }
+
+      expect(events.find(e => e.type === 'answer')?.content).toBe('consulted grammar matched');
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1595,6 +1660,26 @@ describe('File I/O Operations', () => {
       expect(existsSync(join(testWorkspace, 'subdir'))).toBe(true);
     });
 
+    it('should create nested directories with make_directory_path/1 before opening a file', async () => {
+      const code = `
+        agent_main :-
+            make_directory_path("plans/nested"),
+            open("plans/nested/plan.dml", write, S),
+            write(S, "agent_main :- answer(\\"ok\\").\\n"),
+            close(S),
+            read_file("plans/nested/plan.dml", Content),
+            answer(Content).
+      `;
+
+      const events: any[] = [];
+      for await (const event of sdk.runDML(code, { workspacePath: testWorkspace })) {
+        events.push(event);
+      }
+
+      expect(events.find(e => e.type === 'answer')?.content).toContain('answer("ok")');
+      expect(existsSync(join(testWorkspace, 'plans', 'nested', 'plan.dml'))).toBe(true);
+    });
+
     it('should list directory contents with directory_files/2', async () => {
       // Create test files
       writeFileSync(join(testWorkspace, 'file1.txt'), 'a');
@@ -1697,6 +1782,28 @@ describe('File I/O Operations', () => {
       const answer = events.find(e => e.type === 'answer')?.content;
       expect(answer).toContain('First line');
       expect(answer).toContain('Second line');
+    });
+
+    it('should expose validate_dml in the generic local runtime with compiler warnings', async () => {
+      const code = `
+        agent_main :-
+            open("draft.dml", write, S),
+            write(S, "agent_main :- answer(\\\"ok\\\").\\n"),
+            close(S),
+            exec(validate_dml(dml_file: "draft.dml"), Validation),
+            get_dict(valid, Validation, true),
+            get_dict(warnings, Validation, Warnings),
+            member(Warning, Warnings),
+            sub_string(Warning, _, _, _, "No tool() definitions found"),
+            answer("warned").
+      `;
+
+      const events: any[] = [];
+      for await (const event of sdk.runDML(code, { workspacePath: testWorkspace })) {
+        events.push(event);
+      }
+
+      expect(events.find(e => e.type === 'answer')?.content).toBe('warned');
     });
   });
 });

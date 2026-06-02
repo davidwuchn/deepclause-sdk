@@ -36,7 +36,7 @@ import {
 import type { DMLEvent } from '../types.js';
 
 const IGNORED_LIVE_LOG_TOOLS = new Set(['set_result', 'update_memory']);
-const BUILTIN_SLASH_COMMANDS = ['new', 'sessions', 'help', 'compile', 'skill-creator', 'set-model', 'cancel', 'exit', 'quit'] as const;
+const BUILTIN_SLASH_COMMANDS = ['new', 'sessions', 'help', 'run', 'compile', 'skill-creator', 'set-model', 'cancel', 'exit', 'quit'] as const;
 const MODEL_SLOTS = ['gateway', 'run', 'compile'] as const;
 const CHILD_EVENT_INDENT = '\t';
 const CHILD_EVENT_TAB_WIDTH = 4;
@@ -1185,6 +1185,10 @@ class FullscreenTui {
         return;
       }
 
+      case 'run':
+        await this.executeRunFile(parsed.args);
+        return;
+
       case 'compile':
       case 'skill-creator':
         await this.executeSkillCreator(parsed.name, parsed.rawArgs);
@@ -1285,7 +1289,7 @@ class FullscreenTui {
     this.requestRender();
 
     try {
-      const result = await runSkillCommand(this.workspaceRoot, skillName, args, {
+      const result = await runSlashCommand(this.workspaceRoot, skillName, args, {
         sessionId: this.selectedSessionId || undefined,
         sandbox: this.options.sandbox,
         signal: this.currentAbortController.signal,
@@ -1310,6 +1314,68 @@ class FullscreenTui {
       activity.pushLine(`[${skillName}] error ${message}`);
       this.finishExecutionPreview({ persist: true, error: message });
       this.statusLine = `/${skillName} failed.`;
+    } finally {
+      this.busy = false;
+      this.currentAbortController = null;
+      this.stopAnimation();
+      if (this.exitRequested) {
+        this.close();
+      } else {
+        this.requestRender();
+      }
+    }
+  }
+
+  private async executeRunFile(args: string[]): Promise<void> {
+    if (args.length === 0) {
+      this.statusLine = 'Provide a DML file after /run.';
+      this.requestRender();
+      return;
+    }
+
+    const [fileSpec, ...runArgs] = args;
+    const sessionId = this.selectedSessionId || 'global';
+    const activity = this.activityFor(sessionId);
+    const commandText = `/run ${args.join(' ')}`;
+    const previewTag = path.basename(fileSpec, path.extname(fileSpec)) || 'run';
+    this.lastSubmittedInput = { kind: 'builtin', name: 'run', rawArgs: args.join(' '), args: [...args] };
+    this.focusedPane = 'messages';
+    this.paneScroll.messages = 0;
+    this.paneScroll.process = 0;
+    this.beginExecutionPreview(sessionId, 'skill', { role: 'system', content: commandText }, previewTag);
+    activity.pushLine(`run ${commandText}`);
+    this.busy = true;
+    this.currentAbortController = new AbortController();
+    this.startAnimation();
+    this.statusLine = `Running ${commandText}...`;
+    this.requestRender();
+
+    try {
+      const result = await runFileCommand(this.workspaceRoot, fileSpec, runArgs, {
+        sessionId: this.selectedSessionId || undefined,
+        sandbox: this.options.sandbox,
+        signal: this.currentAbortController.signal,
+        onUserInput: (question) => this.requestClarification(question),
+        onEvent: (event) => {
+          activity.handle(event);
+          this.updatePreviewFromEvent(event);
+          this.requestRender();
+        },
+      });
+      activity.finish();
+      await this.refreshCommands();
+      this.finishExecutionPreview({
+        persist: true,
+        finalText: result.answer || summarizeRunResult(result),
+        error: result.error,
+      });
+      this.statusLine = result.error ? `${commandText} failed.` : `${commandText} finished.`;
+    } catch (error) {
+      activity.finish();
+      const message = (error as Error).message;
+      activity.pushLine(`[run] error ${message}`);
+      this.finishExecutionPreview({ persist: true, error: message });
+      this.statusLine = `${commandText} failed.`;
     } finally {
       this.busy = false;
       this.currentAbortController = null;
@@ -3224,6 +3290,7 @@ class FullscreenTui {
       'System Asset Sources',
       `Conductor DML ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.conductorDml)}`,
       `Conductor Prompt ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.conductorPrompt)}`,
+      `Plan DML ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.planDml)}`,
       `Skill Creator DML ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.skillCreatorDml)}`,
       `Skill Creator Prompt ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.skillCreatorPrompt)}`,
       `Task Prompt ${formatSystemAssetSourcePath(this.workspaceRoot, systemAssetSources.taskPrompt)}`,
@@ -3622,6 +3689,43 @@ async function startLineTui(
             }
             continue;
 
+          case 'run':
+            if (parsed.args.length === 0) {
+              console.log('Provide a DML file after /run.');
+              continue;
+            }
+
+            console.log(divider('-'));
+            console.log(`${paint('run', ANSI.dim)} /run ${parsed.args.join(' ')}`);
+            console.log(divider('-'));
+
+            {
+              const printer = new LiveExecutionPrinter();
+
+              try {
+                await runFileCommand(workspaceRoot, parsed.args[0], parsed.args.slice(1), {
+                  sessionId: session.id,
+                  sandbox: options.sandbox,
+                  onUserInput: async (question) => {
+                    printer.finish();
+                    console.log(`${paint('clarify', ANSI.yellow)} ${question}`);
+                    return (await rl.question('> ')).trim();
+                  },
+                  onEvent: (event) => printer.handle(event),
+                });
+              } catch (error) {
+                printer.finish();
+                console.log(`${paint('error', ANSI.red)} ${(error as Error).message}`);
+              }
+
+              printer.finish();
+            }
+
+            console.log('');
+            console.log(divider('-'));
+            console.log('');
+            continue;
+
           case 'compile':
           case 'skill-creator':
             if (!parsed.rawArgs.trim()) {
@@ -3706,7 +3810,7 @@ async function startLineTui(
         const printer = new LiveExecutionPrinter();
 
         try {
-          await runSkillCommand(workspaceRoot, parsed.name, parsed.args, {
+          await runSlashCommand(workspaceRoot, parsed.name, parsed.args, {
             sessionId: session.id,
             sandbox: options.sandbox,
             onUserInput: async (question) => {
@@ -3814,13 +3918,104 @@ export async function runSkillCommand(
     throw new Error(`Unknown skill: ${skillName}`);
   }
 
+  return executeRunnableCommand(workspaceRoot, {
+    inputText: `/${skillName}${args.length > 0 ? ` ${args.join(' ')}` : ''}`,
+    runPath: command.path,
+    childSlug: skillName,
+    skillName,
+  }, args, options);
+}
+
+export async function runSlashCommand(
+  workspaceRoot: string,
+  name: string,
+  args: string[],
+  options: {
+    sessionId?: string;
+    sandbox?: boolean;
+    signal?: AbortSignal;
+    onUserInput?: (prompt: string) => Promise<string>;
+    onEvent?: (event: ConductorLogEvent) => void;
+  } = {},
+): Promise<CliRunResult> {
+  const commands = await listCommands(workspaceRoot);
+  const command = commands.find((entry) => entry.name === name);
+  if (command) {
+    return executeRunnableCommand(workspaceRoot, {
+      inputText: `/${name}${args.length > 0 ? ` ${args.join(' ')}` : ''}`,
+      runPath: command.path,
+      childSlug: name,
+      skillName: name,
+    }, args, options);
+  }
+
+  const resolvedPlanPath = await resolveWorkspaceDmlPath(workspaceRoot, name, { mode: 'plans-only' });
+  if (!resolvedPlanPath) {
+    throw new Error(`Unknown skill or plan: ${name}`);
+  }
+
+  const childSlug = path.basename(resolvedPlanPath, path.extname(resolvedPlanPath)) || name;
+  return executeRunnableCommand(workspaceRoot, {
+    inputText: `/${name}${args.length > 0 ? ` ${args.join(' ')}` : ''}`,
+    runPath: resolvedPlanPath,
+    childSlug,
+    skillName: childSlug,
+  }, args, options);
+}
+
+export async function runFileCommand(
+  workspaceRoot: string,
+  fileSpec: string,
+  args: string[],
+  options: {
+    sessionId?: string;
+    sandbox?: boolean;
+    signal?: AbortSignal;
+    onUserInput?: (prompt: string) => Promise<string>;
+    onEvent?: (event: ConductorLogEvent) => void;
+  } = {},
+): Promise<CliRunResult> {
+  const resolvedPath = await resolveWorkspaceDmlPath(workspaceRoot, fileSpec, { mode: 'direct' });
+  if (!resolvedPath) {
+    throw new Error(`DML file not found: ${fileSpec}`);
+  }
+
+  const childSlug = path.basename(resolvedPath, path.extname(resolvedPath)) || 'run';
+  return executeRunnableCommand(workspaceRoot, {
+    inputText: `/run ${[fileSpec, ...args].join(' ')}`.trim(),
+    runPath: resolvedPath,
+    childSlug,
+    skillName: childSlug,
+  }, args, options);
+}
+
+interface RunnableCommandTarget {
+  inputText: string;
+  runPath: string;
+  childSlug: string;
+  skillName?: string;
+}
+
+async function executeRunnableCommand(
+  workspaceRoot: string,
+  target: RunnableCommandTarget,
+  args: string[],
+  options: {
+    sessionId?: string;
+    sandbox?: boolean;
+    signal?: AbortSignal;
+    onUserInput?: (prompt: string) => Promise<string>;
+    onEvent?: (event: ConductorLogEvent) => void;
+  } = {},
+): Promise<CliRunResult> {
+
   const executionLog = options.sessionId
     ? createSessionExecutionLogWriter({
       workspaceRoot,
       sessionId: options.sessionId,
       executionKind: 'skill',
-      inputText: `/${skillName}${args.length > 0 ? ` ${args.join(' ')}` : ''}`,
-      skillName,
+      inputText: target.inputText,
+      skillName: target.skillName,
       args,
     })
     : null;
@@ -3830,14 +4025,14 @@ export async function runSkillCommand(
   };
 
   try {
-    const result = await run(command.path, args, {
+    const result = await run(target.runPath, args, {
       configRoot: workspaceRoot,
       headless: true,
       stream: true,
       sandbox: options.sandbox,
       signal: options.signal,
       onUserInput: options.onUserInput,
-      onEvent: (event: DMLEvent) => emitLogEvent({ scope: 'child', childSlug: skillName, event }),
+      onEvent: (event: DMLEvent) => emitLogEvent({ scope: 'child', childSlug: target.childSlug, event }),
       onChildEvent: (childSlug, event) => emitLogEvent({ scope: 'child', childSlug, event }),
     });
 
@@ -3854,6 +4049,79 @@ export async function runSkillCommand(
       error: (error as Error).message,
     });
     throw error;
+  }
+}
+
+async function resolveWorkspaceDmlPath(
+  workspaceRoot: string,
+  fileSpec: string,
+  options: { mode: 'direct' | 'plans-only' },
+): Promise<string | null> {
+  const trimmed = fileSpec.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const candidates = options.mode === 'plans-only'
+    ? buildPlanOnlyCandidates(workspaceRoot, trimmed)
+    : buildDirectDmlCandidates(workspaceRoot, trimmed);
+
+  for (const candidate of candidates) {
+    if (await fileExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function buildDirectDmlCandidates(workspaceRoot: string, fileSpec: string): string[] {
+  const trimmed = fileSpec.trim();
+  const candidates = new Set<string>();
+
+  const directPath = path.resolve(workspaceRoot, trimmed);
+  candidates.add(directPath);
+  if (!trimmed.endsWith('.dml')) {
+    candidates.add(path.resolve(workspaceRoot, `${trimmed}.dml`));
+  }
+
+  const normalized = trimLeadingPathSeparators(trimmed).replace(/\\/g, '/');
+  const planRelative = normalized.startsWith('plans/') ? normalized : path.posix.join('plans', normalized);
+  candidates.add(path.resolve(workspaceRoot, planRelative));
+  if (!planRelative.endsWith('.dml')) {
+    candidates.add(path.resolve(workspaceRoot, `${planRelative}.dml`));
+  }
+
+  return Array.from(candidates);
+}
+
+function buildPlanOnlyCandidates(workspaceRoot: string, fileSpec: string): string[] {
+  const normalized = trimLeadingPathSeparators(fileSpec.trim()).replace(/\\/g, '/');
+  const planRelative = normalized.startsWith('plans/') ? normalized : path.posix.join('plans', normalized);
+  const plansRoot = path.resolve(workspaceRoot, 'plans');
+  const candidates = [
+    path.resolve(workspaceRoot, planRelative),
+    ...(planRelative.endsWith('.dml') ? [] : [path.resolve(workspaceRoot, `${planRelative}.dml`)]),
+  ];
+
+  return candidates.filter((candidate, index, all) => {
+    if (all.indexOf(candidate) !== index) {
+      return false;
+    }
+    return candidate === plansRoot || candidate.startsWith(`${plansRoot}${path.sep}`);
+  });
+}
+
+function trimLeadingPathSeparators(value: string): string {
+  return value.replace(/^[/\\]+/, '');
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -4579,6 +4847,7 @@ function buildHelpLines(): string[] {
     'commands',
     '/new [title]    create a new conductor session',
     '/sessions       refresh or choose sessions',
+    '/run <file> [args] run a workspace DML file directly',
     '/compile <spec> compile and publish a new local skill',
     '/skill-creator <spec> alias for /compile',
     '/set-model <model> [--slot <slot>] update the configured model selection',
@@ -4586,6 +4855,7 @@ function buildHelpLines(): string[] {
     '/help           show this help',
     '/quit           exit the TUI',
     '/<skill> [args] run a compiled skill directly',
+    '/<plan> [args]  run plans/<plan>.dml when no compiled skill matches',
     '!<command>     run a shell command directly in the workspace shell',
     '!!<command>    run a shell command and add its result to the session transcript',
     'keys',

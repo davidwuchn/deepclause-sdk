@@ -276,6 +276,62 @@ describe('runAgentLoop', () => {
     });
   });
 
+  it('persists a synthesized summary for successful tasks without named results', async () => {
+    aiMocks.generateText.mockImplementation(async ({ tools }: { tools: Record<string, { execute: (input: unknown) => Promise<unknown> }> }) => {
+      const projectSetupResult = await tools.setup_project.execute({ path: 'game-demo', scope: 'local' });
+      await tools.finish.execute({ success: true });
+
+      return {
+        text: '',
+        toolCalls: [
+          { toolName: 'setup_project', input: { path: 'game-demo', scope: 'local' } },
+          { toolName: 'finish', input: { success: true } },
+        ],
+        toolResults: [
+          { toolName: 'setup_project', output: projectSetupResult },
+        ],
+        response: { messages: [] },
+        finishReason: 'tool-calls',
+      };
+    });
+
+    const result = await runAgentLoop({
+      taskDescription: 'Create a local project folder for the generated game.',
+      outputVars: [],
+      memory: [],
+      tools: new Map([
+        ['setup_project', {
+          description: 'Create a local project folder.',
+          parameters: {
+            type: 'object',
+            properties: {
+              path: { type: 'string' },
+              scope: { type: 'string' },
+            },
+            required: ['path', 'scope'],
+          },
+          execute: async () => ({ path: 'game-demo', scope: 'local', created: true }),
+        }],
+      ]),
+      modelOptions: {
+        model: 'mock-model',
+        provider: 'openai',
+        temperature: 0,
+        maxOutputTokens: 1024,
+      },
+      onOutput: vi.fn(),
+      onStream: vi.fn(),
+      onAskUser: vi.fn(),
+      streaming: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.messages[result.messages.length - 1]?.content).toContain('Task completed. Summary:');
+    expect(result.messages[result.messages.length - 1]?.content).toContain('setup_project');
+    expect(result.messages[result.messages.length - 1]?.content).toContain('game-demo');
+    expect(result.messages[result.messages.length - 1]?.content).toContain('local');
+  });
+
   it('rejects wrong typed values in set_result execution', async () => {
     aiMocks.generateText.mockImplementation(async ({ tools }: { tools: Record<string, { execute: (input: unknown) => Promise<unknown> }> }) => {
       const response = await tools.set_result.execute({ variable: 'Count', value: 'not-a-number' });
@@ -316,6 +372,54 @@ describe('runAgentLoop', () => {
 
     expect(result.success).toBe(false);
     expect(result.variables).toEqual({});
+  });
+
+  it('coerces stringified JSON arrays for list(string(...)) outputs', async () => {
+    aiMocks.generateText.mockImplementation(async ({ tools }: { tools: Record<string, { execute: (input: unknown) => Promise<unknown> }> }) => {
+      const response = await tools.set_result.execute({
+        variable: 'Categories',
+        value: '["Decorations", "Food", "Games"]',
+      });
+      expect(response).toEqual({
+        success: true,
+        variable: 'Categories',
+        value: ['Decorations', 'Food', 'Games'],
+      });
+      await tools.finish.execute({ success: true });
+
+      return {
+        text: '',
+        toolCalls: [
+          { toolName: 'set_result', input: { variable: 'Categories', value: '["Decorations", "Food", "Games"]' } },
+          { toolName: 'finish', input: { success: true } },
+        ],
+        toolResults: [],
+        response: { messages: [] },
+        finishReason: 'tool-calls',
+      };
+    });
+
+    const result = await runAgentLoop({
+      taskDescription: 'Return a list of categories.',
+      outputVars: [{ name: 'Categories', type: 'array', itemType: 'string' }],
+      memory: [],
+      tools: new Map(),
+      modelOptions: {
+        model: 'mock-model',
+        provider: 'openai',
+        temperature: 0,
+        maxOutputTokens: 1024,
+      },
+      onOutput: vi.fn(),
+      onStream: vi.fn(),
+      onAskUser: vi.fn(),
+      streaming: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.variables).toEqual({
+      Categories: ['Decorations', 'Food', 'Games'],
+    });
   });
 
   it('loads the task prompt from the nearest .deepclause/system override', async () => {

@@ -733,7 +733,7 @@ function buildBwrapArgs(
 
   args.push('--bind', workspacePath, workspacePath);
   args.push('--bind', scratchDir, scratchDir);
-  args.push('--tmpfs', '/tmp');
+  //args.push('--tmpfs', '/tmp');
   args.push('--chdir', workspacePath);
 
   for (const [key, value] of Object.entries(env)) {

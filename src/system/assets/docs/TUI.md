@@ -11,6 +11,8 @@ The TUI is the operator interface around a single built-in agent: the conductor.
 - The upper-right pane shows live execution activity.
 - The lower-right pane shows context, token usage, system asset sources, and shell execution details.
 
+The local `.deepclause/docs/` folder contains editable workspace docs such as `TUI.md` and `DML_REFERENCE.md`. The system `plan` skill reads `DML_REFERENCE.md` and `.deepclause/system/DML_COMPILER_PROMPT.md` before generating new plan files.
+
 ## Command Bar
 
 The command bar accepts three main input styles plus direct skill execution:
@@ -18,6 +20,9 @@ The command bar accepts three main input styles plus direct skill execution:
 - Plain text sends a normal request to the conductor.
 - `/...` runs a built-in slash command.
 - `/<skill> [args]` runs a compiled local skill directly.
+- `/plan <request>` runs the system `plan` skill from `.deepclause/system/plan.dml`.
+- `/<plan> [args]` runs `plans/<plan>.dml` when no compiled local skill matches that name.
+- `/run <file> [args]` runs a workspace DML file directly.
 - `!<command>` runs a shell command directly in the configured workspace shell.
 
 Examples:
@@ -26,6 +31,8 @@ Examples:
 summarize the latest test failures
 /sessions
 /set-model openai:gpt-4.1 --slot run
+/plan create a simple repo cleanup workflow
+/run plans/repo_cleanup.dml
 /compile create a skill that reviews changelogs
 /deep-research transformers scaling laws
 !git status
@@ -41,6 +48,8 @@ Common built-in slash commands:
 - `/new [title]` creates a new conductor session.
 - `/sessions` refreshes or switches sessions.
 - `/set-model <model> [--slot <slot>]` updates the configured model for all slots or one slot.
+- `/plan <request>` runs the system plan skill and writes a simple standalone plan under `plans/`.
+- `/run <file> [args]` runs a workspace DML file directly.
 - `/compile <spec>` runs the skill creator.
 - `/skill-creator <spec>` is an alias for `/compile`.
 - `/cancel` aborts the current running task, skill, or shell command.
@@ -48,6 +57,7 @@ Common built-in slash commands:
 - `/quit` or `/exit` closes the TUI.
 
 Any other `/name` is treated as a compiled skill invocation if that skill exists in the local catalog.
+If no compiled skill matches, the TUI looks for `plans/<name>.dml` and runs that file directly.
 
 ## Direct Shell Mode
 
@@ -126,6 +136,7 @@ The conductor is not the same thing as a compiled skill.
 
 - The conductor handles freeform user requests and orchestration.
 - Compiled skills are reusable DML workers in `.deepclause/tools/`.
+- The `plan` system skill lives at `.deepclause/system/plan.dml` and follows the same override model as the other system DML assets.
 - `/set-model` updates the configured gateway, run, and compile model selection for future turns, or only one slot when `--slot` is provided.
 - `/compile` and `/skill-creator` use the skill creator to turn a spec into a validated local skill.
 

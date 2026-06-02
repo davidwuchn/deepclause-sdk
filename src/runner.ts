@@ -28,6 +28,7 @@ import {
   buildToolStartEvent,
 } from './system/runtime/shell-tool-events.js';
 import { checkToolPolicy } from './tools.js';
+import { sampleSingleToken } from './prolog/bridge.js';
 
 /**
  * Convert swipl-wasm value to plain JavaScript value
@@ -344,6 +345,10 @@ export class DMLRunner {
               step.payload,
               options
             );
+            break;
+
+          case 'request_sample_token':
+            yield* this.handleSampleToken(step.payload, options);
             break;
 
           case 'wait_input':
@@ -806,6 +811,41 @@ export class DMLRunner {
   }
 
   /**
+   * Handle one-token sampling request (sample_token/2-3)
+   */
+  private async *handleSampleToken(
+    payload: unknown,
+    options: InternalRunOptions,
+  ): AsyncGenerator<DMLEvent> {
+    const data = payload as Record<string, unknown>;
+    const prompt = String(toJsValue(data.prompt) ?? '');
+    const rawAllowedTokens = toJsValue(data.allowedTokens);
+    const allowedTokens = Array.isArray(rawAllowedTokens)
+      ? rawAllowedTokens.map((token) => String(token))
+      : [];
+
+    try {
+      const token = await sampleSingleToken({
+        prompt,
+        allowedTokens,
+        modelOptions: {
+          provider: this.options.provider,
+          model: this.options.model,
+          temperature: this.options.temperature,
+          baseUrl: this.options.baseUrl,
+          providerOptions: this.options.providerOptions,
+        },
+        signal: options.signal,
+      });
+      this.postSampleTokenResult({ success: true, token });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.postSampleTokenResult({ success: false, error: message });
+      yield { type: 'log', content: `sample_token failed: ${message}` };
+    }
+  }
+
+  /**
    * Handle exec request (exec() predicate)
    */
   private async *handleExec(
@@ -1204,6 +1244,37 @@ export class DMLRunner {
                 }
                 const postGoal = `deepclause_mi:post_exec_result('${this.sessionId}', failure, "${message.replace(/"/g, '\\"')}")`;
                 this.query(postGoal);
+              }
+            }
+            break;
+          }
+
+          case 'request_sample_token': {
+            const prompt = String(toJsValue(payload?.prompt) ?? '');
+            const rawAllowedTokens = toJsValue(payload?.allowedTokens);
+            const allowedTokens = Array.isArray(rawAllowedTokens)
+              ? rawAllowedTokens.map((token) => String(token))
+              : [];
+
+            try {
+              const token = await sampleSingleToken({
+                prompt,
+                allowedTokens,
+                modelOptions: {
+                  provider: this.options.provider,
+                  model: this.options.model,
+                  temperature: this.options.temperature,
+                  baseUrl: this.options.baseUrl,
+                  providerOptions: this.options.providerOptions,
+                },
+                signal: runContext.signal,
+              });
+              this.postSampleTokenResult({ success: true, token });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              this.postSampleTokenResult({ success: false, error: message });
+              if (process.env.DEBUG_RUNNER) {
+                console.log('[RUNNER] sample_token request failed:', message);
               }
             }
             break;
@@ -1612,6 +1683,27 @@ export class DMLRunner {
       const escapedErr = this.toPrologTerm(result.error ?? 'Unknown error');
       this.query(
         `deepclause_mi:post_exec_result('${this.sessionId}', failure, ${escapedErr})`
+      );
+    }
+  }
+
+  /**
+   * Post one-token sampling result back to Prolog
+   */
+  private postSampleTokenResult(result: {
+    success: boolean;
+    token?: string;
+    error?: string;
+  }): void {
+    if (result.success) {
+      const token = this.toPrologTerm(result.token ?? '');
+      this.query(
+        `deepclause_mi:post_sample_token_result('${this.sessionId}', success, ${token})`
+      );
+    } else {
+      const error = this.toPrologTerm(result.error ?? 'Unknown error');
+      this.query(
+        `deepclause_mi:post_sample_token_result('${this.sessionId}', failure, ${error})`
       );
     }
   }

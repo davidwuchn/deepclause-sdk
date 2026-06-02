@@ -91,6 +91,12 @@ interface ResponseMessagesResolution {
   elapsedMs: number;
 }
 
+interface CompletedToolActivity {
+  toolName: string;
+  input?: unknown;
+  output?: unknown;
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -187,6 +193,72 @@ function buildRecoveryPrompt(outputVars: TypedVar[], repeatedStallCount: number,
   return null;
 }
 
+function truncateSummaryText(text: string, maxLength = 240): string {
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return text.slice(0, Math.max(0, maxLength - 3)) + '...';
+}
+
+function renderSummaryValue(value: unknown, maxLength = 140): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const cleaned = cleanPrologMarkers(value);
+  const rendered = typeof cleaned === 'string' ? cleaned : stableSerialize(cleaned);
+  const normalized = rendered.trim().replace(/\s+/g, ' ');
+  if (!normalized) {
+    return undefined;
+  }
+
+  return truncateSummaryText(normalized, maxLength);
+}
+
+function summarizeCompletedToolActivity(activity: CompletedToolActivity): string {
+  const renderedInput = renderSummaryValue(activity.input, 100);
+  const renderedOutput = renderSummaryValue(activity.output, 140);
+
+  if (renderedInput && renderedOutput) {
+    return `${activity.toolName}(${renderedInput}) -> ${renderedOutput}`;
+  }
+
+  if (renderedOutput) {
+    return `${activity.toolName} -> ${renderedOutput}`;
+  }
+
+  if (renderedInput) {
+    return `${activity.toolName}(${renderedInput})`;
+  }
+
+  return activity.toolName;
+}
+
+function buildImplicitTaskSummary(
+  assistantTextResponses: string[],
+  completedToolActivities: CompletedToolActivity[],
+): string {
+  if (assistantTextResponses.length > 0) {
+    const latestAssistantText = assistantTextResponses[assistantTextResponses.length - 1]?.trim();
+    if (latestAssistantText) {
+      return latestAssistantText.startsWith('Task completed')
+        ? latestAssistantText
+        : `Task completed. Summary: ${truncateSummaryText(latestAssistantText)}`;
+    }
+  }
+
+  const renderedActivities = completedToolActivities
+    .map(summarizeCompletedToolActivity)
+    .filter((entry) => entry.length > 0);
+
+  if (renderedActivities.length > 0) {
+    return `Task completed. Summary: ${renderedActivities.slice(-3).join('; ')}`;
+  }
+
+  return 'Task completed successfully.';
+}
+
 function getStreamResponseAwaitTimeoutMs(): number {
   const raw = process.env.DC_STREAM_RESPONSE_TIMEOUT_MS;
   if (raw != null) {
@@ -263,6 +335,48 @@ function validateTypedResultValue(typedVar: TypedVar, value: unknown): string | 
       return isPlainObject(value) ? null : 'Expected an object value';
     default:
       return null;
+  }
+}
+
+function coerceTypedResultValue(typedVar: TypedVar, value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return value;
+  }
+
+  switch (typedVar.type) {
+    case 'array':
+      try {
+        const parsed = JSON.parse(trimmed);
+        return Array.isArray(parsed) ? parsed : value;
+      } catch {
+        return value;
+      }
+    case 'object':
+      try {
+        const parsed = JSON.parse(trimmed);
+        return isPlainObject(parsed) ? parsed : value;
+      } catch {
+        return value;
+      }
+    case 'number': {
+      const parsed = Number(trimmed);
+      return Number.isFinite(parsed) ? parsed : value;
+    }
+    case 'integer': {
+      const parsed = Number(trimmed);
+      return Number.isInteger(parsed) ? parsed : value;
+    }
+    case 'boolean':
+      if (trimmed === 'true') return true;
+      if (trimmed === 'false') return false;
+      return value;
+    default:
+      return value;
   }
 }
 
@@ -359,6 +473,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   const outputs: string[] = [];
   const variables: Record<string, unknown> = {};
+  const completedToolActivities: CompletedToolActivity[] = [];
+  const pendingStreamingToolCalls: Array<{ toolName: string; input: unknown }> = [];
   let finished = false;
   let success = false;
   let errorRetryCount = 0;
@@ -418,15 +534,16 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       execute: async ({ variable, value }: { variable: string; value: any }) => {
         const typedVar = normalizedOutputVars.find(v => v.name === variable);
         if (typedVar) {
-          const validationError = validateTypedResultValue(typedVar, value);
+          const coercedValue = coerceTypedResultValue(typedVar, value);
+          const validationError = validateTypedResultValue(typedVar, coercedValue);
           if (validationError) {
             return {
               success: false,
               error: `${validationError} for ${variable}`,
             };
           }
-          variables[variable] = value;
-          return { success: true, variable, value };
+          variables[variable] = coercedValue;
+          return { success: true, variable, value: coercedValue };
         }
         return { success: false, error: `Unknown variable: ${variable}` };
       },
@@ -647,6 +764,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             case 'tool-call':
               if (firstToolCallMs === null) firstToolCallMs = nowMs - apiCallMs;
               toolCallsThisIteration.push({ toolName: part.toolName, input: part.input });
+              pendingStreamingToolCalls.push({ toolName: part.toolName, input: part.input });
               debugLog(`Tool call: ${part.toolName}`, JSON.stringify(part.input));
               if (onToolCall) {
                 onToolCall(part.toolName, part.input as Record<string, unknown>);
@@ -654,6 +772,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
               break;
 
             case 'tool-result':
+              {
+                const pendingIndex = pendingStreamingToolCalls.findIndex((pending) => pending.toolName === part.toolName);
+                const pendingCall = pendingIndex >= 0
+                  ? pendingStreamingToolCalls.splice(pendingIndex, 1)[0]
+                  : undefined;
+                completedToolActivities.push({
+                  toolName: part.toolName,
+                  input: pendingCall?.input,
+                  output: (part as { output?: unknown }).output,
+                });
+              }
               debugLog(`Tool result for ${part.toolName}:`, JSON.stringify(part.output).substring(0, 500));
               break;
 
@@ -705,10 +834,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
         debugLog(`Iteration ${iteration} timing: TTFE=${ttfeMs ?? '-'}ms TTFR=${ttfrMs ?? '-'}ms TTFT=${ttftMs ?? 'no-text'}ms stream=${streamDoneMs}ms total=${Date.now() - iterStartMs}ms${usageStr}`);
         
-        // Check if finish was called during tool execution
         if (finished) {
-          debugLog('Finish tool was called, exiting loop');
-          break;
+          debugLog('Finish tool was called; finalizing streamed iteration before exit');
         }
 
         debugLog(`Response text: ${fullText || '(empty)'}`);
@@ -824,10 +951,8 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
         debugLog(`Iteration ${iteration} timing: generateText=${Date.now() - apiCallMs}ms total=${Date.now() - iterStartMs}ms${genUsageStr}`);
 
-        // Check if finish was called during tool execution
         if (finished) {
-          debugLog('Finish tool was called, exiting loop');
-          break;
+          debugLog('Finish tool was called; finalizing non-streaming iteration before exit');
         }
 
         debugLog(`Response text: ${result.text || '(empty)'}`);
@@ -864,7 +989,13 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
           
           // Log tool results
           if (result.toolResults) {
-            for (const tr of result.toolResults) {
+            for (const [index, tr] of result.toolResults.entries()) {
+              const matchingToolCall = result.toolCalls?.[index];
+              completedToolActivities.push({
+                toolName: tr.toolName,
+                input: matchingToolCall?.input,
+                output: tr.output,
+              });
               debugLog(`Tool result for ${tr.toolName}:`, JSON.stringify(tr.output).substring(0, 500));
             }
           }
@@ -963,6 +1094,11 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     persistentMessages.push({
       role: 'assistant',
       content: `Task completed. Results: ${varSummary}`,
+    });
+  } else if (success && normalizedOutputVars.length === 0) {
+    persistentMessages.push({
+      role: 'assistant',
+      content: buildImplicitTaskSummary(assistantTextResponses, completedToolActivities),
     });
   } else if (assistantTextResponses.length > 0) {
     persistentMessages.push({

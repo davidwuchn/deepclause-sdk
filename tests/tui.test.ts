@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdir, rm, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 const conductorMocks = vi.hoisted(() => ({
   appendConductorSessionMessages: vi.fn(),
@@ -59,7 +62,9 @@ import {
   previewMessageFromEvent,
   previewQuestionMessage,
   reconcileEphemeralMessages,
+  runFileCommand,
   runPromptHeadless,
+  runSlashCommand,
   runSkillCommand,
   sessionMessagesContainCompletedTaskPreview,
   selectMenuItemByTypeahead,
@@ -511,6 +516,75 @@ describe('runPromptHeadless', () => {
     });
     expect(result).toEqual({ output: ['skill output'], answer: 'skill answer' });
   });
+
+  it('runs a workspace DML file via /run and records it in the session log', async () => {
+    const workspaceRoot = await mkdirTempWorkspace();
+    const logWriter = {
+      recordEvent: vi.fn(),
+      finish: vi.fn().mockResolvedValue(undefined),
+      flush: vi.fn().mockResolvedValue(undefined),
+    };
+    conductorMocks.createSessionExecutionLogWriter.mockReturnValue(logWriter);
+    runMocks.run.mockImplementation(async (_file, _args, options: any) => {
+      options.onEvent?.({ type: 'output', content: 'file output' });
+      return { output: ['file output'], answer: 'file answer' };
+    });
+
+    try {
+      const plansDir = join(workspaceRoot, 'plans');
+      await mkdir(plansDir, { recursive: true });
+      await writeFile(join(plansDir, 'alpha.dml'), 'agent_main :- answer("ok").\n', 'utf8');
+
+      const result = await runFileCommand(workspaceRoot, 'alpha', ['arg1'], {
+        sessionId: 'session-123',
+      });
+
+      expect(runMocks.run).toHaveBeenCalledWith(expect.stringMatching(/plans\/alpha\.dml$/), ['arg1'], expect.any(Object));
+      expect(conductorMocks.createSessionExecutionLogWriter).toHaveBeenCalledWith({
+        workspaceRoot,
+        sessionId: 'session-123',
+        executionKind: 'skill',
+        inputText: '/run alpha arg1',
+        skillName: 'alpha',
+        args: ['arg1'],
+      });
+      expect(logWriter.recordEvent).toHaveBeenCalledWith({
+        scope: 'child',
+        childSlug: 'alpha',
+        event: { type: 'output', content: 'file output' },
+      });
+      expect(result).toEqual({ output: ['file output'], answer: 'file answer' });
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to plans/<name>.dml for unknown slash commands', async () => {
+    const workspaceRoot = await mkdirTempWorkspace();
+    const logWriter = {
+      recordEvent: vi.fn(),
+      finish: vi.fn().mockResolvedValue(undefined),
+      flush: vi.fn().mockResolvedValue(undefined),
+    };
+    conductorMocks.createSessionExecutionLogWriter.mockReturnValue(logWriter);
+    commandMocks.listCommands.mockResolvedValue([]);
+    runMocks.run.mockResolvedValue({ output: ['plan output'], answer: 'plan answer' });
+
+    try {
+      const plansDir = join(workspaceRoot, 'plans');
+      await mkdir(plansDir, { recursive: true });
+      await writeFile(join(plansDir, 'feature_x.dml'), 'agent_main :- answer("ok").\n', 'utf8');
+
+      const result = await runSlashCommand(workspaceRoot, 'feature_x', [] , {
+        sessionId: 'session-123',
+      });
+
+      expect(runMocks.run).toHaveBeenCalledWith(expect.stringMatching(/plans\/feature_x\.dml$/), [], expect.any(Object));
+      expect(result).toEqual({ output: ['plan output'], answer: 'plan answer' });
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('slash command parsing', () => {
@@ -536,6 +610,12 @@ describe('slash command parsing', () => {
       name: 'compile',
       rawArgs: 'build a release-note skill',
       args: ['build a release-note skill'],
+    });
+    expect(parseSlashInput('/run plans/feature_x.dml alpha')).toEqual({
+      kind: 'builtin',
+      name: 'run',
+      rawArgs: 'plans/feature_x.dml alpha',
+      args: ['plans/feature_x.dml', 'alpha'],
     });
     expect(parseSlashInput('/skill-creator draft a benchmark helper')).toEqual({
       kind: 'builtin',
@@ -655,3 +735,9 @@ describe('slash command parsing', () => {
     ]);
   });
 });
+
+async function mkdirTempWorkspace(): Promise<string> {
+  const workspaceRoot = join(tmpdir(), `deepclause-tui-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  await mkdir(workspaceRoot, { recursive: true });
+  return workspaceRoot;
+}

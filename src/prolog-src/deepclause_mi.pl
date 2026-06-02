@@ -22,6 +22,7 @@
     destroy_engine/1,
     post_agent_result/4,
     post_exec_result/3,
+    post_sample_token_result/3,
     provide_input/2,
     mi/3,
     % Tool engine predicates for isolated tool execution
@@ -46,6 +47,7 @@
 :- dynamic session_pending_input/2. % session_pending_input(SessionId, Input)
 :- dynamic session_agent_result/2. % session_agent_result(SessionId, Result)
 :- dynamic session_exec_result/2.  % session_exec_result(SessionId, Result)
+:- dynamic session_sample_token_result/2. % session_sample_token_result(SessionId, Result)
 :- dynamic session_trace_log/2.    % session_trace_log(SessionId, TraceLog) - accumulated trace entries
 :- dynamic session_trace_enabled/2. % session_trace_enabled(SessionId, true/false)
 :- dynamic session_pending_signal/2. % session_pending_signal(SessionId, Signal) - fallback for engine_fetch
@@ -96,13 +98,39 @@ parse_clauses(Stream, SessionId) :-
     read_term(Stream, Term, [module(SessionId), variable_names(Bindings)]),
     (   Term == end_of_file
     ->  true
-    ;   % First, transform task/N calls to include variable names
-        transform_task_calls(Term, Bindings, TransformedTerm),
-        % Then expand string interpolations
-        expand_interpolations(TransformedTerm, Bindings, ExpandedTerm),
-        process_clause(ExpandedTerm, SessionId),
+    ;   preprocess_loaded_term(Term, Bindings, PreparedTerms),
+        forall(member(PreparedTerm, PreparedTerms), process_clause(PreparedTerm, SessionId)),
         parse_clauses(Stream, SessionId)
     ).
+
+%% preprocess_loaded_term(+Term, +Bindings, -PreparedTerms)
+%% Apply DML source preprocessing before asserting loaded clauses.
+%% This keeps task()/prompt() rewriting and string interpolation working,
+%% while also running expand_term/2 so DCG rules (`-->`) become executable
+%% difference-list predicates before they are asserted into the session module.
+preprocess_loaded_term(Term, Bindings, PreparedTerms) :-
+    transform_task_calls(Term, Bindings, TransformedTerm),
+    expand_interpolations(TransformedTerm, Bindings, InterpolatedTerm),
+    expand_loaded_term(InterpolatedTerm, PreparedTerms).
+
+%% expand_loaded_term(+Term, -ExpandedTerms)
+%% Runs SWI term expansion and normalizes the result to a list of terms.
+expand_loaded_term(Term, ExpandedTerms) :-
+    expand_term(Term, Expanded),
+    normalize_expanded_terms(Expanded, ExpandedTerms).
+
+%% normalize_expanded_terms(+Expanded, -Terms)
+%% expand_term/2 may return a single term or a list. DML does not need the
+%% generated non_terminal/1 directives, so skip them and keep the executable
+%% clauses only.
+normalize_expanded_terms(Expanded, Terms) :-
+    (   is_list(Expanded)
+    ->  RawTerms = Expanded
+    ;   RawTerms = [Expanded]
+    ),
+    exclude(skip_expanded_term, RawTerms, Terms).
+
+skip_expanded_term((:- non_terminal(_))).
 
 %% ============================================================
 %% Task Call Transformation (compile-time)
@@ -535,6 +563,8 @@ process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), request_age
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none}) :- !.
 process_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
+process_engine_result(request_sample_token(Prompt, Allowed), request_sample_token, '',
+    payload{prompt: Prompt, allowedTokens: Allowed}) :- !.
 %% Tool result from inline tool execution
 process_engine_result(tool_result(Result), tool_result, '',
     payload{result: Result}) :- !.
@@ -556,6 +586,7 @@ destroy_engine(SessionId) :-
     retractall(session_pending_input(SessionId, _)),
     retractall(session_agent_result(SessionId, _)),
     retractall(session_exec_result(SessionId, _)),
+    retractall(session_sample_token_result(SessionId, _)),
     retractall(session_trace_log(SessionId, _)),
     retractall(session_trace_enabled(SessionId, _)),
     (   current_module(SessionId)
@@ -595,6 +626,12 @@ post_exec_result(SessionId, Status, Result) :-
     retractall(session_exec_result(SessionId, _)),
     assertz(session_exec_result(SessionId, result{status: Status, result: Result})),
     post_signal_to_engine(SessionId, exec_done).
+
+%% post_sample_token_result(+SessionId, +Status, +TokenOrError)
+post_sample_token_result(SessionId, Status, TokenOrError) :-
+    retractall(session_sample_token_result(SessionId, _)),
+    assertz(session_sample_token_result(SessionId, result{status: Status, token: TokenOrError})),
+    post_signal_to_engine(SessionId, sample_token_done).
 
 %% provide_input(+SessionId, +Input)
 provide_input(SessionId, Input) :-
@@ -924,6 +961,8 @@ step_tool_engine(ToolEngineId, Status, Content, Payload) :-
 process_tool_engine_result(tool_finished(ToolResult), finished, '', payload{result: ToolResult}) :- !.
 process_tool_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
+process_tool_engine_result(request_sample_token(Prompt, Allowed), request_sample_token, '',
+    payload{prompt: Prompt, allowedTokens: Allowed}) :- !.
 process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope), request_agent_loop, '',
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope}) :- !.
 %% Legacy 4-arg format (no tool scope)
@@ -1076,6 +1115,18 @@ mi_call(task_named(Desc, Vars, VarNames), StateIn, StateOut) :-
 %% Prompt Handling - Fresh LLM call without existing memory
 %% ============================================================
 
+%% mi_call(sample_token(Desc, Token), +StateIn, -StateOut)
+%% Ask the host runtime for exactly one token via the provider.
+mi_call(sample_token(Desc, Token), StateIn, StateOut) :-
+    !,
+    mi_call_sample_token(Desc, none, Token, StateIn, StateOut).
+
+%% mi_call(sample_token(Desc, Allowed, Token), +StateIn, -StateOut)
+%% Same as sample_token/2, but provides an allowed token list to runtime.
+mi_call(sample_token(Desc, Allowed, Token), StateIn, StateOut) :-
+    !,
+    mi_call_sample_token(Desc, Allowed, Token, StateIn, StateOut).
+
 %% mi_call(prompt(Desc), +StateIn, -StateOut)
 %% Simple LLM call with empty memory and NO tools (pure text completion)
 mi_call(prompt(Desc), StateIn, StateOut) :-
@@ -1141,6 +1192,42 @@ mi_call_prompt_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     ),
     bind_task_variables(Result.variables, VarNames, Vars).
     % Don't modify memory - but state may have changed from tool calls
+
+mi_call_sample_token(Desc, Allowed, Token, StateIn, StateOut) :-
+    get_params(StateIn, Params),
+    interpolate_desc(Desc, Params, InterpDesc),
+    get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, llm_call, sample_token, [InterpDesc, Allowed], Depth),
+    engine_yield(request_sample_token(InterpDesc, Allowed)),
+    wait_sample_token_signal(SessionId),
+    (   session_sample_token_result(SessionId, Result)
+    ->  retract(session_sample_token_result(SessionId, _)),
+        (   Result.status == success
+        ->  Token = Result.token,
+            add_trace_with_result(SessionId, exit, sample_token, [InterpDesc, Allowed], Token, Depth),
+            StateOut = StateIn
+        ;   (   get_dict(token, Result, ErrorMsg), ErrorMsg \= ""
+            ->  format(atom(WarnMsg), 'Warning: sample_token failed: ~w', [ErrorMsg])
+            ;   format(atom(WarnMsg), 'Warning: sample_token failed (status=~w)', [Result.status])
+            ),
+            add_trace_entry(SessionId, fail, sample_token, [InterpDesc, Allowed], Depth),
+            engine_yield(output(WarnMsg)),
+            fail
+        )
+    ;   add_trace_entry(SessionId, fail, sample_token, [InterpDesc, Allowed], Depth),
+        engine_yield(output('Warning: sample_token failed (no result returned)')),
+        fail
+    ).
+
+wait_sample_token_signal(SessionId) :-
+    get_next_signal(SessionId, Signal),
+    (   Signal == sample_token_done
+    ->  true
+    ;   Signal = error_signal(_)
+    ->  true
+    ;   wait_sample_token_signal(SessionId)
+    ).
 
 %% mi_call_task_n(+Desc, +Vars, +VarNames, +StateIn, -StateOut)
 mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
@@ -1695,10 +1782,11 @@ consult_string(Code, SessionId) :-
 %% consult_clauses(+Stream, +SessionId)
 %% Read and assert all clauses from a stream
 consult_clauses(Stream, SessionId) :-
-    read_term(Stream, Term, [module(SessionId)]),
+    read_term(Stream, Term, [module(SessionId), variable_names(Bindings)]),
     (   Term == end_of_file
     ->  true
-    ;   consult_process_term(Term, SessionId),
+    ;   preprocess_loaded_term(Term, Bindings, PreparedTerms),
+        forall(member(PreparedTerm, PreparedTerms), consult_process_term(PreparedTerm, SessionId)),
         consult_clauses(Stream, SessionId)
     ).
 
@@ -1823,6 +1911,12 @@ mi_call(make_directory(Dir), StateIn, StateIn) :-
     resolve_workspace_path(Dir, FullPath),
     make_directory(FullPath).
 
+%% mi_call(make_directory_path(Dir), +StateIn, -StateOut)
+mi_call(make_directory_path(Dir), StateIn, StateIn) :-
+    !,
+    resolve_workspace_path(Dir, FullPath),
+    make_directory_path(FullPath).
+
 %% mi_call(delete_file(File), +StateIn, -StateOut)
 mi_call(delete_file(File), StateIn, StateIn) :-
     !,
@@ -1853,11 +1947,35 @@ mi_call(throw(Error), _StateIn, _StateOut) :-
     throw(Error).
 
 %% ============================================================
+%% DCG Helpers
+%% ============================================================
+
+%% phrase/2 and phrase/3 must run in the session module so they can resolve
+%% grammar predicates asserted from the current DML source.
+mi_call(phrase(Grammar, Input), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    call(SessionId:phrase(Grammar, Input)).
+
+mi_call(phrase(Grammar, Input, Rest), StateIn, StateIn) :-
+    !,
+    get_session_id(SessionId),
+    call(SessionId:phrase(Grammar, Input, Rest)).
+
+%% ============================================================
 %% Module-Qualified Goals
 %% ============================================================
 
 %% mi_call(Module:Goal, +StateIn, -StateOut)
 %% Module-qualified goals - handle special predicates and user-defined predicates
+
+mi_call(Module:phrase(Grammar, Input), StateIn, StateIn) :-
+    !,
+    call(Module:phrase(Grammar, Input)).
+
+mi_call(Module:phrase(Grammar, Input, Rest), StateIn, StateIn) :-
+    !,
+    call(Module:phrase(Grammar, Input, Rest)).
 
 % First check if the unqualified Goal is a special MI predicate - if so, handle it directly
 mi_call(_Module:Goal, StateIn, StateOut) :-
@@ -1898,6 +2016,8 @@ is_mi_special_predicate(task(_,_,_)).
 is_mi_special_predicate(task(_,_,_,_)).
 is_mi_special_predicate(task(_,_,_,_,_)).
 is_mi_special_predicate(task_named(_,_,_)).   %% Transformed form of task/N
+is_mi_special_predicate(sample_token(_,_)).
+is_mi_special_predicate(sample_token(_,_,_)).
 is_mi_special_predicate(exec(_,_)).
 is_mi_special_predicate(param(_,_)).
 is_mi_special_predicate(param(_,_,_)).
@@ -1951,6 +2071,9 @@ is_mi_special_predicate(maplist(_,_)).
 is_mi_special_predicate(maplist(_,_,_)).
 is_mi_special_predicate(maplist(_,_,_,_)).
 is_mi_special_predicate(foldl(_,_,_,_)).
+%% DCG predicates
+is_mi_special_predicate(phrase(_,_)).
+is_mi_special_predicate(phrase(_,_,_)).
 %% File I/O predicates
 is_mi_special_predicate(read_file_to_string(_,_,_)).
 is_mi_special_predicate(read_file(_,_)).
@@ -1964,6 +2087,7 @@ is_mi_special_predicate(exists_file(_)).
 is_mi_special_predicate(exists_directory(_)).
 is_mi_special_predicate(directory_files(_,_)).
 is_mi_special_predicate(make_directory(_)).
+is_mi_special_predicate(make_directory_path(_)).
 is_mi_special_predicate(delete_file(_)).
 is_mi_special_predicate(delete_directory(_)).
 %% Consult and module predicates
@@ -2234,6 +2358,10 @@ goal_with_string_arg(prompt(S, V1, V2, V3), prompt, S, [V1, V2, V3]) :- atom(S),
 %% prompt_named/3 - transformed form with embedded variable names
 goal_with_string_arg(prompt_named(S, Vars, Names), prompt_named, S, [Vars, Names]) :- string(S).
 goal_with_string_arg(prompt_named(S, Vars, Names), prompt_named, S, [Vars, Names]) :- atom(S), \+ S = [].
+goal_with_string_arg(sample_token(S, Token), sample_token, S, [Token]) :- string(S).
+goal_with_string_arg(sample_token(S, Token), sample_token, S, [Token]) :- atom(S), \+ S = [].
+goal_with_string_arg(sample_token(S, Allowed, Token), sample_token, S, [Allowed, Token]) :- string(S).
+goal_with_string_arg(sample_token(S, Allowed, Token), sample_token, S, [Allowed, Token]) :- atom(S), \+ S = [].
 
 %% rebuild_goal(+Functor, +StringArg, +RestArgs, -Goal)
 %% Rebuild a goal with the string argument and rest args

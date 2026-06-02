@@ -2,12 +2,35 @@ import { describe, expect, it, vi } from 'vitest';
 import { registerLocalRuntimeTools } from '../src/system/runtime/runtime-tools.js';
 
 describe('runtime skill catalog tools', () => {
+  it('registers consult_recipes in the generic local runtime', async () => {
+    const registerTool = vi.fn();
+
+    registerLocalRuntimeTools({ registerTool } as never, {
+      workspaceRoot: '/tmp/runtime-tools-workspace',
+      workspacePath: '/tmp/runtime-tools-workspace',
+      shell: { exec: vi.fn() } as never,
+    });
+
+    const registrations = new Map(registerTool.mock.calls.map(([name, definition]) => [name, definition]));
+    expect(registrations.has('consult_recipes')).toBe(true);
+
+    const result = await registrations.get('consult_recipes').execute({ query: 'deepclause coding workflow', max_results: 1 });
+    expect(result).toMatchObject({
+      success: true,
+      query: 'deepclause coding workflow',
+    });
+    expect(result.total_recipes).toBeGreaterThan(0);
+    expect(Array.isArray(result.matches)).toBe(true);
+    expect(result.matches.length).toBeGreaterThan(0);
+  });
+
   it('registers list_skills and run_skill when a catalog runtime is provided', async () => {
     const registerTool = vi.fn();
     const listSkills = vi.fn().mockResolvedValue([{ slug: 'search-arxiv' }]);
     const runSkill = vi.fn().mockResolvedValue({ success: true, slug: 'search-arxiv' });
 
     registerLocalRuntimeTools({ registerTool } as never, {
+      workspaceRoot: '/tmp/workspace',
       workspacePath: '/tmp/workspace',
       shell: { exec: vi.fn() } as never,
       skillCatalog: { listSkills, runSkill },
@@ -54,6 +77,7 @@ describe('runtime skill catalog tools', () => {
     });
 
     registerLocalRuntimeTools({ registerTool } as never, {
+      workspaceRoot: '/tmp/workspace',
       workspacePath: '/tmp/workspace',
       shell: { exec } as never,
       onEvent,
@@ -97,6 +121,7 @@ describe('runtime skill catalog tools', () => {
 
     try {
       registerLocalRuntimeTools({ registerTool } as never, {
+        workspaceRoot: '/tmp/workspace',
         workspacePath: '/tmp/workspace',
         shell: { exec: vi.fn() } as never,
       });

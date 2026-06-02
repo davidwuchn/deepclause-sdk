@@ -1,14 +1,19 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { newsSearch, webSearch } from '../../cli/search.js';
+import { validateWithProlog } from '../../compiler.js';
 import type { Config } from '../../cli/config.js';
 import type { DMLEvent, DeepClauseSDK } from '../../types.js';
+import { listRecipeCatalog, searchRecipeCatalog } from './catalog-recipes.js';
 import type { ShellManager } from './shell-manager.js';
 import { createShellToolEventBridge } from './shell-tool-events.js';
 
 const BUILT_IN_RUNTIME_TOOLS = new Set([
   'vm_exec',
   'bash',
+  'consult_recipes',
+  'write_file',
+  'validate_dml',
   'web_search',
   'news_search',
   'url_fetch',
@@ -48,6 +53,7 @@ export function verifyRuntimeToolsAvailable(
 export function registerLocalRuntimeTools(
   sdk: DeepClauseSDK,
   options: {
+    workspaceRoot?: string;
     workspacePath: string;
     shell: ShellManager;
     signal?: AbortSignal;
@@ -110,6 +116,23 @@ export function registerLocalRuntimeTools(
     execute: async (args) => urlFetch(options.workspacePath, args, options.signal),
   });
 
+  sdk.registerTool('consult_recipes', {
+    description: 'Search the recipe library for workflow guidance, conventions, and reusable approaches.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Natural-language description of the workflow or convention you need.' },
+        max_results: { type: 'number', description: 'Optional maximum number of matching recipes to return.' },
+      },
+      required: ['query'],
+    },
+    execute: async (args) => consultRecipes({
+      workspaceRoot: options.workspaceRoot ?? options.workspacePath,
+      query: String(args.query ?? ''),
+      maxResults: typeof args.max_results === 'number' ? args.max_results : undefined,
+    }),
+  });
+
   sdk.registerTool('bash', {
     description: 'Run a shell command in the active workspace shell.',
     parameters: {
@@ -131,6 +154,31 @@ export function registerLocalRuntimeTools(
         }),
       );
     },
+  });
+
+  sdk.registerTool('write_file', {
+    description: 'Write or overwrite a file inside the workspace.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Workspace-relative file path.' },
+        content: { type: 'string', description: 'Full file content.' },
+      },
+      required: ['path', 'content'],
+    },
+    execute: async (args) => writeWorkspaceFile(options.workspacePath, args),
+  });
+
+  sdk.registerTool('validate_dml', {
+    description: 'Validate DML code from a file path inside the workspace.',
+    parameters: {
+      type: 'object',
+      properties: {
+        dml_file: { type: 'string', description: 'Workspace-relative path to the DML file.' },
+      },
+      required: ['dml_file'],
+    },
+    execute: async (args) => validateWorkspaceDml(options.workspacePath, args),
   });
 
   sdk.registerTool('vm_exec', {
@@ -258,6 +306,73 @@ export function resolveWorkspacePath(workspacePath: string, filePath: string): s
     throw new Error(`Path must stay inside workspace: ${filePath}`);
   }
   return resolved;
+}
+
+async function writeWorkspaceFile(
+  workspacePath: string,
+  args: Record<string, unknown>,
+): Promise<{ success: boolean; path?: string; bytes?: number; error?: string }> {
+  const relPath = String(args.path ?? '');
+  const content = String(args.content ?? '');
+  if (!relPath) {
+    return { success: false, error: 'path is required' };
+  }
+
+  const filePath = resolveWorkspacePath(workspacePath, relPath);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, content, 'utf8');
+  return { success: true, path: relPath, bytes: content.length };
+}
+
+async function validateWorkspaceDml(
+  workspacePath: string,
+  args: Record<string, unknown>,
+): Promise<{ valid: boolean; errors: string[]; warnings: string[] }> {
+  const dmlPath = resolveWorkspacePath(workspacePath, String(args.dml_file ?? ''));
+  const dml = await fs.readFile(dmlPath, 'utf8');
+  const result = await validateWithProlog(dml);
+  return {
+    valid: result.valid,
+    errors: result.errors,
+    warnings: result.warnings ?? [],
+  };
+}
+
+async function consultRecipes(options: {
+  workspaceRoot: string;
+  query: string;
+  maxResults?: number;
+}): Promise<Record<string, unknown>> {
+  const query = options.query.trim();
+  if (!query) {
+    throw new Error('query is required');
+  }
+
+  const [catalog, matches] = await Promise.all([
+    listRecipeCatalog(options.workspaceRoot),
+    searchRecipeCatalog(options.workspaceRoot, query, { maxResults: options.maxResults ?? 3 }),
+  ]);
+
+  return {
+    success: true,
+    query,
+    total_recipes: catalog.length,
+    matches: matches.map((recipe) => ({
+      slug: recipe.slug,
+      name: recipe.name,
+      description: recipe.description,
+      tags: recipe.tags,
+      when_to_use: recipe.whenToUse,
+      when_not_to_use: recipe.whenNotToUse,
+      globs: recipe.globs,
+      priority: recipe.priority,
+      matched_on: recipe.matchedOn,
+      score: recipe.score,
+      source: recipe.source,
+      source_path: recipe.sourcePath,
+      content: recipe.content,
+    })),
+  };
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {
