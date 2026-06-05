@@ -287,7 +287,7 @@ export function parseCompactorAnswer(answer: string): ParsedCompactorDecision | 
     return { apply: false };
   }
 
-  const parsed = unwrapCompactorJson(tryParseJson(trimmed));
+  const parsed = unwrapCompactorJson(tryParseCompactorJson(trimmed));
   if (!parsed || typeof parsed !== 'object' || parsed === null) {
     return null;
   }
@@ -396,6 +396,25 @@ function tryParseJson(value: string): unknown | null {
   } catch {
     return null;
   }
+}
+
+function tryParseCompactorJson(value: string): unknown | null {
+  const direct = tryParseJson(value);
+  if (direct !== null) {
+    return direct;
+  }
+
+  const fenced = extractFencedJson(value);
+  if (!fenced) {
+    return null;
+  }
+
+  return tryParseJson(fenced);
+}
+
+function extractFencedJson(value: string): string | null {
+  const match = value.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  return match?.[1]?.trim() || null;
 }
 
 function unwrapCompactorJson(value: unknown): unknown | null {

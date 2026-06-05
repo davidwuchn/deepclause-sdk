@@ -193,6 +193,24 @@ function buildRecoveryPrompt(outputVars: TypedVar[], repeatedStallCount: number,
   return null;
 }
 
+function buildAssistantContinuationPrompt(outputVars: TypedVar[]): string {
+  const resultInstruction = outputVars.length > 0
+    ? `If you can answer now, call set_result for ${outputVars.map((variable) => variable.name).join(', ')} and then finish(true).`
+    : 'If you can answer now, call finish(true).';
+
+  return [
+    'Your previous step ended with an assistant message, but the task is not complete.',
+    resultInstruction,
+    'Continue from the latest state without repeating the prior assistant message verbatim.',
+    'If more work is needed, call exactly one relevant tool. If the task is blocked, call finish(false).',
+  ].join(' ');
+}
+
+function getLastMessageRole(messages: Array<{ role?: unknown }>): string | undefined {
+  const lastMessage = messages[messages.length - 1];
+  return typeof lastMessage?.role === 'string' ? lastMessage.role : undefined;
+}
+
 function truncateSummaryText(text: string, maxLength = 240): string {
   if (text.length <= maxLength) {
     return text;
@@ -898,10 +916,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         // If no tool calls were made, nudge the model to act.
         // This handles 'stop', 'other', and any unexpected finish reason.
         const recoveryPrompt = buildRecoveryPrompt(normalizedOutputVars, repeatedStallCount, toolCallsThisIteration.length === 0);
-        if (recoveryPrompt && !finished) {
+        const continuationPrompt = !finished && getLastMessageRole(messages) === 'assistant'
+          ? buildAssistantContinuationPrompt(normalizedOutputVars)
+          : null;
+        const nextPrompt = recoveryPrompt ?? continuationPrompt;
+        if (nextPrompt && !finished) {
           messages.push({
             role: 'user',
-            content: recoveryPrompt,
+            content: nextPrompt,
           });
         }
 
@@ -1027,10 +1049,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
         // If no tool calls were made, nudge the model to act.
         // This handles 'stop', 'other', and any unexpected finish reason.
         const recoveryPrompt = buildRecoveryPrompt(normalizedOutputVars, repeatedStallCount, toolCallsThisIteration.length === 0);
-        if (recoveryPrompt && !finished) {
+        const continuationPrompt = !finished && getLastMessageRole(messages) === 'assistant'
+          ? buildAssistantContinuationPrompt(normalizedOutputVars)
+          : null;
+        const nextPrompt = recoveryPrompt ?? continuationPrompt;
+        if (nextPrompt && !finished) {
           messages.push({
             role: 'user',
-            content: recoveryPrompt,
+            content: nextPrompt,
           });
         }
       }
