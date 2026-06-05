@@ -127,6 +127,18 @@ function getIsolatedProxyBodyIdleTimeoutMs(): number {
   return getConfiguredTimeoutMs('DC_PROXY_BODY_IDLE_TIMEOUT_MS', getIsolatedProxyAttemptTimeoutMs());
 }
 
+function shouldUseIsolatedProxyTransport(baseUrl: string | undefined, requestUrl: string): boolean {
+  if (!baseUrl || !requestUrl.startsWith(baseUrl)) {
+    return false;
+  }
+
+  try {
+    return new URL(requestUrl).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 async function isolatedHttpsFetch(
   url: string,
   init: RequestInit,
@@ -352,7 +364,7 @@ export function createModelProvider(
               : '(stream)'
           : 0;
         const fetchT0 = Date.now();
-        const useIsolatedProxyTransport = Boolean(baseUrl && url.startsWith(baseUrl));
+        const useIsolatedProxyTransport = shouldUseIsolatedProxyTransport(baseUrl, url);
         const transport = useIsolatedProxyTransport ? 'https-one-shot' : 'undici';
         debugLog?.(`[fetch] POST ${url} requestId=${requestId} seq=${proxyRequestSeq} transport=${transport} (body=${bodyLen})`);
         let response: Response;
