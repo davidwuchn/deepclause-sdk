@@ -39,15 +39,21 @@ async function main() {
     await resetDirectory(agentHome);
     await fs.mkdir(logsDir, { recursive: true });
 
+    const repositoryOrigin = await resolveRepositoryOrigin(spec);
+    const gitFetchArgs = buildGitFetchArgs(repositoryOrigin, spec.instance.base_commit);
+    logProgress(`Using repository origin ${repositoryOrigin}`);
+
     await runStep(result, logsDir, 'git_init', ['git', 'init', repoDir], { cwd: workRoot });
-    await runStep(result, logsDir, 'git_remote_add', ['git', 'remote', 'add', 'origin', `https://github.com/${spec.instance.repo}.git`], { cwd: repoDir });
-    await runStep(result, logsDir, 'git_fetch', ['git', 'fetch', '--depth', '1', 'origin', spec.instance.base_commit], { cwd: repoDir });
+    await runStep(result, logsDir, 'git_remote_add', ['git', 'remote', 'add', 'origin', repositoryOrigin], { cwd: repoDir });
+    await runStep(result, logsDir, 'git_fetch', gitFetchArgs, { cwd: repoDir });
     await runStep(result, logsDir, 'git_checkout', ['git', 'checkout', '--detach', 'FETCH_HEAD'], { cwd: repoDir });
     await runBestEffortStep(result, logsDir, 'git_submodules', ['git', 'submodule', 'update', '--init', '--recursive', '--depth', '1'], { cwd: repoDir });
     await runBestEffortStep(result, logsDir, 'git_config_name', ['git', 'config', 'user.name', 'DeepClause Benchmark'], { cwd: repoDir });
     await runBestEffortStep(result, logsDir, 'git_config_email', ['git', 'config', 'user.email', 'benchmark@deepclause.local'], { cwd: repoDir });
 
-    await runStep(result, logsDir, 'npm_install_deepclause', ['npm', 'install', '-g', `deepclause-sdk@${spec.deepclauseVersion}`], {
+    const deepclauseInstallTarget = spec.deepclausePackageTarball ?? `deepclause-sdk@${spec.deepclauseVersion}`;
+    logProgress(`Installing DeepClause from ${deepclauseInstallTarget}`);
+    await runStep(result, logsDir, 'npm_install_deepclause', ['npm', 'install', '-g', deepclauseInstallTarget], {
       cwd: workRoot,
       timeoutSeconds: spec.execution.setupTimeoutSeconds,
       env: buildCommandEnv(),
@@ -139,6 +145,28 @@ function buildCommandEnv() {
     NPM_CONFIG_FUND: 'false',
     NPM_CONFIG_UPDATE_NOTIFIER: 'false',
   };
+}
+
+async function resolveRepositoryOrigin(spec) {
+  if (spec.repoCacheDir) {
+    const mirrorPath = path.join(spec.repoCacheDir, buildRepoCacheFileName(spec.instance.repo));
+    if (await pathExists(mirrorPath)) {
+      return `file://${mirrorPath}`;
+    }
+    logProgress(`Local mirror not found for ${spec.instance.repo}, falling back to GitHub.`);
+  }
+  return `https://github.com/${spec.instance.repo}.git`;
+}
+
+function buildGitFetchArgs(repositoryOrigin, baseCommit) {
+  if (String(repositoryOrigin).startsWith('file://')) {
+    return ['git', 'fetch', 'origin', baseCommit];
+  }
+  return ['git', 'fetch', '--depth', '1', 'origin', baseCommit];
+}
+
+function buildRepoCacheFileName(repo) {
+  return `${String(repo).replace(/[\\/]+/g, '__')}.git`;
 }
 
 async function writeDeepClauseConfig({ agentHome, repoDir, deepclause }) {

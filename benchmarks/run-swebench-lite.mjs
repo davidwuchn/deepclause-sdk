@@ -20,6 +20,7 @@ const DEFAULT_CONFIG = {
   modes: ['prompt'],
   deepclause: {
     version: 'latest',
+    packageTarball: undefined,
     models: {
       gateway: 'openai:gpt-4o',
       run: 'openai:gpt-4o',
@@ -42,6 +43,7 @@ const DEFAULT_CONFIG = {
     maxWorkers: 1,
     agentTimeoutSeconds: 2700,
     setupTimeoutSeconds: 1800,
+    repoCacheDir: undefined,
     repoSetup: {
       mode: 'best-effort',
       commands: [],
@@ -120,6 +122,12 @@ async function main() {
   console.log(`Modes: ${config.modes.join(', ')}`);
   console.log(`Run ID: ${runId}`);
   console.log(`Run root: ${runRoot}`);
+  if (config.deepclause.packageTarball) {
+    console.log(`Using local deepclause package tarball: ${config.deepclause.packageTarball}`);
+  }
+  if (config.execution.repoCacheDir) {
+    console.log(`Using local repository cache: ${config.execution.repoCacheDir}`);
+  }
 
   for (const mode of config.modes) {
     await fs.mkdir(path.join(runRoot, mode, 'instances'), { recursive: true });
@@ -418,7 +426,13 @@ function normalizeConfig(config) {
   next.dataset.offset = next.dataset.offset ?? 0;
   next.modes = [...new Set((next.modes ?? []).map(normalizeMode))];
   next.execution.maxWorkers = Math.max(1, Number(next.execution.maxWorkers ?? 1));
+  next.execution.repoCacheDir = next.execution.repoCacheDir == null
+    ? undefined
+    : String(next.execution.repoCacheDir);
   next.execution.repoSetup.mode = normalizeRepoSetupMode(next.execution.repoSetup.mode);
+  next.deepclause.packageTarball = next.deepclause.packageTarball == null
+    ? undefined
+    : String(next.deepclause.packageTarball);
   next.docker.platform = String(next.docker.platform ?? 'linux/amd64');
   next.docker.workerImage = String(next.docker.workerImage ?? 'deepclause-swebench-worker:latest');
   next.artifacts.outputRoot = String(next.artifacts.outputRoot ?? 'benchmarks/runs');
@@ -561,6 +575,8 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
     mode: task.mode,
     instance: task.instance,
     deepclauseVersion: resolvedDeepClauseVersion,
+    deepclausePackageTarball: undefined,
+    repoCacheDir: undefined,
     deepclause: config.deepclause,
     execution: config.execution,
     docker: config.docker,
@@ -570,6 +586,7 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
   const env = collectWorkerEnv();
   const containerName = buildContainerName(runId, task.mode, task.instance.instance_id);
   const taskLabel = `[${task.mode}] ${task.instance.instance_id}`;
+  const mountedPaths = [];
   const dockerArgs = [
     'run',
     '--rm',
@@ -579,6 +596,25 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
     '-v', `${instanceRoot}:/work-output`,
     '-v', `${inputPath}:/work-input/input.json:ro`,
   ];
+  if (config.deepclause.packageTarball) {
+    const packageTarballPath = path.resolve(REPO_ROOT, config.deepclause.packageTarball);
+    if (!await pathExists(packageTarballPath)) {
+      throw new Error(`Configured deepclause package tarball not found: ${packageTarballPath}`);
+    }
+    dockerArgs.push('-v', `${packageTarballPath}:/work-cache/deepclause-sdk.tgz:ro`);
+    workerInput.deepclausePackageTarball = '/work-cache/deepclause-sdk.tgz';
+    mountedPaths.push(`deepclause package ${packageTarballPath}`);
+  }
+  if (config.execution.repoCacheDir) {
+    const repoCacheDir = path.resolve(REPO_ROOT, config.execution.repoCacheDir);
+    if (!await pathExists(repoCacheDir)) {
+      throw new Error(`Configured repository cache directory not found: ${repoCacheDir}`);
+    }
+    dockerArgs.push('-v', `${repoCacheDir}:/work-cache/repos:ro`);
+    workerInput.repoCacheDir = '/work-cache/repos';
+    mountedPaths.push(`repo cache ${repoCacheDir}`);
+  }
+  await writeJson(inputPath, workerInput);
   for (const [key, value] of Object.entries(env)) {
     dockerArgs.push('-e', `${key}=${value}`);
   }
@@ -593,6 +629,9 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
   console.log(`${taskLabel} starting worker container ${containerName}`);
   console.log(`${taskLabel} input -> ${path.relative(runRoot, inputPath)}`);
   console.log(`${taskLabel} live logs -> ${path.relative(runRoot, dockerStdoutPath)} / ${path.relative(runRoot, dockerStderrPath)}`);
+  for (const mountedPath of mountedPaths) {
+    console.log(`${taskLabel} mount -> ${mountedPath}`);
+  }
 
   let stdout = '';
   let stderr = '';
