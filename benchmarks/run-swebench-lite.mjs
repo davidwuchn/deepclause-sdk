@@ -133,16 +133,6 @@ async function main() {
 
   if (config.execution.repoSetup.mode === 'swebench-image' && !config.docker.skipImageBuild) {
     await ensureEvaluatorImage(config.docker.evaluatorImage, 'latest', config.docker.rebuildImages);
-    await buildSwebenchInstanceImages({
-      instances: selectedInstances,
-      evaluatorImage: config.docker.evaluatorImage,
-      platform: config.docker.platform,
-      namespace: config.docker.swebenchNamespace,
-      maxWorkers: config.execution.maxWorkers,
-      runRoot,
-      datasetName: config.dataset.name,
-      datasetSplit: config.dataset.split,
-    });
   }
 
   console.log(`Resolved deepclause-sdk version: ${resolvedDeepClauseVersion}`);
@@ -606,6 +596,29 @@ async function buildSwebenchInstanceImages({ instances, evaluatorImage, platform
   });
 }
 
+async function buildSwebenchInstanceImage({ instance, evaluatorImage, platform, namespace, datasetName, datasetSplit }) {
+  const instanceIdsJson = JSON.stringify([instance.instance_id]);
+  const dockerArgs = [
+    'run',
+    '--rm',
+    '-v', '/var/run/docker.sock:/var/run/docker.sock',
+    '-v', `${BENCHMARKS_ROOT}:/benchmarks-src:ro`,
+    '-e', `INSTANCE_IDS=${instanceIdsJson}`,
+    evaluatorImage,
+    'python',
+    '/benchmarks-src/worker/build-swebench-images.py',
+    normalizeDatasetName(datasetName),
+    datasetSplit ?? 'test',
+    namespace ?? 'none',
+    '1',
+  ];
+
+  await runCommand('docker', dockerArgs, {
+    cwd: REPO_ROOT,
+    streamOutput: true,
+  });
+}
+
 async function loadDatasetInstances(datasetName, split) {
   if (datasetName.endsWith('.json') || datasetName.endsWith('.jsonl')) {
     const resolved = path.resolve(REPO_ROOT, datasetName);
@@ -696,6 +709,19 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
   const mountedPaths = [];
   const useSwebenchImage = config.execution.repoSetup.mode === 'swebench-image';
   const swebenchImageName = buildSwebenchInstanceImageName(task.instance.instance_id, config.docker.platform, config.docker.swebenchNamespace);
+
+  if (useSwebenchImage && !config.docker.skipImageBuild && !await dockerImageExists(swebenchImageName)) {
+    console.log(`${taskLabel} building SWE-bench instance image ${swebenchImageName}`);
+    await buildSwebenchInstanceImage({
+      instance: task.instance,
+      evaluatorImage: config.docker.evaluatorImage,
+      platform: config.docker.platform,
+      namespace: config.docker.swebenchNamespace,
+      datasetName: config.dataset.name,
+      datasetSplit: config.dataset.split,
+    });
+  }
+
   const dockerArgs = [
     'run',
     '--rm',

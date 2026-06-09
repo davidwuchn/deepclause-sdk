@@ -1,5 +1,6 @@
 """Build SWE-bench instance Docker images for the given dataset and instance IDs."""
 import json
+import os
 import sys
 
 import docker
@@ -19,6 +20,9 @@ def main():
     if instance_ids_path:
         with open(instance_ids_path) as f:
             instance_ids = set(json.load(f))
+        filtered = [row for row in ds if row["instance_id"] in instance_ids]
+    elif os.environ.get("INSTANCE_IDS"):
+        instance_ids = set(json.loads(os.environ["INSTANCE_IDS"]))
         filtered = [row for row in ds if row["instance_id"] in instance_ids]
     else:
         filtered = list(ds)
