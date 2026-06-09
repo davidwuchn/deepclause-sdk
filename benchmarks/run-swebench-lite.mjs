@@ -140,6 +140,8 @@ async function main() {
       namespace: config.docker.swebenchNamespace,
       maxWorkers: config.execution.maxWorkers,
       runRoot,
+      datasetName: config.dataset.name,
+      datasetSplit: config.dataset.split,
     });
   }
 
@@ -577,7 +579,7 @@ async function ensureEvaluatorImage(imageTag, swebenchVersion, rebuild) {
   });
 }
 
-async function buildSwebenchInstanceImages({ instances, evaluatorImage, platform, namespace, maxWorkers, runRoot }) {
+async function buildSwebenchInstanceImages({ instances, evaluatorImage, platform, namespace, maxWorkers, runRoot, datasetName, datasetSplit }) {
   const instanceIdsFile = path.join(runRoot, 'swebench-instance-ids.json');
   await fs.writeFile(instanceIdsFile, `${JSON.stringify(instances.map((i) => i.instance_id))}\n`, 'utf8');
 
@@ -590,8 +592,8 @@ async function buildSwebenchInstanceImages({ instances, evaluatorImage, platform
     evaluatorImage,
     'python',
     '/benchmarks-src/worker/build-swebench-images.py',
-    normalizeDatasetName('lite'),
-    'test',
+    normalizeDatasetName(datasetName),
+    datasetSplit ?? 'test',
     namespace,
     String(Math.min(maxWorkers, 4)),
     '/tmp/instance-ids.json',

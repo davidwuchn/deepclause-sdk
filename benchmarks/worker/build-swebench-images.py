@@ -28,7 +28,7 @@ def main():
     client = docker.from_env()
     successful, failed = build_instance_images(
         client, filtered, max_workers=max_workers,
-        namespace=namespace, tag="latest",
+        namespace=namespace, tag="latest", env_image_tag="latest",
     )
     print(f"Built {len(successful)} instance images, {len(failed)} failed")
     if failed:
