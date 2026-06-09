@@ -60,7 +60,7 @@ async function main() {
     } else if (spec.mode === 'plan-execute') {
       logProgress('Running plan generation');
       await resetDirectory(plansDir);
-      await runStep(result, logsDir, 'plan_generate', ['deepclause', 'run', '--headless', '--stream', '.deepclause/system/plan.dml', benchmarkRequest], {
+      await runStep(result, logsDir, 'plan_generate', ['deepclause', 'run', '--verbose', '--stream', '.deepclause/system/plan.dml', benchmarkRequest], {
         cwd: agentHome,
         timeoutSeconds: spec.execution.agentTimeoutSeconds,
         env: buildCommandEnv(),
@@ -68,7 +68,7 @@ async function main() {
       const generatedPlan = await findGeneratedPlan(plansDir);
       result.generatedPlan = path.relative(agentHome, generatedPlan);
       logProgress(`Executing generated plan ${result.generatedPlan}`);
-      await runStep(result, logsDir, 'plan_execute', ['deepclause', 'run', '--headless', '--stream', result.generatedPlan], {
+      await runStep(result, logsDir, 'plan_execute', ['deepclause', 'run', '--verbose', '--stream', result.generatedPlan], {
         cwd: agentHome,
         timeoutSeconds: spec.execution.agentTimeoutSeconds,
         env: buildCommandEnv(),

@@ -182,6 +182,12 @@ async function main() {
 
     const state = result.success ? 'ok' : 'error';
     console.log(`[${task.mode}] ${task.instance.instance_id} -> ${state}`);
+
+    if (config.execution.repoSetup.mode === 'swebench-image') {
+      const instanceImage = buildSwebenchInstanceImageName(task.instance.instance_id, config.docker.platform, config.docker.swebenchNamespace);
+      await removeDockerImage(instanceImage).catch(() => {});
+    }
+
     return result;
   });
 
@@ -212,6 +218,8 @@ async function main() {
   });
 
   console.log(`Artifacts written to ${runRoot}`);
+
+  await dockerPrune();
 }
 
 function parseArgs(argv) {
@@ -534,6 +542,21 @@ async function dockerImageExists(imageTag) {
   } catch {
     return false;
   }
+}
+
+async function removeDockerImage(imageTag) {
+  if (!await dockerImageExists(imageTag)) {
+    return;
+  }
+  console.log(`Removing image ${imageTag}`);
+  await runCommand('docker', ['rmi', '-f', imageTag], { cwd: REPO_ROOT }).catch(() => {});
+}
+
+async function dockerPrune() {
+  console.log('Pruning dangling Docker images...');
+  await runCommand('docker', ['image', 'prune', '-f'], { cwd: REPO_ROOT }).catch(() => {});
+  console.log('Pruning Docker build cache...');
+  await runCommand('docker', ['builder', 'prune', '-f'], { cwd: REPO_ROOT }).catch(() => {});
 }
 
 async function ensureEvaluatorImage(imageTag, swebenchVersion, rebuild) {
