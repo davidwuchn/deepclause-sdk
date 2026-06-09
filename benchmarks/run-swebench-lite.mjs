@@ -43,6 +43,7 @@ const DEFAULT_CONFIG = {
     maxWorkers: 1,
     agentTimeoutSeconds: 2700,
     setupTimeoutSeconds: 1800,
+    verbose: false,
     repoCacheDir: undefined,
     repoSetup: {
       mode: 'best-effort',
@@ -304,6 +305,10 @@ function parseArgs(argv) {
       args.skipImageBuild = true;
       continue;
     }
+    if (arg === '--verbose' || arg === '-v') {
+      args.verbose = true;
+      continue;
+    }
 
     throw new Error(`Unknown argument: ${arg}`);
   }
@@ -336,6 +341,7 @@ Options:
   --platform <name>            Docker platform, e.g. linux/amd64
   --rebuild-images             Rebuild worker image
   --skip-image-build           Skip docker build step
+  --verbose, -v                Stream worker subprocess stdout/stderr to console
   --help                       Show this help
 `);
 }
@@ -427,6 +433,9 @@ function applyCliOverrides(config, args) {
   if (args.skipImageBuild) {
     next.docker.skipImageBuild = true;
   }
+  if (args.verbose) {
+    next.execution.verbose = true;
+  }
   return next;
 }
 
@@ -437,6 +446,7 @@ function normalizeConfig(config) {
   next.dataset.offset = next.dataset.offset ?? 0;
   next.modes = [...new Set((next.modes ?? []).map(normalizeMode))];
   next.execution.maxWorkers = Math.max(1, Number(next.execution.maxWorkers ?? 1));
+  next.execution.verbose = Boolean(next.execution.verbose);
   next.execution.repoCacheDir = next.execution.repoCacheDir == null
     ? undefined
     : String(next.execution.repoCacheDir);
@@ -628,6 +638,9 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
   await writeJson(inputPath, workerInput);
   for (const [key, value] of Object.entries(env)) {
     dockerArgs.push('-e', `${key}=${value}`);
+  }
+  if (config.execution.verbose) {
+    dockerArgs.push('-e', 'DC_VERBOSE=1');
   }
   dockerArgs.push(
     config.docker.workerImage,

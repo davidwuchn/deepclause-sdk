@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 const BANNED_TOOL_NAMES = ['web_search', 'news_search', 'url_fetch', 'create_skill'];
+const VERBOSE = Boolean(process.env.DC_VERBOSE);
 
 async function main() {
   const [inputPath, outputDir] = process.argv.slice(2);
@@ -287,7 +288,11 @@ async function runStep(result, logsDir, label, commandArgs, options = {}) {
   const startedAt = Date.now();
   logProgress(`Step ${label} started: ${[command, ...args].join(' ')}`);
   try {
-    const commandResult = await runCommand(command, args, options);
+    const verboseOptions = VERBOSE ? {
+      onStdout: (chunk) => process.stdout.write(chunk),
+      onStderr: (chunk) => process.stderr.write(chunk),
+    } : {};
+    const commandResult = await runCommand(command, args, { ...options, ...verboseOptions });
     await fs.writeFile(stdoutPath, commandResult.stdout, 'utf8');
     await fs.writeFile(stderrPath, commandResult.stderr, 'utf8');
     logProgress(`Step ${label} completed in ${Date.now() - startedAt}ms`);
