@@ -1,6 +1,6 @@
 {
   "name": "deepclause-sdk",
-  "version": "0.0.72",
+  "version": "0.0.75",
   "description": "DeepClause CLI Tool, TUI and Typescript SDK",
   "type": "module",
   "main": "dist/index.js",
@@ -32,6 +32,7 @@
     "examples": "tsx sdk-examples/basic-usage.ts",
     "examples:smoke": "tsx sdk-examples/no-api-key.ts && npm run example && npm run examples && tsx sdk-examples/neurosymbolic.ts 1 && tsx sdk-examples/deep-research.ts \"test topic\"",
     "cli": "tsx src/cli/index.ts",
+    "compaction:probe": "tsx scripts/compaction-probe.ts",
     "benchmark:swebench": "node benchmarks/run-swebench-lite.mjs",
     "benchmark:swebench:prefetch": "node benchmarks/prefetch-swebench-lite.mjs",
     "benchmark:swebench:evaluate": "node benchmarks/evaluate-predictions.mjs"

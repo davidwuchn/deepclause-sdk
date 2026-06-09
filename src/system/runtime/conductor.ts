@@ -105,6 +105,7 @@ export interface ConductorTurnOptions {
   headless?: boolean;
   sandbox?: boolean;
   signal?: AbortSignal;
+  toolAbortSignalRef?: { signal?: AbortSignal };
   onUserInput?: (prompt: string) => Promise<string>;
   onEvent?: (event: ConductorLogEvent) => void;
 }
@@ -347,6 +348,7 @@ export async function runConductorTurn(
       trace: options.trace,
       sandbox: options.sandbox,
       signal: options.signal,
+      toolAbortSignalRef: options.toolAbortSignalRef,
       onUserInput,
       initialMessages: compactedSessionMessages,
       skillCatalog: {
@@ -976,7 +978,7 @@ async function maybeCompactSessionMessages(options: {
   return messages.map((message) => ({ role: message.role as 'user' | 'assistant', content: message.content }));
 }
 
-async function mergeSessionUsage(
+export async function mergeSessionUsage(
   workspaceRoot: string,
   sessionId: string,
   delta: TokenUsageByModel,

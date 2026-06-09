@@ -28,7 +28,18 @@ vi.mock('../src/system/runtime/conductor.js', () => ({
   createConductorSession: conductorMocks.createConductorSession,
   getConductorSessionDetail: conductorMocks.getConductorSessionDetail,
   listConductorSessions: conductorMocks.listConductorSessions,
+  mergeSessionUsage: vi.fn().mockResolvedValue(undefined),
   runConductorTurn: conductorMocks.runConductorTurn,
+}));
+
+vi.mock('../src/system/runtime/token-usage.js', () => ({
+  recordTokenUsage: vi.fn(),
+  createTokenUsageTotals: () => ({
+    calls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0,
+    cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0,
+  }),
+  isTokenUsageEmpty: () => true,
+  mergeTokenUsageMaps: () => ({}),
 }));
 
 vi.mock('../src/cli/commands.js', () => ({

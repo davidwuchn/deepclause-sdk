@@ -35,6 +35,7 @@ export interface ExecuteDmlOptions {
   headless?: boolean;
   sandbox?: boolean;
   signal?: AbortSignal;
+  toolAbortSignalRef?: { signal?: AbortSignal };
   onUserInput?: (prompt: string) => Promise<string>;
   initialMessages?: MemoryMessage[];
   onEvent?: (event: DMLEvent) => void;
@@ -186,6 +187,7 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
       workspacePath: options.workspacePath,
       shell,
       signal: options.signal,
+      toolAbortSignalRef: options.toolAbortSignalRef,
       onEvent: handleEvent,
       skillCatalog,
     });
@@ -238,6 +240,7 @@ function executeNestedSkill(
     headless: true,
     sandbox: parentOptions.sandbox,
     signal: parentOptions.signal,
+    toolAbortSignalRef: parentOptions.toolAbortSignalRef,
     onUserInput: parentOptions.onUserInput
       ? (prompt) => parentOptions.onUserInput!(`[${child.slug}] ${prompt}`)
       : undefined,

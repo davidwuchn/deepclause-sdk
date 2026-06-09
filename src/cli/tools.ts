@@ -73,7 +73,7 @@ const AGENTVM_TOOLS: Tool[] = [
 const SEARCH_TOOLS: Tool[] = [
   {
     name: 'web_search',
-    description: 'Search the web using Brave Search API. Returns structured results with titles, URLs, and descriptions.',
+    description: 'Search the web. Uses Brave Search API if BRAVE_API_KEY is set, otherwise falls back to Bing (no key required).',
     provider: 'brave',
     schema: {
       type: 'object',
@@ -87,7 +87,7 @@ const SEARCH_TOOLS: Tool[] = [
   },
   {
     name: 'news_search',
-    description: 'Search for recent news articles using Brave Search API.',
+    description: 'Search for recent news articles. Uses Brave Search API if BRAVE_API_KEY is set, otherwise falls back to Bing (no key required).',
     provider: 'brave',
     schema: {
       type: 'object',

@@ -15,6 +15,7 @@ import {
   createConductorSession,
   getConductorSessionDetail,
   listConductorSessions,
+  mergeSessionUsage,
   runConductorTurn,
   type ConductorLogEvent,
   type ConductorSessionDetail,
@@ -34,6 +35,7 @@ import {
   createShellToolEventBridge,
 } from '../system/runtime/shell-tool-events.js';
 import type { DMLEvent } from '../types.js';
+import { recordTokenUsage, type TokenUsageByModel } from '../system/runtime/token-usage.js';
 
 const IGNORED_LIVE_LOG_TOOLS = new Set(['set_result', 'update_memory']);
 const BUILTIN_SLASH_COMMANDS = ['new', 'sessions', 'help', 'run', 'compile', 'skill-creator', 'set-model', 'cancel', 'exit', 'quit'] as const;
@@ -96,6 +98,23 @@ const ANSI = {
 
 type BuiltinSlashCommand = (typeof BUILTIN_SLASH_COMMANDS)[number];
 type Keypress = { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean; sequence?: string };
+
+type PaneSelection = {
+  pane: PaneKind;
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+};
+
+type TuiMouseEvent = {
+  button: 'left' | 'middle' | 'right' | 'wheel-up' | 'wheel-down' | 'release' | 'motion';
+  row: number;
+  column: number;
+  shift: boolean;
+  ctrl: boolean;
+  meta: boolean;
+};
 type TuiInputStream = {
   isTTY?: boolean;
   pause(): void;
@@ -578,6 +597,77 @@ export function releaseTuiInputStream(stream: TuiInputStream): void {
   stream.pause();
 }
 
+class MouseParser {
+  private buffer = '';
+
+  feed(data: Buffer, onEvent: (event: TuiMouseEvent) => void): void {
+    this.buffer += data.toString('utf8');
+
+    while (this.buffer.length > 0) {
+      const mouseStart = this.buffer.indexOf('\u001b[<');
+      if (mouseStart === -1) {
+        if (this.buffer.length > 0) {
+          this.buffer = '';
+        }
+        break;
+      }
+
+      this.buffer = this.buffer.slice(mouseStart);
+      const parsed = this.tryParseMouse();
+      if (parsed === null) {
+        if (this.buffer.length > 256) {
+          this.buffer = '';
+        }
+        break;
+      }
+      onEvent(parsed);
+    }
+  }
+
+  private tryParseMouse(): TuiMouseEvent | null {
+    const mIdx = this.buffer.indexOf('M', 3);
+    const mIdxSgr = this.buffer.indexOf('m', 3);
+    const end = mIdx !== -1 && (mIdxSgr === -1 || mIdx < mIdxSgr) ? mIdx : mIdxSgr;
+    if (end === -1) return null;
+
+    const payload = this.buffer.slice(3, end);
+    const isRelease = this.buffer[end] === 'm';
+    this.buffer = this.buffer.slice(end + 1);
+
+    const semicolon = payload.indexOf(';');
+    if (semicolon === -1) return null;
+    const secondSemicolon = payload.indexOf(';', semicolon + 1);
+    if (secondSemicolon === -1) return null;
+
+    const cb = Number.parseInt(payload.slice(0, semicolon), 10);
+    const col = Number.parseInt(payload.slice(semicolon + 1, secondSemicolon), 10);
+    const row = Number.parseInt(payload.slice(secondSemicolon + 1), 10);
+
+    if (Number.isNaN(cb) || Number.isNaN(col) || Number.isNaN(row)) return null;
+
+    const shift = (cb & 4) !== 0;
+    const meta = (cb & 8) !== 0;
+    const ctrl = (cb & 16) !== 0;
+    const buttonCode = cb & 3;
+
+    if (isRelease) {
+      return { button: 'release', row, column: col, shift, ctrl, meta };
+    }
+
+    if ((cb & 64) !== 0) {
+      return { button: buttonCode === 0 ? 'wheel-up' as const : 'wheel-down' as const, row, column: col, shift, ctrl, meta };
+    }
+
+    const isMotion = (cb & 32) !== 0;
+    if (isMotion) {
+      return { button: 'motion' as const, row, column: col, shift, ctrl, meta };
+    }
+
+    const buttonMap: Record<number, 'left' | 'middle' | 'right'> = { 0: 'left', 1: 'middle', 2: 'right' };
+    return { button: buttonMap[buttonCode] ?? 'left' as const, row, column: col, shift, ctrl, meta };
+  }
+}
+
 class FullscreenTui {
   private sessions: ConductorSessionSummary[] = [];
   private selectedSessionId = '';
@@ -608,6 +698,13 @@ class FullscreenTui {
   };
   private currentPreview: RunningPreview | null = null;
   private currentAbortController: AbortController | null = null;
+  private toolAbortController: AbortController | null = null;
+  private readonly toolAbortSignalRef: { signal?: AbortSignal } = {};
+  private mouseParser: MouseParser | null = null;
+  private mouseDataHandler: ((chunk: Buffer) => void) | null = null;
+  private mouseEscapeState: 'idle' | 'consuming' = 'idle';
+  private selection: PaneSelection | null = null;
+  private isDraggingSelection = false;
   private inputValue = '';
   private cursor = 0;
   private busy = false;
@@ -627,6 +724,8 @@ class FullscreenTui {
   private lastRenderAt = 0;
   private previousFrameLines: string[] | null = null;
   private previousFrameSize: { columns: number; rows: number } | null = null;
+  private resizeHandler: (() => void) | null = null;
+  private readonly wrapCache = new Map<string, { bodyRef: string[]; bodyKey: string; innerWidth: number; result: string[] }>();
 
   constructor(
     private readonly workspaceRoot: string,
@@ -641,12 +740,22 @@ class FullscreenTui {
       await this.refreshSessions({ createIfMissing: true });
       this.statusLine = `Ready. Shell ${this.getShellBackend().backendLabel} in ${path.relative(this.workspaceRoot, this.shellWorkspacePath) || '.'}. F10 or Ctrl+G opens menus. Left/right changes pane when the menu is closed.`;
 
-      emitKeypressEvents(input);
       if (input.isTTY) {
         input.setRawMode(true);
       }
+      emitKeypressEvents(input);
       input.on('keypress', this.onKeypress);
-      output.write('\u001b[?1049h\u001b[2J\u001b[H');
+      this.mouseParser = new MouseParser();
+      this.mouseDataHandler = (chunk: Buffer) => {
+        this.mouseParser!.feed(chunk, (event) => this.handleMouseEvent(event));
+      };
+      input.prependListener('data', this.mouseDataHandler);
+      this.resizeHandler = () => {
+        this.wrapCache.clear();
+        this.requestRender();
+      };
+      output.on('resize', this.resizeHandler);
+      output.write('\u001b[?1049h\u001b[?1002h\u001b[?1006h\u001b[2J\u001b[H');
       this.requestRender();
 
       await new Promise<void>((resolve) => {
@@ -661,17 +770,336 @@ class FullscreenTui {
         clearInterval(this.animationTimer);
         this.animationTimer = null;
       }
-      input.off('keypress', this.onKeypress);
+      if (this.mouseDataHandler) {
+        input.removeListener('data', this.mouseDataHandler);
+        this.mouseDataHandler = null;
+      }
+      this.mouseParser = null;
+      input.removeListener('keypress', this.onKeypress);
+      if (this.resizeHandler) {
+        output.off('resize', this.resizeHandler);
+        this.resizeHandler = null;
+      }
       releaseTuiInputStream(input);
       this.previousFrameLines = null;
       this.previousFrameSize = null;
-      output.write('\u001b[?25h\u001b[?1049l');
+      output.write('\u001b[?25h\u001b[?1006l\u001b[?1002l\u001b[?1049l');
     }
   }
 
   private readonly onKeypress = (text: string, key: Keypress): void => {
+    if (key.sequence === '\x1b[<') {
+      this.mouseEscapeState = 'consuming';
+      return;
+    }
+    if (this.mouseEscapeState === 'consuming') {
+      if (text === 'M' || text === 'm') {
+        this.mouseEscapeState = 'idle';
+      }
+      return;
+    }
     void this.handleKeypress(text, key);
   };
+
+  private handleMouseEvent(event: TuiMouseEvent): void {
+    if (event.button === 'wheel-up' || event.button === 'wheel-down') {
+      if (event.shift) return;
+      const direction = event.button === 'wheel-up' ? 'up' : 'down';
+      const paneKind = this.paneKindAtPosition(event.row, event.column);
+      if (paneKind) {
+        this.focusedPane = paneKind;
+      }
+      this.scrollFocusedPane(direction, 3);
+      return;
+    }
+
+    if (event.button === 'left' && !event.shift && !event.ctrl && !event.meta) {
+      const menuIndex = this.menuIndexAtColumn(event.column);
+      if (menuIndex !== null && event.row === 1) {
+        this.clearSelection();
+        if (this.uiMode !== 'menu') {
+          this.uiMode = 'menu';
+        }
+        this.menuState.activeIndex = menuIndex;
+        this.menuState.selectedIndex = 0;
+        this.menuState.typeahead = '';
+        this.requestRender();
+        return;
+      }
+
+      if (this.uiMode === 'menu' && event.row >= 2) {
+        const menuItemIndex = this.menuItemAtRow(event.row);
+        if (menuItemIndex !== null) {
+          this.menuState.selectedIndex = menuItemIndex;
+          this.requestRender();
+          void this.activateCurrentMenuItem();
+          return;
+        }
+      }
+
+      const paneKind = this.paneKindAtPosition(event.row, event.column);
+      if (!paneKind) {
+        this.clearSelection();
+        this.requestRender();
+        return;
+      }
+      const panePos = this.paneContentPosition(paneKind, event.row, event.column);
+      if (!panePos) {
+        this.clearSelection();
+        this.focusedPane = paneKind;
+        this.requestRender();
+        return;
+      }
+      this.selection = { pane: paneKind, startRow: panePos.bodyRow, startCol: panePos.innerCol, endRow: panePos.bodyRow, endCol: panePos.innerCol };
+      this.isDraggingSelection = true;
+      this.focusedPane = paneKind;
+      this.requestRender();
+      return;
+    }
+
+    if (event.button === 'motion' && !event.shift && this.isDraggingSelection && this.selection) {
+      const paneKind = this.paneKindAtPosition(event.row, event.column);
+      if (paneKind && paneKind === this.selection.pane) {
+        const panePos = this.paneContentPosition(paneKind, event.row, event.column);
+        if (panePos) {
+          this.selection.endRow = panePos.bodyRow;
+          this.selection.endCol = panePos.innerCol;
+          this.requestRender();
+        }
+      }
+      return;
+    }
+
+    if (event.button === 'release' && !event.shift && this.isDraggingSelection) {
+      this.isDraggingSelection = false;
+      if (this.selection) {
+        const text = this.extractSelectionText();
+        if (text) {
+          this.copyToClipboard(text);
+          this.statusLine = 'Copied selection to clipboard.';
+        }
+      }
+      this.clearSelection();
+      this.requestRender();
+      return;
+    }
+
+    if (event.button === 'release') {
+      this.isDraggingSelection = false;
+      return;
+    }
+  }
+
+  private clearSelection(): void {
+    if (this.selection) {
+      this.selection = null;
+    }
+    this.isDraggingSelection = false;
+  }
+
+  private paneContentPosition(paneKind: PaneKind, screenRow: number, screenCol: number): { bodyRow: number; innerCol: number } | null {
+    const columns = output.columns ?? 120;
+    const rows = output.rows ?? 40;
+    if (screenRow < 2 || screenRow >= rows - 1) return null;
+    if (this.uiMode !== 'command') return null;
+
+    const contentHeight = rows - 3;
+    const widths = computePaneWidths(columns);
+    const rightHeights = computeRightPaneHeights(contentHeight);
+
+    const contentRow = screenRow - 2;
+    let paneLeft: number;
+    let paneWidth: number;
+    let paneTop: number;
+
+    switch (paneKind) {
+      case 'sessions':
+        paneLeft = 0;
+        paneWidth = widths.left;
+        paneTop = 0;
+        break;
+      case 'messages':
+        paneLeft = widths.left + 1;
+        paneWidth = widths.center;
+        paneTop = 0;
+        break;
+      case 'process':
+        paneLeft = widths.left + 1 + widths.center + 1;
+        paneWidth = widths.right;
+        paneTop = 0;
+        break;
+      case 'context':
+        paneLeft = widths.left + 1 + widths.center + 1;
+        paneWidth = widths.right;
+        paneTop = rightHeights.process;
+        break;
+    }
+
+    if (screenCol < paneLeft + 2 || screenCol > paneLeft + paneWidth - 1) return null;
+    const bodyRow = contentRow - paneTop - 1;
+    if (bodyRow < 0) return null;
+    const innerCol = screenCol - paneLeft - 2;
+
+    return { bodyRow, innerCol };
+  }
+
+  private extractSelectionText(): string {
+    if (!this.selection) return '';
+    const sel = this.selection;
+    const paneBody = this.getPaneBody(sel.pane);
+    const columns = output.columns ?? 120;
+    const widths = computePaneWidths(columns);
+    const width = sel.pane === 'sessions' ? widths.left : sel.pane === 'messages' ? widths.center : widths.right;
+    const innerWidth = Math.max(1, width - 2);
+    const wrappedLines = wrapBodyLines(paneBody, innerWidth);
+
+    const startRow = Math.min(sel.startRow, sel.endRow);
+    const endRow = Math.max(sel.startRow, sel.endRow);
+    const startCol = sel.startRow <= sel.endRow ? sel.startCol : sel.endCol;
+    const endCol = sel.startRow <= sel.endRow ? sel.endCol : sel.startCol;
+
+    if (startRow === endRow) {
+      const line = wrappedLines[startRow] ?? '';
+      return this.stripAnsi(line.slice(startCol, endCol + 1));
+    }
+
+    const parts: string[] = [];
+    const firstLine = wrappedLines[startRow] ?? '';
+    parts.push(this.stripAnsi(firstLine.slice(startCol)));
+    for (let row = startRow + 1; row < endRow; row++) {
+      parts.push(this.stripAnsi(wrappedLines[row] ?? ''));
+    }
+    const lastLine = wrappedLines[endRow] ?? '';
+    parts.push(this.stripAnsi(lastLine.slice(0, endCol + 1)));
+
+    return parts.join('\n');
+  }
+
+  private stripAnsi(text: string): string {
+    return text.replace(/\u001b\[[0-9;]*m/g, '');
+  }
+
+  private copyToClipboard(text: string): void {
+    const osc52 = `\u001b]52;c;${Buffer.from(text).toString('base64')}\u0007`;
+    output.write(osc52);
+  }
+
+  private applySelectionHighlight(
+    lines: string[],
+    widths: { left: number; center: number; right: number },
+    rightHeights: { process: number; context: number },
+    _contentHeight: number,
+  ): void {
+    const sel = this.selection;
+    if (!sel) return;
+
+    const startRow = Math.min(sel.startRow, sel.endRow);
+    const endRow = Math.max(sel.startRow, sel.endRow);
+    const startCol = sel.startRow <= sel.endRow ? sel.startCol : sel.endCol;
+    const endCol = sel.startRow <= sel.endRow ? sel.endCol : sel.startCol;
+
+    let paneLeft: number;
+    let paneWidth: number;
+    let paneTop: number;
+
+    switch (sel.pane) {
+      case 'sessions':
+        paneLeft = 0;
+        paneWidth = widths.left;
+        paneTop = 0;
+        break;
+      case 'messages':
+        paneLeft = widths.left + 1;
+        paneWidth = widths.center;
+        paneTop = 0;
+        break;
+      case 'process':
+        paneLeft = widths.left + 1 + widths.center + 1;
+        paneWidth = widths.right;
+        paneTop = 0;
+        break;
+      case 'context':
+        paneLeft = widths.left + 1 + widths.center + 1;
+        paneWidth = widths.right;
+        paneTop = rightHeights.process;
+        break;
+    }
+
+    const innerDisplayStart = paneLeft + 1;
+    const innerDisplayEnd = paneLeft + paneWidth - 2;
+
+    for (let bodyRow = startRow; bodyRow <= endRow; bodyRow++) {
+      const screenLineIdx = 1 + paneTop + 1 + bodyRow;
+      if (screenLineIdx >= lines.length) break;
+      const line = lines[screenLineIdx];
+
+      const rowStartCol = bodyRow === startRow ? innerDisplayStart + startCol : innerDisplayStart;
+      const rowEndCol = bodyRow === endRow ? innerDisplayStart + endCol + 1 : innerDisplayEnd + 1;
+
+      const clampedStartCol = Math.max(innerDisplayStart, rowStartCol);
+      const clampedEndCol = Math.min(innerDisplayEnd + 1, rowEndCol);
+      if (clampedStartCol >= clampedEndCol) continue;
+
+      const strStart = displayColumnToStringIndex(line, clampedStartCol);
+      const strEnd = displayColumnToStringIndex(line, clampedEndCol);
+
+      const before = line.slice(0, strStart);
+      const segment = line.slice(strStart, strEnd);
+      const after = line.slice(strEnd);
+      const highlighted = this.invertAnsiColors(segment);
+      lines[screenLineIdx] = `${before}${highlighted}${after}`;
+    }
+  }
+
+  private invertAnsiColors(text: string): string {
+    return `\u001b[7m${text}\u001b[27m`;
+  }
+
+  private paneKindAtPosition(row: number, column: number): PaneKind | null {
+    const columns = output.columns ?? 120;
+    const rows = output.rows ?? 40;
+    if (row < 2 || row >= rows - 1) return null;
+    if (this.uiMode !== 'command') return null;
+    const widths = computePaneWidths(columns);
+    const rightHeights = computeRightPaneHeights(rows - 3);
+    const contentRow = row - 1;
+    if (column <= widths.left) return 'sessions';
+    if (column <= widths.left + 1 + widths.center) return 'messages';
+    if (contentRow <= rightHeights.process) return 'process';
+    return 'context';
+  }
+
+  private menuIndexAtColumn(column: number): number | null {
+    const menuLabels = ['Session', 'Skills', 'Files', 'Run', 'View', 'Help'];
+    let pos = 1 + measureDisplayWidth(' DeepClause ');
+    for (let i = 0; i < menuLabels.length; i++) {
+      const labelWidth = measureDisplayWidth(` [${i + 1}] ${menuLabels[i]} `);
+      if (column >= pos && column < pos + labelWidth) return i;
+      pos += labelWidth;
+    }
+    return null;
+  }
+
+  private menuItemAtRow(row: number): number | null {
+    if (this.uiMode !== 'menu') return null;
+    const contentRow = row - 2;
+    if (contentRow < 2) return null;
+    const itemRow = contentRow - 2;
+    if (itemRow < 0) return null;
+    const linesPerItem = 3;
+    const itemIndex = Math.floor(itemRow / linesPerItem);
+    const menu = this.getMenuDefinitions()[this.menuState.activeIndex];
+    if (!menu || itemIndex >= menu.items.length || itemIndex < 0) return null;
+    return itemIndex;
+  }
+
+  private async activateCurrentMenuItem(): Promise<void> {
+    const menu = this.getMenuDefinitions()[this.menuState.activeIndex];
+    if (!menu) return;
+    const item = menu.items[this.menuState.selectedIndex];
+    if (!item || item.enabled === false) return;
+    await this.runMenuAction(item.id);
+  }
 
   private async handleKeypress(text: string, key: Keypress): Promise<void> {
     if ((key.ctrl && key.name === 'g') || key.name === 'f10') {
@@ -706,6 +1134,19 @@ class FullscreenTui {
         return;
       }
       this.close();
+      return;
+    }
+
+    if (key.ctrl && key.name === 't' && this.busy) {
+      if (this.toolAbortController && !this.toolAbortController.signal.aborted) {
+        this.toolAbortController.abort('Aborted by user');
+        this.toolAbortController = null;
+        this.toolAbortSignalRef.signal = undefined;
+        this.statusLine = 'Tool execution cancelled.';
+      } else {
+        this.statusLine = 'No active tool to cancel.';
+      }
+      this.requestRender();
       return;
     }
 
@@ -748,7 +1189,7 @@ class FullscreenTui {
           return;
         }
         if (this.cursor > 0) {
-          this.cursor -= 1;
+          this.cursor = this.graphemeLeftIndex(this.inputValue, this.cursor);
         }
         break;
 
@@ -758,7 +1199,7 @@ class FullscreenTui {
           return;
         }
         if (this.cursor < this.inputValue.length) {
-          this.cursor += 1;
+          this.cursor = this.graphemeRightIndex(this.inputValue, this.cursor);
         }
         break;
 
@@ -966,14 +1407,14 @@ class FullscreenTui {
 
       case 'left':
         if (this.cursor > 0) {
-          this.cursor -= 1;
+          this.cursor = this.graphemeLeftIndex(this.inputValue, this.cursor);
           this.requestRender();
         }
         return;
 
       case 'right':
         if (this.cursor < this.inputValue.length) {
-          this.cursor += 1;
+          this.cursor = this.graphemeRightIndex(this.inputValue, this.cursor);
           this.requestRender();
         }
         return;
@@ -1248,6 +1689,8 @@ class FullscreenTui {
     activity.pushLine(`task ${promptText}`);
     this.busy = true;
     this.currentAbortController = new AbortController();
+    this.toolAbortController = new AbortController();
+    this.toolAbortSignalRef.signal = this.toolAbortController.signal;
     this.startAnimation();
     this.statusLine = 'Running conductor...';
     this.requestRender();
@@ -1260,8 +1703,10 @@ class FullscreenTui {
         headless: true,
         sandbox: this.options.sandbox,
         signal: this.currentAbortController.signal,
+        toolAbortSignalRef: this.toolAbortSignalRef,
         onUserInput: (question) => this.requestClarification(question),
         onEvent: (event) => {
+          this.manageToolAbortSignal(event.event);
           activity.handle(event);
           this.updatePreviewFromEvent(event);
           this.requestRender();
@@ -1285,6 +1730,8 @@ class FullscreenTui {
     } finally {
       this.busy = false;
       this.currentAbortController = null;
+      this.toolAbortController = null;
+      this.toolAbortSignalRef.signal = undefined;
       this.stopAnimation();
       if (this.exitRequested) {
         this.close();
@@ -1306,6 +1753,8 @@ class FullscreenTui {
     activity.pushLine(`skill /${skillName}${args.length > 0 ? ` ${args.join(' ')}` : ''}`);
     this.busy = true;
     this.currentAbortController = new AbortController();
+    this.toolAbortController = new AbortController();
+    this.toolAbortSignalRef.signal = this.toolAbortController.signal;
     this.startAnimation();
     this.statusLine = `Running /${skillName}...`;
     this.requestRender();
@@ -1315,14 +1764,17 @@ class FullscreenTui {
         sessionId: this.selectedSessionId || undefined,
         sandbox: this.options.sandbox,
         signal: this.currentAbortController.signal,
+        toolAbortSignalRef: this.toolAbortSignalRef,
         onUserInput: (question) => this.requestClarification(question),
         onEvent: (event) => {
+          this.manageToolAbortSignal(event.event);
           activity.handle(event);
           this.updatePreviewFromEvent(event);
           this.requestRender();
         },
       });
       activity.finish();
+      await this.refreshSessions({ selectedSessionId: this.selectedSessionId });
       await this.refreshCommands();
       this.finishExecutionPreview({
         persist: true,
@@ -1339,6 +1791,8 @@ class FullscreenTui {
     } finally {
       this.busy = false;
       this.currentAbortController = null;
+      this.toolAbortController = null;
+      this.toolAbortSignalRef.signal = undefined;
       this.stopAnimation();
       if (this.exitRequested) {
         this.close();
@@ -1368,6 +1822,8 @@ class FullscreenTui {
     activity.pushLine(`run ${commandText}`);
     this.busy = true;
     this.currentAbortController = new AbortController();
+    this.toolAbortController = new AbortController();
+    this.toolAbortSignalRef.signal = this.toolAbortController.signal;
     this.startAnimation();
     this.statusLine = `Running ${commandText}...`;
     this.requestRender();
@@ -1377,14 +1833,17 @@ class FullscreenTui {
         sessionId: this.selectedSessionId || undefined,
         sandbox: this.options.sandbox,
         signal: this.currentAbortController.signal,
+        toolAbortSignalRef: this.toolAbortSignalRef,
         onUserInput: (question) => this.requestClarification(question),
         onEvent: (event) => {
+          this.manageToolAbortSignal(event.event);
           activity.handle(event);
           this.updatePreviewFromEvent(event);
           this.requestRender();
         },
       });
       activity.finish();
+      await this.refreshSessions({ selectedSessionId: this.selectedSessionId });
       await this.refreshCommands();
       this.finishExecutionPreview({
         persist: true,
@@ -1401,6 +1860,8 @@ class FullscreenTui {
     } finally {
       this.busy = false;
       this.currentAbortController = null;
+      this.toolAbortController = null;
+      this.toolAbortSignalRef.signal = undefined;
       this.stopAnimation();
       if (this.exitRequested) {
         this.close();
@@ -1429,6 +1890,8 @@ class FullscreenTui {
     activity.pushLine(`skill ${commandText}`);
     this.busy = true;
     this.currentAbortController = new AbortController();
+    this.toolAbortController = new AbortController();
+    this.toolAbortSignalRef.signal = this.toolAbortController.signal;
     this.startAnimation();
     this.statusLine = `Running /${commandName}...`;
     this.requestRender();
@@ -1439,12 +1902,14 @@ class FullscreenTui {
         signal: this.currentAbortController.signal,
         onUserInput: (question) => this.requestClarification(question),
         onEvent: (event) => {
+          this.manageToolAbortSignal(event.event);
           activity.handle(event);
           this.updatePreviewFromEvent(event);
           this.requestRender();
         },
       });
       activity.finish();
+      await this.refreshSessions({ selectedSessionId: this.selectedSessionId });
       await this.refreshCommands();
       this.finishExecutionPreview({
         persist: true,
@@ -1460,6 +1925,8 @@ class FullscreenTui {
     } finally {
       this.busy = false;
       this.currentAbortController = null;
+      this.toolAbortController = null;
+      this.toolAbortSignalRef.signal = undefined;
       this.stopAnimation();
       if (this.exitRequested) {
         this.close();
@@ -1492,6 +1959,8 @@ class FullscreenTui {
     activity.pushLine(`shell ${persistOutput ? '!!' : '!'}${trimmedCommand}`);
     this.busy = true;
     this.currentAbortController = new AbortController();
+    this.toolAbortController = this.currentAbortController;
+    this.toolAbortSignalRef.signal = this.toolAbortController.signal;
     this.startAnimation();
     this.statusLine = `Running ${persistOutput ? '!!' : '!'}${trimmedCommand}...`;
     this.requestRender();
@@ -1536,6 +2005,8 @@ class FullscreenTui {
     } finally {
       this.busy = false;
       this.currentAbortController = null;
+      this.toolAbortController = null;
+      this.toolAbortSignalRef.signal = undefined;
       this.stopAnimation();
       if (this.exitRequested) {
         this.close();
@@ -2940,6 +3411,33 @@ class FullscreenTui {
     return this.activityFor(this.selectedSessionId || 'global');
   }
 
+  private graphemeLeftIndex(text: string, index: number): number {
+    if (index <= 0) return 0;
+    if (!graphemeSegmenter) return index - 1;
+    const graphemes = Array.from(graphemeSegmenter.segment(text), (g) => g.segment);
+    let pos = 0;
+    for (const g of graphemes) {
+      if (pos + g.length >= index) break;
+      pos += g.length;
+    }
+    return pos;
+  }
+
+  private graphemeRightIndex(text: string, index: number): number {
+    if (index >= text.length) return text.length;
+    if (!graphemeSegmenter) return index + 1;
+    const graphemes = Array.from(graphemeSegmenter.segment(text), (g) => g.segment);
+    let pos = 0;
+    for (const g of graphemes) {
+      if (pos >= index) {
+        pos += g.length;
+        break;
+      }
+      pos += g.length;
+    }
+    return Math.min(pos, text.length);
+  }
+
   private insertText(text: string): void {
     const previousInput = this.inputValue;
     this.inputValue = `${this.inputValue.slice(0, this.cursor)}${text}${this.inputValue.slice(this.cursor)}`;
@@ -2952,8 +3450,9 @@ class FullscreenTui {
       return;
     }
     const previousInput = this.inputValue;
-    this.inputValue = `${this.inputValue.slice(0, this.cursor - 1)}${this.inputValue.slice(this.cursor)}`;
-    this.cursor -= 1;
+    const deleteFrom = this.graphemeLeftIndex(this.inputValue, this.cursor);
+    this.inputValue = `${this.inputValue.slice(0, deleteFrom)}${this.inputValue.slice(this.cursor)}`;
+    this.cursor = deleteFrom;
     this.refreshCommandBarStatus(previousInput);
   }
 
@@ -3131,25 +3630,31 @@ class FullscreenTui {
     lines.push(status);
     lines.push(inputLine);
 
+    if (this.selection) {
+      this.applySelectionHighlight(lines, widths, rightHeights, contentHeight);
+    }
+
     this.paintFrame(lines, { columns, rows });
     if (workspaceView?.cursor && !this.pendingPrompt) {
       output.write(`\u001b[${workspaceView.cursor.row};${workspaceView.cursor.column}H`);
       return;
     }
 
-    const cursorColumn = Math.min(columns, inputPrefix.length + this.cursor + 1);
+    const textBeforeCursor = this.inputValue.slice(0, this.cursor);
+    const cursorColumn = Math.min(columns, inputPrefix.length + measureDisplayWidth(textBeforeCursor) + 1);
     output.write(`\u001b[${rows};${cursorColumn}H`);
   }
 
   private paintFrame(lines: string[], size: { columns: number; rows: number }): void {
-    const patch = computeFramePatch(this.previousFrameLines, lines, this.previousFrameSize, size);
+    const paddedLines = lines.map((line) => padRight(line, size.columns));
+    const patch = computeFramePatch(this.previousFrameLines, paddedLines, this.previousFrameSize, size);
     let buffer = '\u001b[0m';
 
     if (patch.fullRender) {
-      buffer += `\u001b[H\u001b[2J${lines.join('\n')}\u001b[?25h`;
+      buffer += `\u001b[H${paddedLines.join('\n')}\u001b[?25h`;
     } else if (patch.changedRows.length > 0) {
       for (const change of patch.changedRows) {
-        buffer += `\u001b[${change.row};1H\u001b[2K${change.line}`;
+        buffer += `\u001b[${change.row};1H${change.line}`;
       }
       buffer += '\u001b[?25h';
     } else {
@@ -3157,7 +3662,7 @@ class FullscreenTui {
     }
 
     output.write(buffer);
-    this.previousFrameLines = [...lines];
+    this.previousFrameLines = [...paddedLines];
     this.previousFrameSize = size;
   }
 
@@ -3174,36 +3679,40 @@ class FullscreenTui {
   }
 
   private buildStatusLine(): string {
+    const spinner = this.busy || this.currentPreview?.entries.some((entry) => entry.pending)
+      ? ` ${currentSpinnerFrame()}`
+      : '';
+
     if (this.uiMode === 'menu') {
       const menu = this.getMenuDefinitions()[this.menuState.activeIndex];
-      return `Menu ${menu?.label ?? ''} | ${menu?.items[this.menuState.selectedIndex]?.description ?? 'Choose an action.'}`;
+      return `${spinner} Menu ${menu?.label ?? ''} | ${menu?.items[this.menuState.selectedIndex]?.description ?? 'Choose an action.'}`;
     }
 
     if ((this.uiMode === 'picker' || this.uiMode === 'palette') && this.pickerState) {
       const selected = this.pickerState.filteredItems[this.pickerState.selectedIndex];
-      return `${this.pickerState.title} | ${selected?.description ?? this.pickerState.emptyText}`;
+      return `${spinner} ${this.pickerState.title} | ${selected?.description ?? this.pickerState.emptyText}`;
     }
 
     if (this.uiMode === 'viewer' && this.viewerState) {
-      return `${this.viewerState.title} | ${this.viewerState.path ? path.relative(this.workspaceRoot, this.viewerState.path) : 'read-only view'}`;
+      return `${spinner} ${this.viewerState.title} | ${this.viewerState.path ? path.relative(this.workspaceRoot, this.viewerState.path) : 'read-only view'}`;
     }
 
     if (this.uiMode === 'editor' && this.editorState) {
       const dirty = this.editorState.dirty ? 'modified' : 'saved';
-      return `${this.editorState.title} | ${dirty} | Ln ${this.editorState.cursorLine + 1}, Col ${this.editorState.cursorColumn + 1}`;
+      return `${spinner} ${this.editorState.title} | ${dirty} | Ln ${this.editorState.cursorLine + 1}, Col ${this.editorState.cursorColumn + 1}`;
     }
 
     const focus = paneDisplayName(this.focusedPane);
     if (!this.pendingPrompt && this.focusedPane !== 'sessions') {
       const follow = this.paneScroll[this.focusedPane] === 0 ? 'follow' : `scroll ${this.paneScroll[this.focusedPane]}`;
-      return `${this.statusLine} | Focus ${focus} | ${follow}`;
+      return `${spinner} ${this.statusLine} | Focus ${focus} | ${follow}`;
     }
     if (this.pendingPrompt) {
       return this.pendingPrompt.kind === 'clarify'
-        ? `Clarify: ${condenseWhitespace(this.pendingPrompt.prompt)} | Focus ${focus}`
-        : `Input: ${condenseWhitespace(this.pendingPrompt.prompt)} | Focus ${focus}`;
+        ? `${spinner} Clarify: ${condenseWhitespace(this.pendingPrompt.prompt)} | Focus ${focus}`
+        : `${spinner} Input: ${condenseWhitespace(this.pendingPrompt.prompt)} | Focus ${focus}`;
     }
-    return `${this.statusLine} | Focus ${focus}`;
+    return `${spinner} ${this.statusLine} | Focus ${focus}`;
   }
 
   private buildInputPrefix(): string {
@@ -3556,6 +4065,8 @@ class FullscreenTui {
       ['<- ->', 'Pane'],
       [this.focusedPane === 'sessions' ? 'Up/Down' : 'PgUp/PgDn', this.focusedPane === 'sessions' ? 'Select' : 'Scroll'],
       ['End', this.focusedPane === 'sessions' ? 'Bottom' : 'Follow'],
+      ['Drag', 'Select'],
+      ...(this.busy ? [['Ctrl+T', 'Cancel'] as HotkeyHint] : []),
       ['/cancel', 'Stop'],
     ];
   }
@@ -3578,6 +4089,17 @@ class FullscreenTui {
       : `${title}${this.focusedPane === kind ? ' [focus]' : ''} [-${this.paneScroll[kind]}]`;
   }
 
+  private cachedCollectTailWrappedLines(cacheKey: string, body: string[], innerWidth: number, limit: number): { lines: string[]; truncated: boolean } {
+    const cached = this.wrapCache.get(cacheKey);
+    const bodyKey = `${body.length}:${body.length > 0 ? body[body.length - 1] : ''}:${limit}`;
+    if (cached && cached.bodyRef === body && cached.bodyKey === bodyKey && cached.innerWidth === innerWidth) {
+      return { lines: cached.result, truncated: body.length > 0 && cached.result.length < body.length };
+    }
+    const result = collectTailWrappedLines(body, innerWidth, limit);
+    this.wrapCache.set(cacheKey, { bodyRef: body, bodyKey, innerWidth, result: result.lines });
+    return result;
+  }
+
   private getRenderPaneMetrics(
     kind: PaneKind,
     width = paneDimensionsForKind(kind, output.columns ?? 120, output.rows ?? 40).width,
@@ -3589,7 +4111,7 @@ class FullscreenTui {
       const rawBody = kind === 'messages'
         ? this.buildMessagesPaneBody({ recentEntryLimit: Math.max(8, viewportLines * 2) })
         : this.buildProcessPaneBody({ tailLineLimit: Math.max(16, viewportLines * 4) });
-      const tail = collectTailWrappedLines(rawBody, innerWidth, viewportLines);
+      const tail = this.cachedCollectTailWrappedLines(`${kind}:tail`, rawBody, innerWidth, viewportLines);
       return {
         lines: tail.lines,
         start: 0,
@@ -3614,7 +4136,7 @@ class FullscreenTui {
   ): { lines: string[]; start: number; maxStart: number; viewportLines: number; maxStartIsExact: boolean } {
     const innerWidth = Math.max(1, width - 2);
     const rawBody = this.getPaneBody(kind);
-    const lines = wrapBodyLines(rawBody, innerWidth);
+    const lines = this.cachedWrapBodyLines(kind, rawBody, innerWidth);
     const viewportLines = Math.max(0, height - 2);
     const maxStart = Math.max(0, lines.length - viewportLines);
 
@@ -3639,6 +4161,17 @@ class FullscreenTui {
     };
   }
 
+  private cachedWrapBodyLines(cacheKey: string, body: string[], innerWidth: number): string[] {
+    const cached = this.wrapCache.get(cacheKey);
+    const bodyKey = `${body.length}:${body.length > 0 ? body[body.length - 1] : ''}`;
+    if (cached && cached.bodyRef === body && cached.bodyKey === bodyKey && cached.innerWidth === innerWidth) {
+      return cached.result;
+    }
+    const result = wrapBodyLines(body, innerWidth);
+    this.wrapCache.set(cacheKey, { bodyRef: body, bodyKey, innerWidth, result });
+    return result;
+  }
+
   private getPaneBody(kind: PaneKind): string[] {
     switch (kind) {
       case 'sessions':
@@ -3646,7 +4179,7 @@ class FullscreenTui {
       case 'messages':
         return this.buildMessagesPaneBody();
       case 'process':
-        return this.buildProcessPaneBody();
+        return this.buildProcessPaneBody({ tailLineLimit: MAX_ACTIVITY_LINES });
       case 'context':
         return this.buildContextPaneBody();
     }
@@ -3668,8 +4201,7 @@ class FullscreenTui {
   }
 
   private formatMessageHeader(entry: DisplayMessage): string {
-    const spinner = entry.pending ? ` ${currentSpinnerFrame()}` : '';
-    return formatDisplayMessageHeader(entry, spinner);
+    return formatDisplayMessageHeader(entry, '');
   }
 
   private close(): void {
@@ -3679,6 +4211,21 @@ class FullscreenTui {
     const resolve = this.closeResolver;
     this.closeResolver = null;
     resolve();
+  }
+
+  private manageToolAbortSignal(event: DMLEvent): void {
+    if (event.type !== 'tool_call' || !event.toolState) {
+      return;
+    }
+    if (event.toolState === 'starting' || event.toolState === 'running') {
+      if (!this.toolAbortController || this.toolAbortController.signal.aborted) {
+        this.toolAbortController = new AbortController();
+      }
+      this.toolAbortSignalRef.signal = this.toolAbortController.signal;
+    } else {
+      this.toolAbortController = null;
+      this.toolAbortSignalRef.signal = undefined;
+    }
   }
 
   private isEditingInput(): boolean {
@@ -3999,6 +4546,7 @@ export async function runSlashCommand(
     sessionId?: string;
     sandbox?: boolean;
     signal?: AbortSignal;
+    toolAbortSignalRef?: { signal?: AbortSignal };
     onUserInput?: (prompt: string) => Promise<string>;
     onEvent?: (event: ConductorLogEvent) => void;
   } = {},
@@ -4040,6 +4588,7 @@ export async function runFileCommand(
     sessionId?: string;
     sandbox?: boolean;
     signal?: AbortSignal;
+    toolAbortSignalRef?: { signal?: AbortSignal };
     onUserInput?: (prompt: string) => Promise<string>;
     onEvent?: (event: ConductorLogEvent) => void;
   } = {},
@@ -4073,10 +4622,12 @@ async function executeRunnableCommand(
     sessionId?: string;
     sandbox?: boolean;
     signal?: AbortSignal;
+    toolAbortSignalRef?: { signal?: AbortSignal };
     onUserInput?: (prompt: string) => Promise<string>;
     onEvent?: (event: ConductorLogEvent) => void;
   } = {},
 ): Promise<CliRunResult> {
+  const usageByModel: TokenUsageByModel = {};
 
   const executionLog = options.sessionId
     ? createSessionExecutionLogWriter({
@@ -4089,6 +4640,9 @@ async function executeRunnableCommand(
     })
     : null;
   const emitLogEvent = (event: ConductorLogEvent): void => {
+    if (event.event.type === 'usage') {
+      recordTokenUsage(usageByModel, event.modelId, event.event.usage);
+    }
     executionLog?.recordEvent(event);
     options.onEvent?.(event);
   };
@@ -4100,6 +4654,7 @@ async function executeRunnableCommand(
       stream: true,
       sandbox: options.sandbox,
       signal: options.signal,
+      toolAbortSignalRef: options.toolAbortSignalRef,
       onUserInput: options.onUserInput,
       onEvent: (event: DMLEvent) => emitLogEvent({ scope: 'child', childSlug: target.childSlug, event }),
       onChildEvent: (childSlug, event) => emitLogEvent({ scope: 'child', childSlug, event }),
@@ -4111,6 +4666,7 @@ async function executeRunnableCommand(
         options.sessionId,
         buildPersistedRunnableTranscript(target.inputText, result),
       );
+      await mergeSessionUsage(workspaceRoot, options.sessionId, usageByModel);
     }
 
     await executionLog?.finish({
@@ -4130,6 +4686,7 @@ async function executeRunnableCommand(
           error: (error as Error).message,
         }),
       );
+      await mergeSessionUsage(workspaceRoot, options.sessionId, usageByModel);
     }
 
     await executionLog?.finish({
@@ -5118,6 +5675,39 @@ function expandTabs(text: string, tabWidth: number): string {
 
 export function measureDisplayWidth(text: string): number {
   return splitGraphemes(text).reduce((total, grapheme) => total + graphemeDisplayWidth(grapheme), 0);
+}
+
+function displayColumnToStringIndex(text: string, displayCol: number): number {
+  let col = 0;
+  let i = 0;
+  const len = text.length;
+  while (i < len) {
+    if (text.charCodeAt(i) === 0x1b && i + 1 < len && text[i + 1] === '[') {
+      const end = text.indexOf('m', i + 2);
+      if (end !== -1) {
+        i = end + 1;
+        continue;
+      }
+    }
+    if (col >= displayCol) return i;
+    const code = text.codePointAt(i)!;
+    const charWidth = code >= 0x1100 && (
+      code <= 0x115f || code === 0x2329 || code === 0x232a ||
+      (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xfe10 && code <= 0xfe19) ||
+      (code >= 0xfe30 && code <= 0xfe6f) ||
+      (code >= 0xff01 && code <= 0xff60) ||
+      (code >= 0xffe0 && code <= 0xffe6) ||
+      (code >= 0x1f300 && code <= 0x1f9ff) ||
+      (code >= 0x20000 && code <= 0x2fffd) ||
+      (code >= 0x30000 && code <= 0x3fffd)
+    ) ? 2 : 1;
+    col += charWidth;
+    i += code > 0xffff ? 2 : 1;
+  }
+  return i;
 }
 
 export function padRight(text: string, width: number): string {

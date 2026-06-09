@@ -57,6 +57,7 @@ export function registerLocalRuntimeTools(
     workspacePath: string;
     shell: ShellManager;
     signal?: AbortSignal;
+    toolAbortSignalRef?: { signal?: AbortSignal };
     onEvent?: (event: DMLEvent) => void;
     skillCatalog?: {
       listSkills: () => Promise<unknown>;
@@ -64,6 +65,13 @@ export function registerLocalRuntimeTools(
     };
   },
 ): void {
+  const getExecSignal = (): AbortSignal | undefined => {
+    const toolSignal = options.toolAbortSignalRef?.signal;
+    if (toolSignal && options.signal) {
+      return AbortSignal.any([options.signal, toolSignal]);
+    }
+    return toolSignal ?? options.signal;
+  };
   sdk.registerTool('web_search', {
     description: 'Search the web for information.',
     parameters: {
@@ -79,7 +87,7 @@ export function registerLocalRuntimeTools(
       query: String(args.query ?? args.arg1 ?? ''),
       count: typeof args.count === 'number' ? args.count : 10,
       freshness: typeof args.freshness === 'string' ? args.freshness : undefined,
-      signal: options.signal,
+      signal: getExecSignal(),
     }),
   });
 
@@ -98,7 +106,7 @@ export function registerLocalRuntimeTools(
       query: String(args.query ?? args.arg1 ?? ''),
       count: typeof args.count === 'number' ? args.count : 10,
       freshness: typeof args.freshness === 'string' ? args.freshness : undefined,
-      signal: options.signal,
+      signal: getExecSignal(),
     }),
   });
 
@@ -113,7 +121,7 @@ export function registerLocalRuntimeTools(
       },
       required: ['url'],
     },
-    execute: async (args) => urlFetch(options.workspacePath, args, options.signal),
+    execute: async (args) => urlFetch(options.workspacePath, args, getExecSignal()),
   });
 
   sdk.registerTool('consult_recipes', {
@@ -146,7 +154,7 @@ export function registerLocalRuntimeTools(
       const command = String(args.command ?? args.arg1 ?? '');
       return options.shell.exec(
         command,
-        options.signal,
+        getExecSignal(),
         createShellToolEventBridge({
           toolName: 'bash',
           toolArgs: { command },
@@ -194,7 +202,7 @@ export function registerLocalRuntimeTools(
       const command = String(args.command ?? args.arg1 ?? '');
       return options.shell.exec(
         command,
-        options.signal,
+        getExecSignal(),
         createShellToolEventBridge({
           toolName: 'vm_exec',
           toolArgs: { command },

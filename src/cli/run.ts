@@ -41,6 +41,7 @@ export interface RunOptions {
   audit?: boolean;
   gasLimit?: number;
   signal?: AbortSignal;
+  toolAbortSignalRef?: { signal?: AbortSignal };
   params?: Record<string, string>;
   prompt?: string;
   onUserInput?: (prompt: string) => Promise<string>;
@@ -190,6 +191,7 @@ export async function run(
     headless: options.headless,
     sandbox: options.sandbox,
     signal: options.signal,
+    toolAbortSignalRef: options.toolAbortSignalRef,
     onEvent: options.onEvent,
     skillCatalog: {
       workspaceRoot: configRoot,
