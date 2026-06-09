@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-const BANNED_TOOL_NAMES = ['web_search', 'news_search', 'url_fetch', 'create_skill'];
+const BANNED_TOOL_NAMES = ['web_search', 'news_search', 'url_fetch', 'create_skill', 'ask_user'];
 const VERBOSE = Boolean(process.env.DC_VERBOSE);
 
 async function main() {
@@ -27,64 +27,24 @@ async function main() {
     warnings: [],
   };
 
+  const useTestbed = await pathExists('/testbed');
   const workRoot = '/work';
-  const repoDir = path.join(workRoot, 'task');
+  const repoDir = useTestbed ? '/testbed' : path.join(workRoot, 'task');
   const agentHome = path.join(workRoot, 'agent-home');
   const pythonVenv = path.join(workRoot, 'python-venv');
   const plansDir = path.join(agentHome, 'plans');
   const startedAt = Date.now();
 
   try {
-    logProgress(`Starting worker for ${spec.instance.instance_id} in mode ${spec.mode}`);
-    await resetDirectory(repoDir);
+    logProgress(`Starting worker for ${spec.instance.instance_id} in mode ${spec.mode} (environment: ${useTestbed ? 'swebench-image' : 'manual'})`);
     await resetDirectory(agentHome);
     await fs.mkdir(logsDir, { recursive: true });
 
-    const repositoryOrigin = await resolveRepositoryOrigin(spec);
-    const gitFetchArgs = buildGitFetchArgs(repositoryOrigin, spec.instance.base_commit);
-    logProgress(`Using repository origin ${repositoryOrigin}`);
-
-    await runStep(result, logsDir, 'git_init', ['git', 'init', repoDir], { cwd: workRoot });
-    await runStep(result, logsDir, 'git_remote_add', ['git', 'remote', 'add', 'origin', repositoryOrigin], { cwd: repoDir });
-    await runStep(result, logsDir, 'git_fetch', gitFetchArgs, { cwd: repoDir });
-    await runStep(result, logsDir, 'git_checkout', ['git', 'checkout', '--detach', 'FETCH_HEAD'], { cwd: repoDir });
-    await runBestEffortStep(result, logsDir, 'git_submodules', ['git', 'submodule', 'update', '--init', '--recursive', '--depth', '1'], { cwd: repoDir });
-    await runBestEffortStep(result, logsDir, 'git_config_name', ['git', 'config', 'user.name', 'DeepClause Benchmark'], { cwd: repoDir });
-    await runBestEffortStep(result, logsDir, 'git_config_email', ['git', 'config', 'user.email', 'benchmark@deepclause.local'], { cwd: repoDir });
-
-    const deepclauseInstallTarget = spec.deepclausePackageTarball ?? `deepclause-sdk@${spec.deepclauseVersion}`;
-    logProgress(`Installing DeepClause from ${deepclauseInstallTarget}`);
-    await runStep(result, logsDir, 'npm_install_deepclause', ['npm', 'install', '-g', deepclauseInstallTarget], {
-      cwd: workRoot,
-      timeoutSeconds: spec.execution.setupTimeoutSeconds,
-      env: buildCommandEnv(),
-    });
-
-    await runStep(result, logsDir, 'deepclause_init', ['deepclause', 'init', '--model', spec.deepclause.models.run], {
-      cwd: agentHome,
-      timeoutSeconds: spec.execution.setupTimeoutSeconds,
-      env: buildCommandEnv(),
-    });
-
-    await writeDeepClauseConfig({
-      agentHome,
-      repoDir,
-      deepclause: spec.deepclause,
-    });
-    await runStep(result, logsDir, 'deepclause_show_model', ['deepclause', 'show-model', '--json'], {
-      cwd: agentHome,
-      timeoutSeconds: 60,
-      env: buildCommandEnv(),
-    });
-
-    await maybePrepareRepository({
-      result,
-      logsDir,
-      repoDir,
-      pythonVenv,
-      repoSetup: spec.execution.repoSetup,
-      timeoutSeconds: spec.execution.setupTimeoutSeconds,
-    });
+    if (useTestbed) {
+      await setupSwebenchEnvironment({ result, logsDir, repoDir, agentHome, spec });
+    } else {
+      await setupManualEnvironment({ result, logsDir, repoDir, agentHome, pythonVenv, spec });
+    }
 
     const benchmarkRequest = buildBenchmarkRequest(spec.instance);
     if (spec.mode === 'prompt') {
@@ -183,6 +143,104 @@ async function writeDeepClauseConfig({ agentHome, repoDir, deepclause }) {
     workspace: repoDir,
   };
   await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+}
+
+async function installBenchmarkPlan(agentHome) {
+  const benchmarkPlanSource = '/benchmarks-src/worker/plan.dml';
+  const planTarget = path.join(agentHome, '.deepclause', 'system', 'plan.dml');
+  if (await pathExists(benchmarkPlanSource)) {
+    await fs.copyFile(benchmarkPlanSource, planTarget);
+    logProgress(`Installed benchmark plan.dml (no ask_user)`);
+  }
+}
+
+async function setupSwebenchEnvironment({ result, logsDir, repoDir, agentHome, spec }) {
+  logProgress('Using pre-built SWE-bench instance image');
+  await runBestEffortStep(result, logsDir, 'git_config_name', ['git', 'config', 'user.name', 'DeepClause Benchmark'], { cwd: repoDir });
+  await runBestEffortStep(result, logsDir, 'git_config_email', ['git', 'config', 'user.email', 'benchmark@deepclause.local'], { cwd: repoDir });
+
+  await runStep(result, logsDir, 'install_nodejs', ['bash', '-lc', [
+    'set -euo pipefail',
+    'if ! command -v node >/dev/null 2>&1; then',
+    '  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -',
+    '  apt-get install -y nodejs',
+    'fi',
+    'node --version',
+    'npm --version',
+  ].join('\n')], {
+    cwd: '/work',
+    timeoutSeconds: spec.execution.setupTimeoutSeconds,
+    env: buildCommandEnv(),
+  });
+
+  const deepclauseInstallTarget = spec.deepclausePackageTarball ?? `deepclause-sdk@${spec.deepclauseVersion}`;
+  logProgress(`Installing DeepClause from ${deepclauseInstallTarget}`);
+  await runStep(result, logsDir, 'npm_install_deepclause', ['npm', 'install', '-g', deepclauseInstallTarget], {
+    cwd: '/work',
+    timeoutSeconds: spec.execution.setupTimeoutSeconds,
+    env: buildCommandEnv(),
+  });
+
+  await runStep(result, logsDir, 'deepclause_init', ['deepclause', 'init', '--model', spec.deepclause.models.run], {
+    cwd: agentHome,
+    timeoutSeconds: spec.execution.setupTimeoutSeconds,
+    env: buildCommandEnv(),
+  });
+
+  await writeDeepClauseConfig({ agentHome, repoDir, deepclause: spec.deepclause });
+  await installBenchmarkPlan(agentHome);
+  await runStep(result, logsDir, 'deepclause_show_model', ['deepclause', 'show-model', '--json'], {
+    cwd: agentHome,
+    timeoutSeconds: 60,
+    env: buildCommandEnv(),
+  });
+}
+
+async function setupManualEnvironment({ result, logsDir, repoDir, agentHome, pythonVenv, spec }) {
+  await resetDirectory(repoDir);
+
+  const repositoryOrigin = await resolveRepositoryOrigin(spec);
+  const gitFetchArgs = buildGitFetchArgs(repositoryOrigin, spec.instance.base_commit);
+  logProgress(`Using repository origin ${repositoryOrigin}`);
+
+  await runStep(result, logsDir, 'git_init', ['git', 'init', repoDir], { cwd: '/work' });
+  await runStep(result, logsDir, 'git_remote_add', ['git', 'remote', 'add', 'origin', repositoryOrigin], { cwd: repoDir });
+  await runStep(result, logsDir, 'git_fetch', gitFetchArgs, { cwd: repoDir });
+  await runStep(result, logsDir, 'git_checkout', ['git', 'checkout', '--detach', 'FETCH_HEAD'], { cwd: repoDir });
+  await runBestEffortStep(result, logsDir, 'git_submodules', ['git', 'submodule', 'update', '--init', '--recursive', '--depth', '1'], { cwd: repoDir });
+  await runBestEffortStep(result, logsDir, 'git_config_name', ['git', 'config', 'user.name', 'DeepClause Benchmark'], { cwd: repoDir });
+  await runBestEffortStep(result, logsDir, 'git_config_email', ['git', 'config', 'user.email', 'benchmark@deepclause.local'], { cwd: repoDir });
+
+  const deepclauseInstallTarget = spec.deepclausePackageTarball ?? `deepclause-sdk@${spec.deepclauseVersion}`;
+  logProgress(`Installing DeepClause from ${deepclauseInstallTarget}`);
+  await runStep(result, logsDir, 'npm_install_deepclause', ['npm', 'install', '-g', deepclauseInstallTarget], {
+    cwd: '/work',
+    timeoutSeconds: spec.execution.setupTimeoutSeconds,
+    env: buildCommandEnv(),
+  });
+
+  await runStep(result, logsDir, 'deepclause_init', ['deepclause', 'init', '--model', spec.deepclause.models.run], {
+    cwd: agentHome,
+    timeoutSeconds: spec.execution.setupTimeoutSeconds,
+    env: buildCommandEnv(),
+  });
+
+  await writeDeepClauseConfig({ agentHome, repoDir, deepclause: spec.deepclause });
+  await installBenchmarkPlan(agentHome);
+  await runStep(result, logsDir, 'deepclause_show_model', ['deepclause', 'show-model', '--json'], {
+    cwd: agentHome,
+    timeoutSeconds: 60,
+    env: buildCommandEnv(),
+  });
+
+  await maybePrepareRepository({
+    result,
+    logsDir,
+    repoDir,
+    pythonVenv,
+    repoSetup: spec.execution.repoSetup,
+    timeoutSeconds: spec.execution.setupTimeoutSeconds,
+  });
 }
 
 async function maybePrepareRepository({ result, logsDir, repoDir, pythonVenv, repoSetup, timeoutSeconds }) {
@@ -454,7 +512,8 @@ async function getModifiedFiles(repoDir) {
 }
 
 async function getGitDiff(repoDir) {
-  const { stdout } = await runCommand('git', ['-c', 'core.fileMode=false', 'diff', '--binary', '--full-index', '--no-ext-diff'], {
+  await runCommand('git', ['add', '-A'], { cwd: repoDir });
+  const { stdout } = await runCommand('git', ['-c', 'core.fileMode=false', 'diff', 'HEAD', '--binary', '--full-index', '--no-ext-diff'], {
     cwd: repoDir,
   });
   return stdout;

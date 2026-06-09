@@ -46,15 +46,17 @@ const DEFAULT_CONFIG = {
     verbose: false,
     repoCacheDir: undefined,
     repoSetup: {
-      mode: 'best-effort',
+      mode: 'swebench-image',
       commands: [],
     },
   },
   docker: {
     platform: 'linux/amd64',
     workerImage: 'deepclause-swebench-worker:latest',
+    evaluatorImage: 'deepclause-swebench-evaluator:latest',
     rebuildImages: false,
     skipImageBuild: false,
+    swebenchNamespace: 'swebench',
   },
   artifacts: {
     outputRoot: 'benchmarks/runs',
@@ -127,6 +129,18 @@ async function main() {
   const selectedInstances = selectInstances(allInstances, config.dataset.instanceIds, config.dataset.offset, config.dataset.limit);
   if (selectedInstances.length === 0) {
     throw new Error('No dataset instances selected.');
+  }
+
+  if (config.execution.repoSetup.mode === 'swebench-image' && !config.docker.skipImageBuild) {
+    await ensureEvaluatorImage(config.docker.evaluatorImage, 'latest', config.docker.rebuildImages);
+    await buildSwebenchInstanceImages({
+      instances: selectedInstances,
+      evaluatorImage: config.docker.evaluatorImage,
+      platform: config.docker.platform,
+      namespace: config.docker.swebenchNamespace,
+      maxWorkers: config.execution.maxWorkers,
+      runRoot,
+    });
   }
 
   console.log(`Resolved deepclause-sdk version: ${resolvedDeepClauseVersion}`);
@@ -337,7 +351,7 @@ Options:
   --run-temp <n>               Run slot temperature
   --compile-temp <n>           Compile slot temperature
   --max-workers <n>            Maximum concurrent worker containers
-  --repo-setup <mode>          none, best-effort, or commands
+  --repo-setup <mode>          none, best-effort, commands, or swebench-image
   --platform <name>            Docker platform, e.g. linux/amd64
   --rebuild-images             Rebuild worker image
   --skip-image-build           Skip docker build step
@@ -456,6 +470,8 @@ function normalizeConfig(config) {
     : String(next.deepclause.packageTarball);
   next.docker.platform = String(next.docker.platform ?? 'linux/amd64');
   next.docker.workerImage = String(next.docker.workerImage ?? 'deepclause-swebench-worker:latest');
+  next.docker.evaluatorImage = String(next.docker.evaluatorImage ?? 'deepclause-swebench-evaluator:latest');
+  next.docker.swebenchNamespace = String(next.docker.swebenchNamespace ?? 'swebench');
   next.artifacts.outputRoot = String(next.artifacts.outputRoot ?? 'benchmarks/runs');
   return next;
 }
@@ -469,8 +485,8 @@ function normalizeMode(mode) {
 }
 
 function normalizeRepoSetupMode(mode) {
-  const value = String(mode ?? 'best-effort').toLowerCase();
-  if (!['none', 'best-effort', 'commands'].includes(value)) {
+  const value = String(mode ?? 'swebench-image').toLowerCase();
+  if (!['none', 'best-effort', 'commands', 'swebench-image'].includes(value)) {
     throw new Error(`Unsupported repo setup mode: ${mode}`);
   }
   return value;
@@ -518,6 +534,51 @@ async function dockerImageExists(imageTag) {
   } catch {
     return false;
   }
+}
+
+async function ensureEvaluatorImage(imageTag, swebenchVersion, rebuild) {
+  if (!rebuild && await dockerImageExists(imageTag)) {
+    return;
+  }
+
+  console.log(`Building evaluator image ${imageTag}...`);
+  await runCommand('docker', [
+    'build',
+    '--build-arg', `SWEBENCH_VERSION=${swebenchVersion}`,
+    '-t', imageTag,
+    '-f', path.join(BENCHMARKS_ROOT, 'docker', 'evaluator.Dockerfile'),
+    REPO_ROOT,
+  ], {
+    cwd: REPO_ROOT,
+    streamOutput: true,
+  });
+}
+
+async function buildSwebenchInstanceImages({ instances, evaluatorImage, platform, namespace, maxWorkers, runRoot }) {
+  const instanceIdsFile = path.join(runRoot, 'swebench-instance-ids.json');
+  await fs.writeFile(instanceIdsFile, `${JSON.stringify(instances.map((i) => i.instance_id))}\n`, 'utf8');
+
+  const dockerArgs = [
+    'run',
+    '--rm',
+    '-v', '/var/run/docker.sock:/var/run/docker.sock',
+    '-v', `${BENCHMARKS_ROOT}:/benchmarks-src:ro`,
+    '-v', `${instanceIdsFile}:/tmp/instance-ids.json:ro`,
+    evaluatorImage,
+    'python',
+    '/benchmarks-src/worker/build-swebench-images.py',
+    normalizeDatasetName('lite'),
+    'test',
+    namespace,
+    String(Math.min(maxWorkers, 4)),
+    '/tmp/instance-ids.json',
+  ];
+
+  console.log(`Building SWE-bench instance Docker images for ${instances.length} instances...`);
+  await runCommand('docker', dockerArgs, {
+    cwd: REPO_ROOT,
+    streamOutput: true,
+  });
 }
 
 async function loadDatasetInstances(datasetName, split) {
@@ -608,6 +669,8 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
   const containerName = buildContainerName(runId, task.mode, task.instance.instance_id);
   const taskLabel = `[${task.mode}] ${task.instance.instance_id}`;
   const mountedPaths = [];
+  const useSwebenchImage = config.execution.repoSetup.mode === 'swebench-image';
+  const swebenchImageName = buildSwebenchInstanceImageName(task.instance.instance_id, config.docker.platform, config.docker.swebenchNamespace);
   const dockerArgs = [
     'run',
     '--rm',
@@ -617,6 +680,9 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
     '-v', `${instanceRoot}:/work-output`,
     '-v', `${inputPath}:/work-input/input.json:ro`,
   ];
+  if (useSwebenchImage) {
+    dockerArgs.push('-v', '/var/run/docker.sock:/var/run/docker.sock');
+  }
   if (config.deepclause.packageTarball) {
     const packageTarballPath = path.resolve(REPO_ROOT, config.deepclause.packageTarball);
     if (!await pathExists(packageTarballPath)) {
@@ -643,14 +709,14 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
     dockerArgs.push('-e', 'DC_VERBOSE=1');
   }
   dockerArgs.push(
-    config.docker.workerImage,
+    useSwebenchImage ? swebenchImageName : config.docker.workerImage,
     'node',
     '/benchmarks-src/worker/run-instance.mjs',
     '/work-input/input.json',
     '/work-output',
   );
 
-  console.log(`${taskLabel} starting worker container ${containerName}`);
+  console.log(`${taskLabel} starting worker container ${containerName} (${useSwebenchImage ? swebenchImageName : config.docker.workerImage})`);
   console.log(`${taskLabel} input -> ${path.relative(runRoot, inputPath)}`);
   console.log(`${taskLabel} live logs -> ${path.relative(runRoot, dockerStdoutPath)} / ${path.relative(runRoot, dockerStderrPath)}`);
   for (const mountedPath of mountedPaths) {
@@ -757,6 +823,15 @@ function buildModelLabel({ mode, version, models, temperatures }) {
     `temps-${sanitizeSegment(String(temperatures.gateway))}-${sanitizeSegment(String(temperatures.run))}-${sanitizeSegment(String(temperatures.compile))}`,
   ];
   return parts.join('__');
+}
+
+function buildSwebenchInstanceImageName(instanceId, platform, namespace) {
+  const arch = platform.includes('arm64') ? 'arm64' : 'x86_64';
+  const imageKey = `sweb.eval.${arch}.${instanceId.toLowerCase()}:latest`;
+  if (namespace && namespace.toLowerCase() !== 'none') {
+    return `${namespace}/${imageKey}`.replace('__', '_1776_');
+  }
+  return imageKey;
 }
 
 function buildModeSummary({ mode, modeResults, resolvedDeepClauseVersion, config }) {
