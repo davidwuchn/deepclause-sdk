@@ -9,6 +9,11 @@ import type {
   MemoryMessage,
   ToolPolicy,
 } from './types.js';
+import type {
+  Provider,
+  ProviderConfig,
+  ResolvedModelConfig,
+} from './system/config/model-slots.js';
 
 const DEFAULT_DML_COMPACTOR_TIMEOUT_MS = 15_000;
 
@@ -38,6 +43,12 @@ export interface ResolvedCompactionOptions {
 export interface ParsedCompactorDecision {
   apply: boolean;
   messages?: MemoryMessage[];
+  rewrite?: CompactorRewriteSpec;
+}
+
+export interface CompactorRewriteSpec {
+  keepLastMessages: number;
+  summary: string;
 }
 
 export interface CompactorExecutionRequest {
@@ -55,6 +66,15 @@ export interface AppliedCompactorResult {
   messages: MemoryMessage[];
   event: DMLEvent;
   applied: boolean;
+}
+
+export interface ResolvedCompactorModelConfig {
+  model: string;
+  modelId: string;
+  provider: Provider;
+  apiKey?: string;
+  baseUrl?: string;
+  temperature: number;
 }
 
 export function resolveCompactionOptions(
@@ -123,6 +143,49 @@ export function estimateTokensForMessages(messages: MemoryMessage[]): number {
   return messages.reduce((total, message) => total + estimateTokensForText(message.content), 0);
 }
 
+export function detectProviderFromModel(model: string): Provider {
+  const lower = model.toLowerCase();
+  if (lower.includes('gpt') || lower.includes('o1') || lower.includes('o3')) {
+    return 'openai';
+  }
+  if (lower.includes('claude')) {
+    return 'anthropic';
+  }
+  if (lower.includes('gemini') || lower.includes('palm')) {
+    return 'google';
+  }
+  return 'openrouter';
+}
+
+export function resolveCompactorModelConfig(params: {
+  binding: ResolvedCompactorBinding;
+  selection: ResolvedModelConfig;
+  providerConfigs?: Partial<Record<Provider, ProviderConfig>>;
+  baseUrl?: string;
+}): ResolvedCompactorModelConfig {
+  const model = params.binding.compactor.model ?? params.selection.model;
+  const provider = params.binding.compactor.provider
+    ?? (params.binding.compactor.model ? detectProviderFromModel(model) : params.selection.provider);
+  const providerConfig = provider === params.selection.provider
+    ? {
+      apiKey: params.selection.apiKey,
+      baseUrl: params.baseUrl ?? params.selection.baseUrl,
+    }
+    : {
+      apiKey: params.providerConfigs?.[provider]?.apiKey,
+      baseUrl: params.baseUrl ?? params.providerConfigs?.[provider]?.baseUrl,
+    };
+
+  return {
+    model,
+    modelId: params.binding.compactor.model ?? params.selection.id,
+    provider,
+    apiKey: providerConfig.apiKey,
+    baseUrl: providerConfig.baseUrl,
+    temperature: params.selection.temperature,
+  };
+}
+
 export function buildCompactorParams(
   binding: ResolvedCompactorBinding,
   messages: MemoryMessage[],
@@ -141,6 +204,7 @@ export async function executeCompactor(params: {
   binding: ResolvedCompactorBinding;
   messages: MemoryMessage[];
   execute: (request: CompactorExecutionRequest) => Promise<CompactorExecutionResponse>;
+  emitEvent?: (event: DMLEvent) => void;
 }): Promise<AppliedCompactorResult> {
   const beforeTokens = estimateTokensForMessages(params.messages);
   if (params.messages.length === 0) {
@@ -161,6 +225,12 @@ export async function executeCompactor(params: {
     messages: params.messages,
     params: buildCompactorParams(params.binding, params.messages),
   };
+
+  params.emitEvent?.(buildCompactionEvent({
+    binding: params.binding,
+    action: 'running',
+    beforeTokens,
+  }));
 
   let response: CompactorExecutionResponse;
   try {
@@ -221,7 +291,11 @@ export async function executeCompactor(params: {
     };
   }
 
-  if (!parsed.messages) {
+  const rewrittenMessages = !parsed.messages && parsed.rewrite
+    ? applyCompactorRewrite(params.binding, params.messages, parsed.rewrite)
+    : parsed.messages;
+
+  if (!rewrittenMessages) {
     return {
       messages: params.messages,
       applied: false,
@@ -235,7 +309,7 @@ export async function executeCompactor(params: {
     };
   }
 
-  const validationError = validateMessageArray(parsed.messages);
+  const validationError = validateMessageArray(rewrittenMessages);
   if (validationError) {
     return {
       messages: params.messages,
@@ -250,7 +324,7 @@ export async function executeCompactor(params: {
     };
   }
 
-  const afterTokens = estimateTokensForMessages(parsed.messages);
+  const afterTokens = estimateTokensForMessages(rewrittenMessages);
   if (afterTokens >= beforeTokens) {
     return {
       messages: params.messages,
@@ -266,7 +340,7 @@ export async function executeCompactor(params: {
   }
 
   return {
-    messages: parsed.messages,
+    messages: rewrittenMessages,
     applied: true,
     event: buildCompactionEvent({
       binding: params.binding,
@@ -281,6 +355,11 @@ export function parseCompactorAnswer(answer: string): ParsedCompactorDecision | 
   const trimmed = answer.trim();
   if (!trimmed) {
     return null;
+  }
+
+  const rewriteSpec = parseCompactorRewriteSpec(trimmed);
+  if (rewriteSpec) {
+    return rewriteSpec;
   }
 
   if (trimmed === 'no_op' || trimmed === 'skip') {
@@ -300,21 +379,69 @@ export function parseCompactorAnswer(answer: string): ParsedCompactorDecision | 
 
   const apply = typeof record.apply === 'boolean'
     ? record.apply
-    : Boolean(record.messages ?? record.messages_out ?? record.memory ?? record.memory_out);
+    : Boolean(
+      record.messages
+      ?? record.messages_out
+      ?? record.memory
+      ?? record.memory_out
+      ?? record.summary
+      ?? record.compacted_summary,
+    );
   if (!apply) {
     return { apply: false };
   }
 
   const rawMessages = record.messages ?? record.messages_out ?? record.memory ?? record.memory_out;
   const messages = normalizeMessageArray(rawMessages);
-  if (!messages) {
+  if (messages) {
+    return {
+      apply: true,
+      messages,
+    };
+  }
+
+  const rewrite = parseCompactorRewriteRecord(record);
+  if (!rewrite) {
     return null;
   }
 
   return {
     apply: true,
-    messages,
+    rewrite,
   };
+}
+
+export function applyCompactorRewrite(
+  binding: ResolvedCompactorBinding,
+  messages: MemoryMessage[],
+  rewrite: CompactorRewriteSpec,
+): MemoryMessage[] | null {
+  const summary = rewrite.summary.trim();
+  if (!summary) {
+    return null;
+  }
+
+  const keepLastMessages = clampKeepLastMessages(rewrite.keepLastMessages);
+  const summaryMessage: MemoryMessage = {
+    role: 'assistant',
+    content: summary,
+  };
+
+  if (binding.scope === 'session') {
+    return [
+      summaryMessage,
+      ...messages.slice(-keepLastMessages),
+    ];
+  }
+
+  const systemMessages = messages.filter((message) => message.role === 'system');
+  const conversationalMessages = messages.filter((message) => message.role !== 'system');
+
+  return [
+    ...systemMessages,
+    summaryMessage,
+    ...conversationalMessages.slice(-keepLastMessages),
+  ];
 }
 
 export function normalizeMessageArray(value: unknown): MemoryMessage[] | null {
@@ -358,7 +485,7 @@ export function buildCompactionEvent(params: {
   binding: ResolvedCompactorBinding;
   action: CompactionAction;
   beforeTokens: number;
-  afterTokens: number;
+  afterTokens?: number;
   error?: string;
 }): DMLEvent {
   return {
@@ -378,12 +505,16 @@ export function formatCompactionEventContent(params: {
   binding: ResolvedCompactorBinding;
   action: CompactionAction;
   beforeTokens: number;
-  afterTokens: number;
+  afterTokens?: number;
   error?: string;
 }): string {
   const label = params.binding.name ?? getBindingLabel(params.binding);
   const errorSuffix = params.error ? ` (${params.error})` : '';
-  return `compact ${params.binding.scope}.${params.binding.trigger} ${params.action} ${label} ${params.beforeTokens} -> ${params.afterTokens} tokens${errorSuffix}`;
+  if (params.action === 'running') {
+    return `compact ${params.binding.scope}.${params.binding.trigger} running ${label} ${params.beforeTokens} tokens${errorSuffix}`;
+  }
+
+  return `compact ${params.binding.scope}.${params.binding.trigger} ${params.action} ${label} ${params.beforeTokens} -> ${params.afterTokens ?? params.beforeTokens} tokens${errorSuffix}`;
 }
 
 export function getBindingLabel(binding: ResolvedCompactorBinding): string {
@@ -423,4 +554,90 @@ function unwrapCompactorJson(value: unknown): unknown | null {
   }
 
   return tryParseJson(value);
+}
+
+function parseCompactorRewriteRecord(record: Record<string, unknown>): CompactorRewriteSpec | null {
+  const summary = typeof record.summary === 'string'
+    ? record.summary
+    : typeof record.compacted_summary === 'string'
+      ? record.compacted_summary
+      : null;
+  if (!summary) {
+    return null;
+  }
+
+  const keepLastMessages = parseKeepLastMessages(
+    record.keep_last_messages
+    ?? record.keepLastMessages
+    ?? record.tail_messages
+    ?? record.tailMessages,
+  );
+  if (keepLastMessages === null) {
+    return null;
+  }
+
+  return {
+    keepLastMessages,
+    summary,
+  };
+}
+
+function parseCompactorRewriteSpec(answer: string): ParsedCompactorDecision | null {
+  if (!answer.startsWith('DC_COMPACTOR_REWRITE_V1\n')) {
+    return null;
+  }
+
+  const withoutPrefix = answer.slice('DC_COMPACTOR_REWRITE_V1\n'.length);
+  const summaryMarker = '\nsummary:\n';
+  const summaryIndex = withoutPrefix.indexOf(summaryMarker);
+  if (summaryIndex === -1) {
+    return null;
+  }
+
+  const header = withoutPrefix.slice(0, summaryIndex);
+  const summary = withoutPrefix.slice(summaryIndex + summaryMarker.length);
+  const headerLines = header.split('\n').map((line) => line.trim()).filter(Boolean);
+  const applyLine = headerLines.find((line) => line.startsWith('apply='));
+  const keepLine = headerLines.find((line) => line.startsWith('keep_last_messages='));
+  if (!applyLine || !keepLine) {
+    return null;
+  }
+
+  const applyValue = applyLine.slice('apply='.length).trim();
+  if (applyValue === 'false') {
+    return { apply: false };
+  }
+  if (applyValue !== 'true') {
+    return null;
+  }
+
+  const keepLastMessages = parseKeepLastMessages(keepLine.slice('keep_last_messages='.length).trim());
+  if (keepLastMessages === null) {
+    return null;
+  }
+
+  return {
+    apply: true,
+    rewrite: {
+      keepLastMessages,
+      summary,
+    },
+  };
+}
+
+function parseKeepLastMessages(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isInteger(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function clampKeepLastMessages(value: number): number {
+  return Math.max(0, Math.min(8, value));
 }

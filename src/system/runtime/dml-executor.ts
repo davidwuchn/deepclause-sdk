@@ -3,7 +3,7 @@ import { createDeepClause } from '../../sdk.js';
 import type { Config } from '../../cli/config.js';
 import { applyResolvedModelConfig, resolveCompactionConfig } from '../../cli/config.js';
 import { formatToolArgs } from '../../cli/tool-args.js';
-import type { DMLEvent, DeepClauseSDK } from '../../types.js';
+import type { DMLEvent, DeepClauseSDK, MemoryMessage } from '../../types.js';
 import {
   createLocalSkillCatalogRuntime,
   type ExecuteNestedSkillRequest,
@@ -36,7 +36,7 @@ export interface ExecuteDmlOptions {
   sandbox?: boolean;
   signal?: AbortSignal;
   onUserInput?: (prompt: string) => Promise<string>;
-  initialMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  initialMessages?: MemoryMessage[];
   onEvent?: (event: DMLEvent) => void;
   skillCatalog?: {
     workspaceRoot: string;

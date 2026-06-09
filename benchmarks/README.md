@@ -1,6 +1,8 @@
-# SWE-bench Lite Benchmarks
+# SWE-bench Benchmarks
 
-This folder contains a reproducible benchmark scaffold for evaluating the published DeepClause CLI against SWE-bench Lite style repository-fix tasks.
+This folder contains a reproducible benchmark scaffold for evaluating the published DeepClause CLI against SWE-bench repository-fix tasks.
+
+It supports SWE-bench Lite, SWE-bench Verified, and SWE-bench Pro through the same runner and evaluation flow.
 
 The benchmark intentionally supports multiple public CLI execution modes:
 
@@ -29,6 +31,18 @@ Run a small prompt-mode smoke test:
 npm run benchmark:swebench -- \
   --mode prompt \
   --instance-id astropy__astropy-12907 \
+  --dataset verified \
+  --gateway-model openai:gpt-4o \
+  --gateway-temp 0.7
+```
+
+Run a small SWE-bench Pro subset:
+
+```bash
+npm run benchmark:swebench -- \
+  --mode prompt \
+  --dataset pro \
+  --limit 2 \
   --gateway-model openai:gpt-4o \
   --gateway-temp 0.7
 ```
@@ -83,6 +97,7 @@ npm run benchmark:swebench:evaluate -- \
 ## Important Defaults
 
 - The benchmark resolves `deepclause-sdk@latest` once per controller run, then pins that exact version across all worker containers for that run.
+- Dataset selection accepts the aliases `lite`, `verified`, and `pro`, in addition to explicit Hugging Face dataset names.
 - Model ids and temperatures are configurable per DeepClause slot: `gateway`, `run`, and `compile`.
 - Temperatures default to the current product defaults, not `0`, because reasoning models often degrade at `0`.
 - Worker containers do not forward `BRAVE_API_KEY` by default. That avoids quietly turning mock-search fallbacks into a hidden benchmark dependency.

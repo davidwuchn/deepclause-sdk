@@ -35,7 +35,7 @@ vi.mock('../src/agent.js', async () => {
   };
 });
 
-import { executeCompactor, parseCompactorAnswer, resolveBinding } from '../src/compaction.js';
+import { applyCompactorRewrite, executeCompactor, parseCompactorAnswer, resolveBinding } from '../src/compaction.js';
 import { createDeepClause } from '../src/sdk.js';
 
 describe('runner compaction', () => {
@@ -68,8 +68,82 @@ describe('runner compaction', () => {
     expect(result.event.afterTokens).toBe(0);
   });
 
+  it('emits a running event before the final compaction result', async () => {
+    const emitEvent = vi.fn();
+    const binding = resolveBinding({
+      name: 'loop-start',
+      scope: 'loop',
+      trigger: 'before_model_call',
+      compactor: {
+        sourceType: 'inline',
+        source: 'agent_main :- answer("noop").',
+      },
+    });
+
+    const result = await executeCompactor({
+      binding,
+      messages: [{ role: 'assistant', content: 'Existing context to compact.' }],
+      emitEvent,
+      execute: vi.fn(async () => ({ answer: '{"apply":false}' })),
+    });
+
+    expect(emitEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'memory_compaction',
+      compactionBindingName: 'loop-start',
+      compactionAction: 'running',
+      content: 'compact loop.before_model_call running loop-start 7 tokens',
+      beforeTokens: 7,
+      afterTokens: undefined,
+    }));
+    expect(result.event.compactionAction).toBe('skipped');
+  });
+
   it('parses quoted JSON compactor answers', () => {
     expect(parseCompactorAnswer('"{\\"apply\\":false}"')).toEqual({ apply: false });
+  });
+
+  it('parses fenced JSON compactor answers', () => {
+    expect(parseCompactorAnswer('```json\n{"apply":false}\n```')).toEqual({ apply: false });
+  });
+
+  it('parses line-based rewrite specs', () => {
+    expect(parseCompactorAnswer([
+      'DC_COMPACTOR_REWRITE_V1',
+      'apply=true',
+      'keep_last_messages=2',
+      'summary:',
+      'Objective: keep the benchmark reproducible.',
+    ].join('\n'))).toEqual({
+      apply: true,
+      rewrite: {
+        keepLastMessages: 2,
+        summary: 'Objective: keep the benchmark reproducible.',
+      },
+    });
+  });
+
+  it('builds deterministic compacted messages from rewrite specs', () => {
+    const binding = resolveBinding({
+      name: 'session-rewrite',
+      scope: 'session',
+      trigger: 'before_user_message',
+      compactor: {
+        sourceType: 'inline',
+        source: 'agent_main :- answer("noop").',
+      },
+    });
+
+    expect(applyCompactorRewrite(binding, [
+      { role: 'user', content: 'Turn 1' },
+      { role: 'assistant', content: 'Turn 2' },
+      { role: 'user', content: 'Turn 3' },
+    ], {
+      keepLastMessages: 1,
+      summary: 'Durable context: keep the benchmark runnable offline.',
+    })).toEqual([
+      { role: 'assistant', content: 'Durable context: keep the benchmark runnable offline.' },
+      { role: 'user', content: 'Turn 3' },
+    ]);
   });
 
   it('runs bound loop compactors before agent model calls and preserves the flat memory API', async () => {

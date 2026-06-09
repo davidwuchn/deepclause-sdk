@@ -16,6 +16,7 @@ import { promptUser } from '../../cli/interactive.js';
 import type { DMLEvent, DeepClauseSDK, MemoryMessage } from '../../types.js';
 import { createDeepClause } from '../../sdk.js';
 import {
+  resolveCompactorModelConfig,
   executeCompactor,
   getCompactionBindings,
   resolveCompactionOptions,
@@ -825,20 +826,6 @@ async function appendSessionMessage(messagesPath: string, message: SessionMessag
   await fs.appendFile(messagesPath, JSON.stringify(message) + '\n', 'utf8');
 }
 
-function detectProviderFromModel(model: string): 'openai' | 'anthropic' | 'google' | 'openrouter' {
-  const lower = model.toLowerCase();
-  if (lower.includes('gpt') || lower.includes('o1') || lower.includes('o3')) {
-    return 'openai';
-  }
-  if (lower.includes('claude')) {
-    return 'anthropic';
-  }
-  if (lower.includes('gemini') || lower.includes('palm')) {
-    return 'google';
-  }
-  return 'openrouter';
-}
-
 function normalizeSessionCompactionMessages(messages: MemoryMessage[]): SessionMessage[] | null {
   const timestamp = new Date().toISOString();
   const normalized: SessionMessage[] = [];
@@ -868,22 +855,18 @@ async function runSessionCompactorBinding(options: {
     return { error: 'Session compactors cannot inherit tools' };
   }
 
-  const model = binding.compactor.model ?? options.selection.model;
-  const provider = binding.compactor.provider
-    ?? (binding.compactor.model ? detectProviderFromModel(model) : options.selection.provider);
-  const providerConfig = provider === options.selection.provider
-    ? { apiKey: options.selection.apiKey, baseUrl: options.selection.baseUrl }
-    : {
-      apiKey: options.config.providers?.[provider]?.apiKey,
-      baseUrl: options.config.providers?.[provider]?.baseUrl,
-    };
+  const resolvedModel = resolveCompactorModelConfig({
+    binding,
+    selection: options.selection,
+    providerConfigs: options.config.providers,
+  });
 
   const sdk = await createDeepClause({
-    model,
-    provider,
-    apiKey: providerConfig.apiKey,
-    baseUrl: providerConfig.baseUrl,
-    temperature: options.selection.temperature,
+    model: resolvedModel.model,
+    provider: resolvedModel.provider,
+    apiKey: resolvedModel.apiKey,
+    baseUrl: resolvedModel.baseUrl,
+    temperature: resolvedModel.temperature,
     debug: options.verbose,
     maxTokens: 65536,
     compaction: { enabled: false },
@@ -906,6 +889,7 @@ async function runSessionCompactorBinding(options: {
       workspacePath: options.workspacePath,
       gasLimit: binding.compactor.gasLimit,
       params: options.request.params,
+      initialMessages: options.request.messages,
       signal: options.signal,
       onUserInput: async (prompt) => {
         throw new Error(`Compactor requested unexpected input: ${prompt}`);
@@ -956,6 +940,7 @@ async function maybeCompactSessionMessages(options: {
     const result = await executeCompactor({
       binding,
       messages: priorMessages,
+      emitEvent: options.onCompactionEvent,
       execute: (request) => runSessionCompactorBinding({
         request,
         config: options.config,

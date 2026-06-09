@@ -72,6 +72,17 @@ const DATASET_ALIASES = new Map([
   ['swe_bench_lite', 'SWE-bench/SWE-bench_Lite'],
   ['princeton-nlp/swe-bench_lite', 'SWE-bench/SWE-bench_Lite'],
   ['swe-bench/swe-bench_lite', 'SWE-bench/SWE-bench_Lite'],
+  ['verified', 'SWE-bench/SWE-bench_Verified'],
+  ['swe-bench-verified', 'SWE-bench/SWE-bench_Verified'],
+  ['swebench-verified', 'SWE-bench/SWE-bench_Verified'],
+  ['swe_bench_verified', 'SWE-bench/SWE-bench_Verified'],
+  ['princeton-nlp/swe-bench_verified', 'SWE-bench/SWE-bench_Verified'],
+  ['swe-bench/swe-bench_verified', 'SWE-bench/SWE-bench_Verified'],
+  ['pro', 'ScaleAI/SWE-bench_Pro'],
+  ['swe-bench-pro', 'ScaleAI/SWE-bench_Pro'],
+  ['swebench-pro', 'ScaleAI/SWE-bench_Pro'],
+  ['swe_bench_pro', 'ScaleAI/SWE-bench_Pro'],
+  ['scaleai/swe-bench_pro', 'ScaleAI/SWE-bench_Pro'],
 ]);
 
 async function main() {
@@ -309,7 +320,7 @@ Options:
   --instance-id <id>           Repeatable instance id selector
   --limit <n>                  Limit selected instances
   --offset <n>                 Offset after filtering
-  --dataset <name>             Dataset alias or local .json/.jsonl file
+  --dataset <name>             Dataset alias (lite, verified, pro) or local .json/.jsonl file
   --split <name>               Dataset split (default: test)
   --run-id <name>              Stable run identifier
   --output-root <path>         Output root relative to repo root

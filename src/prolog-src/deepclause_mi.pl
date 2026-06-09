@@ -17,12 +17,13 @@
 
 :- module(deepclause_mi, [
     parse_dml/5,
-    create_engine/5,
+    create_engine/6,
     step_engine/4,
     destroy_engine/1,
     post_agent_result/4,
     post_exec_result/3,
     post_sample_token_result/3,
+    post_llm_result/3,
     provide_input/2,
     mi/3,
     % Tool engine predicates for isolated tool execution
@@ -48,6 +49,7 @@
 :- dynamic session_agent_result/2. % session_agent_result(SessionId, Result)
 :- dynamic session_exec_result/2.  % session_exec_result(SessionId, Result)
 :- dynamic session_sample_token_result/2. % session_sample_token_result(SessionId, Result)
+:- dynamic session_llm_result/2. % session_llm_result(SessionId, Result)
 :- dynamic session_trace_log/2.    % session_trace_log(SessionId, TraceLog) - accumulated trace entries
 :- dynamic session_trace_enabled/2. % session_trace_enabled(SessionId, true/false)
 :- dynamic session_pending_signal/2. % session_pending_signal(SessionId, Signal) - fallback for engine_fetch
@@ -462,10 +464,10 @@ process_directive(_, _).
 %% Engine Management
 %% ============================================================
 
-%% create_engine(+SessionId, +MemoryId, +Args, +Params, -Engine)
+%% create_engine(+SessionId, +MemoryId, +Args, +Params, +InitialMemory, -Engine)
 %% Args is a list of positional arguments for agent_main
 %% Params is a dict of named parameters (already asserted as param/2 facts)
-create_engine(SessionId, _MemoryId, Args, Params, Engine) :-
+create_engine(SessionId, _MemoryId, Args, Params, InitialMemory, Engine) :-
     assertz(session_params(SessionId, Params)),
     determine_agent_goal(SessionId, Args, Goal),
     % Check if tracing is enabled and store in session state
@@ -474,8 +476,8 @@ create_engine(SessionId, _MemoryId, Args, Params, Engine) :-
     assertz(session_trace_log(SessionId, [])),
     % Check for gas limit in params
     (get_dict(gas_limit, Params, GasLimit) -> true ; GasLimit = -1),
-    % Create initial state with empty memory, params, context stack, trace depth and gas
-    InitialState = state{memory: [], params: Params, context_stack: [], depth: 0, gas_remaining: GasLimit},
+    % Create initial state with provided memory, params, context stack, trace depth and gas
+    InitialState = state{memory: InitialMemory, params: Params, context_stack: [], depth: 0, gas_remaining: GasLimit},
     % Create the engine - pass SessionId and initial state to mi/3
     engine_create(_, 
         deepclause_mi:mi(Goal, InitialState, SessionId),
@@ -565,6 +567,8 @@ process_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
 process_engine_result(request_sample_token(Prompt, Allowed), request_sample_token, '',
     payload{prompt: Prompt, allowedTokens: Allowed}) :- !.
+process_engine_result(request_llm(Messages), request_llm, '',
+    payload{messages: Messages}) :- !.
 %% Tool result from inline tool execution
 process_engine_result(tool_result(Result), tool_result, '',
     payload{result: Result}) :- !.
@@ -587,6 +591,7 @@ destroy_engine(SessionId) :-
     retractall(session_agent_result(SessionId, _)),
     retractall(session_exec_result(SessionId, _)),
     retractall(session_sample_token_result(SessionId, _)),
+    retractall(session_llm_result(SessionId, _)),
     retractall(session_trace_log(SessionId, _)),
     retractall(session_trace_enabled(SessionId, _)),
     (   current_module(SessionId)
@@ -632,6 +637,12 @@ post_sample_token_result(SessionId, Status, TokenOrError) :-
     retractall(session_sample_token_result(SessionId, _)),
     assertz(session_sample_token_result(SessionId, result{status: Status, token: TokenOrError})),
     post_signal_to_engine(SessionId, sample_token_done).
+
+%% post_llm_result(+SessionId, +Status, +TextOrError)
+post_llm_result(SessionId, Status, TextOrError) :-
+    retractall(session_llm_result(SessionId, _)),
+    assertz(session_llm_result(SessionId, result{status: Status, text: TextOrError})),
+    post_signal_to_engine(SessionId, llm_done).
 
 %% provide_input(+SessionId, +Input)
 provide_input(SessionId, Input) :-
@@ -821,6 +832,11 @@ handle_signal(SessionId, exec_done, StateIn, StateOut) :-
     !,
     handle_agent_signals(SessionId, StateIn, StateOut).
 
+handle_signal(SessionId, llm_done, StateIn, StateOut) :-
+    % Stale signal - ignore and continue waiting
+    !,
+    handle_agent_signals(SessionId, StateIn, StateOut).
+
 handle_signal(SessionId, _Unknown, StateIn, StateOut) :-
     % Unknown signal - ignore and continue waiting
     !,
@@ -963,6 +979,8 @@ process_tool_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
 process_tool_engine_result(request_sample_token(Prompt, Allowed), request_sample_token, '',
     payload{prompt: Prompt, allowedTokens: Allowed}) :- !.
+process_tool_engine_result(request_llm(Messages), request_llm, '',
+    payload{messages: Messages}) :- !.
 process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope), request_agent_loop, '',
     payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope}) :- !.
 %% Legacy 4-arg format (no tool scope)
@@ -1229,6 +1247,45 @@ wait_sample_token_signal(SessionId) :-
     ;   wait_sample_token_signal(SessionId)
     ).
 
+mi_call(llm(Messages, Reply), StateIn, StateOut) :-
+    !,
+    consume_gas(StateIn, State1),
+    mi_call_llm(Messages, Reply, State1, StateOut).
+
+mi_call_llm(Messages, Reply, StateIn, StateOut) :-
+    get_session_id(SessionId),
+    get_depth(StateIn, Depth),
+    add_trace_entry(SessionId, llm_call, llm, [Messages], Depth),
+    engine_yield(request_llm(Messages)),
+    wait_llm_signal(SessionId),
+    (   session_llm_result(SessionId, Result)
+    ->  retract(session_llm_result(SessionId, _)),
+        (   Result.status == success
+        ->  Reply = Result.text,
+            add_trace_with_result(SessionId, exit, llm, [Messages], Reply, Depth),
+            StateOut = StateIn
+        ;   (   get_dict(text, Result, ErrorMsg), ErrorMsg \= ""
+            ->  format(atom(WarnMsg), 'Warning: llm/2 failed: ~w', [ErrorMsg])
+            ;   format(atom(WarnMsg), 'Warning: llm/2 failed (status=~w)', [Result.status])
+            ),
+            add_trace_entry(SessionId, fail, llm, [Messages], Depth),
+            engine_yield(output(WarnMsg)),
+            fail
+        )
+    ;   add_trace_entry(SessionId, fail, llm, [Messages], Depth),
+        engine_yield(output('Warning: llm/2 failed (no result returned)')),
+        fail
+    ).
+
+wait_llm_signal(SessionId) :-
+    get_next_signal(SessionId, Signal),
+    (   Signal == llm_done
+    ->  true
+    ;   Signal = error_signal(_)
+    ->  true
+    ;   wait_llm_signal(SessionId)
+    ).
+
 %% mi_call_task_n(+Desc, +Vars, +VarNames, +StateIn, -StateOut)
 mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     !,  % Cut to make this predicate deterministic - no backtracking once started
@@ -1363,6 +1420,11 @@ mi_call(user(Text), StateIn, StateOut) :-
     get_params(StateIn, Params),
     interpolate_desc(Text, Params, InterpText),
     add_memory(StateIn, user, InterpText, StateOut).
+
+%% mi_call(get_memory(Messages), +StateIn, -StateOut)
+mi_call(get_memory(Messages), StateIn, StateIn) :-
+    !,
+    get_memory(StateIn, Messages).
 
 %% ============================================================
 %% Output Predicates
@@ -2027,10 +2089,12 @@ is_mi_special_predicate(prompt(_,_)).
 is_mi_special_predicate(prompt(_,_,_)).
 is_mi_special_predicate(prompt(_,_,_,_)).
 is_mi_special_predicate(prompt_named(_,_,_)). %% Transformed form of prompt/N
+is_mi_special_predicate(llm(_,_)).
 %% Tool scoping predicates
 is_mi_special_predicate(with_tools(_,_)).
 is_mi_special_predicate(without_tools(_,_)).
 %% Context stack management
+is_mi_special_predicate(get_memory(_)).
 is_mi_special_predicate(push_context).
 is_mi_special_predicate(push_context(_)).
 is_mi_special_predicate(pop_context).

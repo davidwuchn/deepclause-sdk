@@ -28,7 +28,7 @@ import {
   buildToolStartEvent,
 } from './system/runtime/shell-tool-events.js';
 import { checkToolPolicy } from './tools.js';
-import { sampleSingleToken } from './prolog/bridge.js';
+import { generateLlmReply, sampleSingleToken } from './prolog/bridge.js';
 
 /**
  * Convert swipl-wasm value to plain JavaScript value
@@ -175,7 +175,7 @@ export interface InternalRunOptions {
   toolPolicy: ToolPolicy | null;
   onInputRequired: (prompt: string) => Promise<string>;
   signal?: AbortSignal;
-  initialMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  initialMessages?: MemoryMessage[];
   compaction?: CompactionOptions;
 }
 
@@ -234,7 +234,6 @@ export class DMLRunner {
   private engine: unknown = null;
   private sessionId: string = '';
   private currentMemory: MemoryMessage[] = [];
-  private initialMessagesApplied = false;
 
   constructor(swipl: SWIPLModule, options: RunnerOptions) {
     this.swipl = swipl;
@@ -268,8 +267,11 @@ export class DMLRunner {
         }
       }
 
-      // Memory is now managed internally by the MI via state threading
-      // No external initialization needed
+      // Seed the MI state so top-level DML can inspect initial messages via get_memory/1.
+      this.currentMemory = (options.initialMessages ?? []).map((message) => ({
+        role: message.role,
+        content: message.content,
+      }));
 
     // Build args and params
     const args = this.buildArgs(options);
@@ -349,6 +351,10 @@ export class DMLRunner {
 
           case 'request_sample_token':
             yield* this.handleSampleToken(step.payload, options);
+            break;
+
+          case 'request_llm':
+            yield* this.handleLlm(step.payload, options);
             break;
 
           case 'wait_input':
@@ -494,8 +500,9 @@ export class DMLRunner {
    */
   private createEngine(memoryId: string, args: string, params: string): { error?: string } {
     try {
+      const initialMemory = this.serializeMemoryMessages(this.currentMemory);
       const result = this.query(
-        `deepclause_mi:create_engine('${this.sessionId}', '${memoryId}', ${args}, ${params}, Engine)`
+        `deepclause_mi:create_engine('${this.sessionId}', '${memoryId}', ${args}, ${params}, [${initialMemory}], Engine)`
       );
 
       if (result && result.Engine) {
@@ -585,19 +592,7 @@ export class DMLRunner {
     };
 
     // Extract memory from payload (now passed via state threading)
-    const memory = this.extractMemoryFromPayload(rawPayload);
-
-    // Prepend initial conversation messages (from RunOptions.initialMessages)
-    // Only on the FIRST task() call — after that, persistent messages already include them.
-    const initialMsgs = (!this.initialMessagesApplied && options.initialMessages?.length)
-      ? options.initialMessages as MemoryMessage[]
-      : undefined;
-    const fullMemory = initialMsgs
-      ? [...initialMsgs, ...memory]
-      : memory;
-    if (initialMsgs) this.initialMessagesApplied = true;
-
-    const preparedMemory = fullMemory;
+    const preparedMemory = this.extractMemoryFromPayload(rawPayload);
     
     // Store current memory for getMemory() access
     this.currentMemory = preparedMemory;
@@ -842,6 +837,37 @@ export class DMLRunner {
       const message = error instanceof Error ? error.message : String(error);
       this.postSampleTokenResult({ success: false, error: message });
       yield { type: 'log', content: `sample_token failed: ${message}` };
+    }
+  }
+
+  /**
+   * Handle direct one-shot LLM request (llm/2)
+   */
+  private async *handleLlm(
+    payload: unknown,
+    options: InternalRunOptions,
+  ): AsyncGenerator<DMLEvent> {
+    const data = payload as Record<string, unknown>;
+    const messages = this.extractMessagesFromValue(data.messages);
+
+    try {
+      const text = await generateLlmReply({
+        messages,
+        modelOptions: {
+          provider: this.options.provider,
+          model: this.options.model,
+          temperature: this.options.temperature,
+          maxOutputTokens: this.options.maxTokens,
+          baseUrl: this.options.baseUrl,
+          providerOptions: this.options.providerOptions,
+        },
+        signal: options.signal,
+      });
+      this.postLlmResult({ success: true, text });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.postLlmResult({ success: false, error: message });
+      yield { type: 'log', content: `llm/2 failed: ${message}` };
     }
   }
 
@@ -1279,6 +1305,33 @@ export class DMLRunner {
             }
             break;
           }
+
+          case 'request_llm': {
+            const messages = this.extractMessagesFromValue(payload?.messages);
+
+            try {
+              const text = await generateLlmReply({
+                messages,
+                modelOptions: {
+                  provider: this.options.provider,
+                  model: this.options.model,
+                  temperature: this.options.temperature,
+                  maxOutputTokens: this.options.maxTokens,
+                  baseUrl: this.options.baseUrl,
+                  providerOptions: this.options.providerOptions,
+                },
+                signal: runContext.signal,
+              });
+              this.postLlmResult({ success: true, text });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              this.postLlmResult({ success: false, error: message });
+              if (process.env.DEBUG_RUNNER) {
+                console.log('[RUNNER] llm/2 request failed:', message);
+              }
+            }
+            break;
+          }
           
           case 'request_agent_loop': {
             // Tool is calling task() or prompt() - run nested agent loop
@@ -1521,6 +1574,7 @@ export class DMLRunner {
       const result = await executeCompactor({
         binding,
         messages,
+        emitEvent: params.emitEvent,
         execute: (request) => this.runBoundCompactor({
           request,
           executionContext: params.executionContext,
@@ -1568,6 +1622,7 @@ export class DMLRunner {
         workspacePath: params.executionContext.workspacePath,
         gasLimit: binding.compactor.gasLimit,
         params: compactorParams,
+        initialMessages: params.request.messages,
         tools,
         toolPolicy: binding.compactor.toolPolicy ?? (binding.compactor.inheritTools ? params.toolPolicy : null) ?? null,
         onInputRequired: async (prompt) => {
@@ -1617,24 +1672,28 @@ export class DMLRunner {
   /**
    * Extract memory from payload (now passed via state threading)
    */
-  private extractMemoryFromPayload(rawPayload: Record<string, unknown>): MemoryMessage[] {
-    const rawMemory = toJsValue(rawPayload.memory);
-    if (!Array.isArray(rawMemory)) {
+  private extractMessagesFromValue(rawMessages: unknown): MemoryMessage[] {
+    const normalized = toJsValue(rawMessages);
+    if (!Array.isArray(normalized)) {
       return [];
     }
 
-    return rawMemory.map((m: unknown) => {
-      const msg = toJsValue(m) as { role: string; content: string };
+    return normalized.map((messageValue: unknown) => {
+      const msg = toJsValue(messageValue) as { role: string; content: string };
       const role = String(toJsValue(msg.role) ?? 'user');
       const content = String(toJsValue(msg.content) ?? '');
-      
-      // Validate role
+
       if (role !== 'system' && role !== 'user' && role !== 'assistant') {
         return { role: 'user' as const, content };
       }
-      
+
       return { role: role as 'system' | 'user' | 'assistant', content };
     });
+  }
+
+  private extractMemoryFromPayload(rawPayload: Record<string, unknown>): MemoryMessage[] {
+    const rawMemory = toJsValue(rawPayload.memory);
+    return this.extractMessagesFromValue(rawMemory);
   }
 
   private serializeMemoryMessages(messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>): string {
@@ -1704,6 +1763,27 @@ export class DMLRunner {
       const error = this.toPrologTerm(result.error ?? 'Unknown error');
       this.query(
         `deepclause_mi:post_sample_token_result('${this.sessionId}', failure, ${error})`
+      );
+    }
+  }
+
+  /**
+   * Post direct llm/2 result back to Prolog
+   */
+  private postLlmResult(result: {
+    success: boolean;
+    text?: string;
+    error?: string;
+  }): void {
+    if (result.success) {
+      const text = this.toPrologTerm(result.text ?? '');
+      this.query(
+        `deepclause_mi:post_llm_result('${this.sessionId}', success, ${text})`
+      );
+    } else {
+      const error = this.toPrologTerm(result.error ?? 'Unknown error');
+      this.query(
+        `deepclause_mi:post_llm_result('${this.sessionId}', failure, ${error})`
       );
     }
   }

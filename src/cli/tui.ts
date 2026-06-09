@@ -96,6 +96,11 @@ const ANSI = {
 
 type BuiltinSlashCommand = (typeof BUILTIN_SLASH_COMMANDS)[number];
 type Keypress = { name?: string; ctrl?: boolean; meta?: boolean; shift?: boolean; sequence?: string };
+type TuiInputStream = {
+  isTTY?: boolean;
+  pause(): void;
+  setRawMode?(mode: boolean): void;
+};
 type PaneKind = 'sessions' | 'messages' | 'process' | 'context';
 type RenderPaneKind = PaneKind | 'workspace';
 type UiMode = 'command' | 'menu' | 'palette' | 'picker' | 'viewer' | 'editor';
@@ -226,6 +231,12 @@ interface EditorState {
 interface WorkspacePaneView {
   lines: string[];
   cursor?: { row: number; column: number };
+}
+
+interface PaneMetricsSnapshot {
+  maxStart: number;
+  viewportLines: number;
+  maxStartIsExact: boolean;
 }
 
 export interface DisplayMessage {
@@ -560,6 +571,13 @@ export class ActivityBuffer {
   }
 }
 
+export function releaseTuiInputStream(stream: TuiInputStream): void {
+  if (stream.isTTY && typeof stream.setRawMode === 'function') {
+    stream.setRawMode(false);
+  }
+  stream.pause();
+}
+
 class FullscreenTui {
   private sessions: ConductorSessionSummary[] = [];
   private selectedSessionId = '';
@@ -581,6 +599,12 @@ class FullscreenTui {
     messages: 0,
     process: 0,
     context: 0,
+  };
+  private readonly lastPaneMetrics: Record<PaneKind, PaneMetricsSnapshot> = {
+    sessions: { maxStart: 0, viewportLines: 0, maxStartIsExact: true },
+    messages: { maxStart: 0, viewportLines: 0, maxStartIsExact: true },
+    process: { maxStart: 0, viewportLines: 0, maxStartIsExact: true },
+    context: { maxStart: 0, viewportLines: 0, maxStartIsExact: true },
   };
   private currentPreview: RunningPreview | null = null;
   private currentAbortController: AbortController | null = null;
@@ -638,9 +662,7 @@ class FullscreenTui {
         this.animationTimer = null;
       }
       input.off('keypress', this.onKeypress);
-      if (input.isTTY) {
-        input.setRawMode(false);
-      }
+      releaseTuiInputStream(input);
       this.previousFrameLines = null;
       this.previousFrameSize = null;
       output.write('\u001b[?25h\u001b[?1049l');
@@ -2158,7 +2180,13 @@ class FullscreenTui {
       case 'skills.run': {
         this.closeWorkspaceMode();
         const rawArgs = await this.promptForValue(`Arguments for /${item.skillName} (optional):`);
-        await this.executeSkill(item.skillName ?? item.label, parseCommandArgs(rawArgs));
+        const skillName = item.skillName ?? item.label;
+        const commands = await listCommands(this.workspaceRoot, { detailed: true });
+        const command = commands.find((entry) => entry.name === skillName);
+        const collapsedArgs = command?.parameters?.length === 1 && rawArgs.length > 0
+          ? [rawArgs]
+          : parseCommandArgs(rawArgs);
+        await this.executeSkill(skillName, collapsedArgs);
         return;
       }
 
@@ -2166,7 +2194,12 @@ class FullscreenTui {
         if (item.skillName) {
           this.closeWorkspaceMode();
           const rawArgs = await this.promptForValue(`Arguments for /${item.skillName} (optional):`);
-          await this.executeSkill(item.skillName, parseCommandArgs(rawArgs));
+          const commands = await listCommands(this.workspaceRoot, { detailed: true });
+          const command = commands.find((entry) => entry.name === item.skillName);
+          const collapsedArgs = command?.parameters?.length === 1 && rawArgs.length > 0
+            ? [rawArgs]
+            : parseCommandArgs(rawArgs);
+          await this.executeSkill(item.skillName!, collapsedArgs);
         }
         return;
 
@@ -2824,14 +2857,14 @@ class FullscreenTui {
   }
 
   private scrollFocusedPane(direction: 'up' | 'down', amount: number): void {
-    const metrics = this.getPaneMetrics(this.focusedPane);
-    if (metrics.maxStart === 0) {
-      this.statusLine = `${paneDisplayName(this.focusedPane)} fits on screen.`;
-      this.requestRender();
-      return;
-    }
-
     if (this.focusedPane === 'sessions') {
+      const metrics = this.getLastPaneMetrics(this.focusedPane) ?? this.getPaneMetrics(this.focusedPane);
+      if (metrics.maxStart === 0) {
+        this.statusLine = `${paneDisplayName(this.focusedPane)} fits on screen.`;
+        this.requestRender();
+        return;
+      }
+
       const delta = direction === 'down' ? amount : -amount;
       this.paneScroll.sessions = clamp(this.paneScroll.sessions + delta, 0, metrics.maxStart);
       this.statusLine = `Sessions scroll ${this.paneScroll.sessions + 1}/${metrics.maxStart + 1}.`;
@@ -2840,8 +2873,21 @@ class FullscreenTui {
     }
 
     const pane = this.focusedPane;
+
+    const metrics = this.getLastPaneMetrics(pane)
+      ?? (this.paneScroll[pane] === 0 ? this.getRenderPaneMetrics(pane) : this.getPaneMetrics(pane));
+    if (metrics.maxStart === 0) {
+      this.paneScroll[pane] = 0;
+      this.statusLine = `${paneDisplayName(pane)} fits on screen.`;
+      this.requestRender();
+      return;
+    }
+
     const delta = direction === 'up' ? amount : -amount;
-    this.paneScroll[pane] = clamp(this.paneScroll[pane] + delta, 0, metrics.maxStart);
+    const nextScroll = this.paneScroll[pane] + delta;
+    this.paneScroll[pane] = metrics.maxStartIsExact
+      ? clamp(nextScroll, 0, metrics.maxStart)
+      : Math.max(0, nextScroll);
     this.statusLine = this.paneScroll[pane] === 0
       ? `${paneDisplayName(pane)} following newest content.`
       : `${paneDisplayName(pane)} scrolled ${this.paneScroll[pane]} line${this.paneScroll[pane] === 1 ? '' : 's'} above latest.`;
@@ -3336,6 +3382,11 @@ class FullscreenTui {
 
   private buildPaneView(kind: PaneKind, title: string, width: number, height: number): string[] {
     const metrics = this.getRenderPaneMetrics(kind, width, height);
+    this.lastPaneMetrics[kind] = {
+      maxStart: metrics.maxStart,
+      viewportLines: metrics.viewportLines,
+      maxStartIsExact: metrics.maxStartIsExact,
+    };
     const paneTitle = this.buildPaneTitle(title, kind, metrics);
     return buildPane(
       paneTitle,
@@ -3531,7 +3582,7 @@ class FullscreenTui {
     kind: PaneKind,
     width = paneDimensionsForKind(kind, output.columns ?? 120, output.rows ?? 40).width,
     height = paneDimensionsForKind(kind, output.columns ?? 120, output.rows ?? 40).height,
-  ): { lines: string[]; start: number; maxStart: number; viewportLines: number } {
+  ): { lines: string[]; start: number; maxStart: number; viewportLines: number; maxStartIsExact: boolean } {
     if ((kind === 'process' || kind === 'messages') && this.paneScroll[kind] === 0) {
       const innerWidth = Math.max(1, width - 2);
       const viewportLines = Math.max(0, height - 2);
@@ -3544,17 +3595,23 @@ class FullscreenTui {
         start: 0,
         maxStart: tail.truncated ? 1 : 0,
         viewportLines,
+        maxStartIsExact: !tail.truncated,
       };
     }
 
     return this.getPaneMetrics(kind, width, height);
   }
 
+  private getLastPaneMetrics(kind: PaneKind): PaneMetricsSnapshot | null {
+    const metrics = this.lastPaneMetrics[kind];
+    return metrics.viewportLines > 0 ? metrics : null;
+  }
+
   private getPaneMetrics(
     kind: PaneKind,
     width = paneDimensionsForKind(kind, output.columns ?? 120, output.rows ?? 40).width,
     height = paneDimensionsForKind(kind, output.columns ?? 120, output.rows ?? 40).height,
-  ): { lines: string[]; start: number; maxStart: number; viewportLines: number } {
+  ): { lines: string[]; start: number; maxStart: number; viewportLines: number; maxStartIsExact: boolean } {
     const innerWidth = Math.max(1, width - 2);
     const rawBody = this.getPaneBody(kind);
     const lines = wrapBodyLines(rawBody, innerWidth);
@@ -3568,6 +3625,7 @@ class FullscreenTui {
         start: this.paneScroll.sessions,
         maxStart,
         viewportLines,
+        maxStartIsExact: true,
       };
     }
 
@@ -3577,6 +3635,7 @@ class FullscreenTui {
       start: Math.max(0, maxStart - this.paneScroll[kind]),
       maxStart,
       viewportLines,
+      maxStartIsExact: true,
     };
   }
 
@@ -3861,6 +3920,7 @@ async function startLineTui(
     }
   } finally {
     rl.close();
+    releaseTuiInputStream(input);
   }
 }
 
@@ -3912,18 +3972,23 @@ export async function runSkillCommand(
     onEvent?: (event: ConductorLogEvent) => void;
   } = {},
 ): Promise<CliRunResult> {
-  const commands = await listCommands(workspaceRoot);
+  const commands = await listCommands(workspaceRoot, { detailed: true });
   const command = commands.find((entry) => entry.name === skillName);
   if (!command) {
     throw new Error(`Unknown skill: ${skillName}`);
   }
+
+  // Collapse args for single-parameter skills
+  const collapsedArgs = command.parameters?.length === 1 && args.length > 0
+    ? [args.join(' ')]
+    : args;
 
   return executeRunnableCommand(workspaceRoot, {
     inputText: `/${skillName}${args.length > 0 ? ` ${args.join(' ')}` : ''}`,
     runPath: command.path,
     childSlug: skillName,
     skillName,
-  }, args, options);
+  }, collapsedArgs, options);
 }
 
 export async function runSlashCommand(
@@ -3938,15 +4003,19 @@ export async function runSlashCommand(
     onEvent?: (event: ConductorLogEvent) => void;
   } = {},
 ): Promise<CliRunResult> {
-  const commands = await listCommands(workspaceRoot);
+  const commands = await listCommands(workspaceRoot, { detailed: true });
   const command = commands.find((entry) => entry.name === name);
   if (command) {
+    // Collapse args for single-parameter skills
+    const slashCmdCollapsedArgs = command.parameters?.length === 1 && args.length > 0
+      ? [args.join(' ')]
+      : args;
     return executeRunnableCommand(workspaceRoot, {
       inputText: `/${name}${args.length > 0 ? ` ${args.join(' ')}` : ''}`,
       runPath: command.path,
       childSlug: name,
       skillName: name,
-    }, args, options);
+    }, slashCmdCollapsedArgs, options);
   }
 
   const resolvedPlanPath = await resolveWorkspaceDmlPath(workspaceRoot, name, { mode: 'plans-only' });
@@ -4036,6 +4105,14 @@ async function executeRunnableCommand(
       onChildEvent: (childSlug, event) => emitLogEvent({ scope: 'child', childSlug, event }),
     });
 
+    if (options.sessionId) {
+      await appendConductorSessionMessages(
+        workspaceRoot,
+        options.sessionId,
+        buildPersistedRunnableTranscript(target.inputText, result),
+      );
+    }
+
     await executionLog?.finish({
       status: result.error ? 'error' : 'success',
       answer: result.answer,
@@ -4044,6 +4121,17 @@ async function executeRunnableCommand(
     });
     return result;
   } catch (error) {
+    if (options.sessionId) {
+      await appendConductorSessionMessages(
+        workspaceRoot,
+        options.sessionId,
+        buildPersistedRunnableTranscript(target.inputText, {
+          output: [],
+          error: (error as Error).message,
+        }),
+      );
+    }
+
     await executionLog?.finish({
       status: 'error',
       error: (error as Error).message,
@@ -4247,6 +4335,24 @@ function formatShellCommandSummary(result: ShellExecResult): string {
   return result.summary || `Shell command failed with exit code ${result.exitCode}.`;
 }
 
+function buildPersistedRunnableTranscript(
+  inputText: string,
+  result: CliRunResult,
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const transcript: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  const trimmedInput = inputText.trim();
+  if (trimmedInput) {
+    transcript.push({ role: 'user', content: trimmedInput });
+  }
+
+  const assistantContent = summarizeRunResult(result).trim();
+  if (assistantContent) {
+    transcript.push({ role: 'assistant', content: assistantContent });
+  }
+
+  return transcript;
+}
+
 function buildPersistedShellTranscript(
   command: string,
   result: ShellExecResult,
@@ -4313,6 +4419,16 @@ export function previewMessageFromEvent(logEvent: ConductorLogEvent): DisplayMes
         return null;
       }
       return previewQuestionMessage(logEvent.event.prompt, logEvent.scope === 'child' ? logEvent.childSlug : undefined);
+
+    case 'memory_compaction':
+      return {
+        role: 'system',
+        kind: 'output',
+        tag: logEvent.scope === 'child' ? logEvent.childSlug : undefined,
+        content: logEvent.event.content
+          ? `Memory compaction: ${logEvent.event.content}`
+          : 'Memory compaction triggered.',
+      };
 
     default:
       return null;

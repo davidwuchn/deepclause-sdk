@@ -10,6 +10,7 @@ import { anthropic, createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { generateText } from 'ai';
 import type { LanguageModel } from 'ai';
+import type { MemoryMessage } from '../types.js';
 
 export interface RawProviderResponseSnapshot {
   requestId: string;
@@ -28,6 +29,22 @@ export interface SampleSingleTokenOptions {
     provider: string;
     model: string;
     temperature: number;
+    baseUrl?: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    providerOptions?: Record<string, Record<string, any>>;
+  };
+  signal?: AbortSignal;
+  debugLog?: (...args: unknown[]) => void;
+  onRawResponse?: (snapshot: Promise<RawProviderResponseSnapshot>) => void;
+}
+
+export interface GenerateLlmReplyOptions {
+  messages: MemoryMessage[];
+  modelOptions: {
+    provider: string;
+    model: string;
+    temperature: number;
+    maxOutputTokens?: number;
     baseUrl?: string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     providerOptions?: Record<string, Record<string, any>>;
@@ -625,6 +642,27 @@ export async function sampleSingleToken(options: SampleSingleTokenOptions): Prom
   }
 
   return normalizeSampleTokenResponse(result.text);
+}
+
+export async function generateLlmReply(options: GenerateLlmReplyOptions): Promise<string> {
+  const model = createModelProvider(
+    options.modelOptions.provider,
+    options.modelOptions.model,
+    options.modelOptions.baseUrl,
+    options.debugLog,
+    options.onRawResponse,
+  );
+
+  const result = await generateText({
+    model,
+    messages: options.messages,
+    temperature: options.modelOptions.temperature,
+    maxOutputTokens: options.modelOptions.maxOutputTokens,
+    abortSignal: options.signal,
+    providerOptions: options.modelOptions.providerOptions,
+  });
+
+  return result.text;
 }
 
 /**

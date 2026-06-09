@@ -13,8 +13,18 @@ agent_main :-
 agent_main :-
     param(message_count, MessageCount),
     param(estimated_tokens, EstimatedTokens),
-    param(messages_json, MessagesJSON),
-    system("You decide whether a DeepClause conductor session history should be compacted before the next user turn. Return only strict JSON with keys apply and messages. If no compaction is needed, return {\"apply\":false}. If compaction is needed, return {\"apply\":true,\"messages\":[...]}. Messages must be an array of objects with role and content string fields. For conductor session persistence, returned messages must use only role=user or role=assistant. Preserve important user goals, constraints, decisions, open questions, and actionable next steps. Each content string must be readable natural-language notes for a future assistant, not raw JSON, escaped JSON, YAML, XML, or key-value dumps."),
-    format(string(ReviewPrompt), "Review this existing session message history and decide whether it should be compacted before the next user message is added.\n\nMessage count: ~w\nEstimated tokens: ~w\n\nHistory JSON:\n~w\n\nReturn strict JSON only with no markdown fences and no commentary. If the history is already compact enough or there is little to preserve, return exactly {\"apply\":false}. Otherwise return a smaller replacement message array in the shape {\"apply\":true,\"messages\":[{\"role\":\"user|assistant\",\"content\":\"...\"}, ...]}. The replacement must be materially smaller than the original while preserving durable context. Each replacement content string must be concise, readable prose for a future assistant. Do not put JSON fragments, escaped structures, or schema-like key/value dumps inside message content. Prefer short labeled paragraphs or bullet-style plain text when summarizing.", [MessageCount, EstimatedTokens, MessagesJSON]),
-    task(ReviewPrompt, string(ResultJSON)),
-    answer(ResultJSON).
+    get_memory(HistoryMessages),
+    format(string(ReviewPrompt), "You compact DeepClause conductor session history before the next user turn.\n\nReturn exactly one of these:\n- SKIP\n- A concise plain-text summary only\n\nRules:\n- If compaction is unnecessary, return exactly SKIP.\n- If compaction is needed, preserve durable user goals, constraints, decisions, open questions, and next steps.\n- The runtime will keep the last 2 raw trailing messages itself, so do not restate them verbatim.\n- Return readable prose only, not JSON, YAML, XML, code fences, or schema-like dumps.\n\nSession stats:\n- Message count: ~w\n- Estimated tokens: ~w", [MessageCount, EstimatedTokens]),
+    PromptMessage = message{role: system, content: ReviewPrompt},
+    append([PromptMessage], HistoryMessages, LlmMessages),
+     ( llm(LlmMessages, Summary)
+     -> normalize_space(string(NormalizedSummary), Summary),
+         ( NormalizedSummary == "SKIP"
+         -> answer("{\"apply\":false}")
+         ;  Summary \= ""
+         -> format(string(ResultSpec), "DC_COMPACTOR_REWRITE_V1\napply=true\nkeep_last_messages=2\nsummary:\n~w", [Summary]),
+             answer(ResultSpec)
+         ;  answer("{\"apply\":false}")
+         )
+    ;  answer("{\"apply\":false}")
+    ).

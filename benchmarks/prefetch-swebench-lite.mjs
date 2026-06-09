@@ -15,6 +15,17 @@ const DATASET_ALIASES = new Map([
   ['swe_bench_lite', 'SWE-bench/SWE-bench_Lite'],
   ['princeton-nlp/swe-bench_lite', 'SWE-bench/SWE-bench_Lite'],
   ['swe-bench/swe-bench_lite', 'SWE-bench/SWE-bench_Lite'],
+  ['verified', 'SWE-bench/SWE-bench_Verified'],
+  ['swe-bench-verified', 'SWE-bench/SWE-bench_Verified'],
+  ['swebench-verified', 'SWE-bench/SWE-bench_Verified'],
+  ['swe_bench_verified', 'SWE-bench/SWE-bench_Verified'],
+  ['princeton-nlp/swe-bench_verified', 'SWE-bench/SWE-bench_Verified'],
+  ['swe-bench/swe-bench_verified', 'SWE-bench/SWE-bench_Verified'],
+  ['pro', 'ScaleAI/SWE-bench_Pro'],
+  ['swe-bench-pro', 'ScaleAI/SWE-bench_Pro'],
+  ['swebench-pro', 'ScaleAI/SWE-bench_Pro'],
+  ['swe_bench_pro', 'ScaleAI/SWE-bench_Pro'],
+  ['scaleai/swe-bench_pro', 'ScaleAI/SWE-bench_Pro'],
 ]);
 
 async function main() {
@@ -167,7 +178,7 @@ function printHelp() {
   console.log(`Usage: node benchmarks/prefetch-swebench-lite.mjs --config <file> [options]
 
 Options:
-  --config <file>                 Benchmark config to prefetch for
+  --config <file>                 Benchmark config to prefetch for (supports lite, verified, and pro datasets)
   --output-dir <path>            Output bundle directory (default: benchmarks/cache/<config>-offline)
   --skip-worker-image-build      Do not build the worker image during prefetch
   --skip-evaluator-image-build   Do not build the evaluator image during prefetch

@@ -7,6 +7,21 @@ import { fileURLToPath } from 'node:url';
 
 const BENCHMARKS_ROOT = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(BENCHMARKS_ROOT, '..');
+const DATASET_ALIASES = new Map([
+  ['lite', 'SWE-bench/SWE-bench_Lite'],
+  ['swe-bench-lite', 'SWE-bench/SWE-bench_Lite'],
+  ['swebench-lite', 'SWE-bench/SWE-bench_Lite'],
+  ['swe_bench_lite', 'SWE-bench/SWE-bench_Lite'],
+  ['verified', 'SWE-bench/SWE-bench_Verified'],
+  ['swe-bench-verified', 'SWE-bench/SWE-bench_Verified'],
+  ['swebench-verified', 'SWE-bench/SWE-bench_Verified'],
+  ['swe_bench_verified', 'SWE-bench/SWE-bench_Verified'],
+  ['pro', 'ScaleAI/SWE-bench_Pro'],
+  ['swe-bench-pro', 'ScaleAI/SWE-bench_Pro'],
+  ['swebench-pro', 'ScaleAI/SWE-bench_Pro'],
+  ['swe_bench_pro', 'ScaleAI/SWE-bench_Pro'],
+  ['scaleai/swe-bench_pro', 'ScaleAI/SWE-bench_Pro'],
+]);
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -44,7 +59,7 @@ async function main() {
     imageTag,
     'python',
     '-m', 'swebench.harness.run_evaluation',
-    '--dataset_name', args.dataset ?? 'SWE-bench/SWE-bench_Lite',
+    '--dataset_name', normalizeDatasetName(args.dataset),
     '--split', args.split ?? 'test',
     '--predictions_path', toContainerPath(predictionsPath),
     '--max_workers', String(args.maxWorkers ?? 4),
@@ -157,7 +172,7 @@ function printHelp() {
 Options:
   --predictions <file>         Predictions JSONL file to evaluate
   --run-id <name>              SWE-bench evaluation run id
-  --dataset <name>             Dataset name (default: SWE-bench/SWE-bench_Lite)
+  --dataset <name>             Dataset alias or name (default: lite)
   --split <name>               Dataset split (default: test)
   --max-workers <n>            Evaluation max_workers value
   --cache-level <level>        none, base, env, or instance
@@ -171,6 +186,11 @@ Options:
   --skip-image-build           Skip evaluator docker build
   --help                       Show this help
 `);
+}
+
+function normalizeDatasetName(name) {
+  const raw = String(name ?? 'lite');
+  return DATASET_ALIASES.get(raw.toLowerCase()) ?? raw;
 }
 
 async function ensureEvaluatorImage({ imageTag, swebenchVersion, rebuild }) {

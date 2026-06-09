@@ -2,7 +2,7 @@
 
 ## Goal
 
-Benchmark the published `deepclause-sdk` CLI against SWE-bench Lite repository-repair tasks while keeping:
+Benchmark the published `deepclause-sdk` CLI against SWE-bench Lite, SWE-bench Verified, and SWE-bench Pro repository-repair tasks while keeping:
 
 - the agent under test on the public CLI surface
 - the worker environment fresh per instance
@@ -103,9 +103,15 @@ The request is designed to keep the agent local to the checked-out repository an
 The controller supports:
 
 - local `.json` and `.jsonl` instance files
-- Hugging Face dataset server loading for SWE-bench Lite
+- Hugging Face dataset server loading for SWE-bench Lite, SWE-bench Verified, and SWE-bench Pro
 
-The default dataset alias `lite` resolves to `SWE-bench/SWE-bench_Lite`.
+Built-in dataset aliases:
+
+- `lite` -> `SWE-bench/SWE-bench_Lite`
+- `verified` -> `SWE-bench/SWE-bench_Verified`
+- `pro` -> `ScaleAI/SWE-bench_Pro`
+
+The default dataset alias remains `lite`.
 
 ## Artifact Layout
 

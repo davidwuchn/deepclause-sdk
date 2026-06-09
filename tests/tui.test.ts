@@ -61,6 +61,7 @@ import {
   previewChildSkillActivityMessage,
   previewMessageFromEvent,
   previewQuestionMessage,
+  releaseTuiInputStream,
   reconcileEphemeralMessages,
   runFileCommand,
   runPromptHeadless,
@@ -164,6 +165,36 @@ describe('LiveExecutionPrinter', () => {
   });
 });
 
+describe('releaseTuiInputStream', () => {
+  it('disables raw mode and pauses TTY inputs', () => {
+    const setRawMode = vi.fn();
+    const pause = vi.fn();
+
+    releaseTuiInputStream({
+      isTTY: true,
+      setRawMode,
+      pause,
+    });
+
+    expect(setRawMode).toHaveBeenCalledWith(false);
+    expect(pause).toHaveBeenCalledTimes(1);
+  });
+
+  it('pauses non-tty inputs without touching raw mode', () => {
+    const setRawMode = vi.fn();
+    const pause = vi.fn();
+
+    releaseTuiInputStream({
+      isTTY: false,
+      setRawMode,
+      pause,
+    });
+
+    expect(setRawMode).not.toHaveBeenCalled();
+    expect(pause).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('ActivityBuffer', () => {
   it('shows active shell status until the tool completes', () => {
     const activity = new ActivityBuffer();
@@ -256,7 +287,7 @@ describe('ActivityBuffer', () => {
 });
 
 describe('previewMessageFromEvent', () => {
-  it('maps child output and questions into tagged message entries', () => {
+  it('maps child output, compaction, and questions into tagged message entries', () => {
     expect(previewMessageFromEvent({
       scope: 'child',
       childSlug: 'research-search-reader',
@@ -277,6 +308,17 @@ describe('previewMessageFromEvent', () => {
       kind: 'question',
       tag: 'research-search-reader',
       content: 'Which papers matter most?',
+    });
+
+    expect(previewMessageFromEvent({
+      scope: 'child',
+      childSlug: 'research-search-reader',
+      event: { type: 'memory_compaction', content: 'compact post_task compacted 2 blocks via dml (hybrid) 120 -> 48 tokens' },
+    })).toEqual({
+      role: 'system',
+      kind: 'output',
+      tag: 'research-search-reader',
+      content: 'Memory compaction: compact post_task compacted 2 blocks via dml (hybrid) 120 -> 48 tokens',
     });
   });
 
@@ -580,7 +622,52 @@ describe('runPromptHeadless', () => {
       });
 
       expect(runMocks.run).toHaveBeenCalledWith(expect.stringMatching(/plans\/feature_x\.dml$/), [], expect.any(Object));
+      expect(conductorMocks.appendConductorSessionMessages).toHaveBeenCalledWith(
+        workspaceRoot,
+        'session-123',
+        [
+          { role: 'user', content: '/feature_x' },
+          { role: 'assistant', content: 'plan answer' },
+        ],
+      );
       expect(result).toEqual({ output: ['plan output'], answer: 'plan answer' });
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('persists slash-command failures into the session transcript', async () => {
+    const workspaceRoot = await mkdirTempWorkspace();
+    const logWriter = {
+      recordEvent: vi.fn(),
+      finish: vi.fn().mockResolvedValue(undefined),
+      flush: vi.fn().mockResolvedValue(undefined),
+    };
+    conductorMocks.createSessionExecutionLogWriter.mockReturnValue(logWriter);
+    commandMocks.listCommands.mockResolvedValue([]);
+    runMocks.run.mockRejectedValue(new Error('plan exploded'));
+
+    try {
+      const plansDir = join(workspaceRoot, 'plans');
+      await mkdir(plansDir, { recursive: true });
+      await writeFile(join(plansDir, 'feature_x.dml'), 'agent_main :- answer("ok").\n', 'utf8');
+
+      await expect(runSlashCommand(workspaceRoot, 'feature_x', ['alpha'], {
+        sessionId: 'session-123',
+      })).rejects.toThrow('plan exploded');
+
+      expect(conductorMocks.appendConductorSessionMessages).toHaveBeenCalledWith(
+        workspaceRoot,
+        'session-123',
+        [
+          { role: 'user', content: '/feature_x alpha' },
+          { role: 'assistant', content: 'plan exploded' },
+        ],
+      );
+      expect(logWriter.finish).toHaveBeenCalledWith({
+        status: 'error',
+        error: 'plan exploded',
+      });
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
@@ -735,6 +822,264 @@ describe('slash command parsing', () => {
     ]);
   });
 });
+
+describe('single-parameter argument collapsing', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    conductorMocks.createSessionExecutionLogWriter.mockReturnValue({
+      recordEvent: vi.fn(),
+      finish: vi.fn().mockResolvedValue(undefined),
+      flush: vi.fn().mockResolvedValue(undefined),
+    });
+    conductorMocks.createConductorSession.mockResolvedValue({
+      id: 'session-123',
+      title: 'Session',
+      createdAt: '2026-05-05T00:00:00.000Z',
+      updatedAt: '2026-05-05T00:00:00.000Z',
+    });
+    conductorMocks.runConductorTurn.mockResolvedValue({
+      sessionId: 'session-123',
+      output: ['status line'],
+      answer: 'final answer',
+    });
+    conductorMocks.getConductorSessionDetail.mockResolvedValue({
+      id: 'session-123',
+      title: 'Session',
+      createdAt: '2026-05-05T00:00:00.000Z',
+      updatedAt: '2026-05-05T00:00:00.000Z',
+      messages: [],
+      assistantMemory: '',
+      taskMemory: '',
+    });
+    conductorMocks.listConductorSessions.mockResolvedValue([]);
+    runMocks.run.mockResolvedValue({ output: [], answer: undefined });
+  });
+
+  describe('runSkillCommand', () => {
+    it('collapses multiple args into single string for single-parameter skill', async () => {
+      commandMocks.listCommands.mockResolvedValue([{
+        name: 'summarize',
+        path: '/tmp/workspace/.deepclause/tools/summarize.dml',
+        description: 'Summarizes text',
+        usage: '/summarize <text>',
+        parameters: [
+          { name: 'text', description: 'Text to summarize', required: true, position: 0 },
+        ],
+      }]);
+      runMocks.run.mockImplementation(async (_file: string, _args: string[], options: any) => {
+        options.onEvent?.({ type: 'output', content: 'skill output' });
+        return { output: ['skill output'], answer: 'skill answer' };
+      });
+
+      await runSkillCommand('/tmp/workspace', 'summarize', ['hello world', 'foo bar'], {
+        sessionId: 'session-1',
+      });
+
+      // Verify the log writer received collapsed args
+      expect(conductorMocks.createSessionExecutionLogWriter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: ['hello world foo bar'],
+          skillName: 'summarize',
+        }),
+      );
+    });
+
+    it('does not collapse args for multi-parameter skill', async () => {
+      commandMocks.listCommands.mockResolvedValue([{
+        name: 'compare',
+        path: '/tmp/workspace/.deepclause/tools/compare.dml',
+        description: 'Compares two items',
+        usage: '/compare <source> <target>',
+        parameters: [
+          { name: 'source', description: 'Source item', required: true, position: 0 },
+          { name: 'target', description: 'Target item', required: true, position: 1 },
+        ],
+      }]);
+      runMocks.run.mockImplementation(async (_file: string, _args: string[], options: any) => {
+        options.onEvent?.({ type: 'output', content: 'skill output' });
+        return { output: ['skill output'], answer: 'skill answer' };
+      });
+
+      await runSkillCommand('/tmp/workspace', 'compare', ['alpha', 'beta'], {
+        sessionId: 'session-1',
+      });
+
+      // Verify args remain as separate elements
+      expect(conductorMocks.createSessionExecutionLogWriter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: ['alpha', 'beta'],
+          skillName: 'compare',
+        }),
+      );
+    });
+
+    it('passes through args unchanged when skill has no parameters array', async () => {
+      commandMocks.listCommands.mockResolvedValue([{
+        name: 'refresh',
+        path: '/tmp/workspace/.deepclause/tools/refresh.dml',
+        description: 'Refreshes state',
+        usage: '/refresh',
+      }]);
+      runMocks.run.mockImplementation(async (_file: string, _args: string[], options: any) => {
+        options.onEvent?.({ type: 'output', content: 'skill output' });
+        return { output: ['skill output'], answer: 'skill answer' };
+      });
+
+      await runSkillCommand('/tmp/workspace', 'refresh', ['something'], {
+        sessionId: 'session-1',
+      });
+
+      // No parameters means no collapsing — args pass through
+      expect(conductorMocks.createSessionExecutionLogWriter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: ['something'],
+          skillName: 'refresh',
+        }),
+      );
+    });
+
+    it('leaves empty args untouched regardless of parameter count', async () => {
+      commandMocks.listCommands.mockResolvedValue([{
+        name: 'summarize',
+        path: '/tmp/workspace/.deepclause/tools/summarize.dml',
+        description: 'Summarizes text',
+        usage: '/summarize <text>',
+        parameters: [
+          { name: 'text', description: 'Text to summarize', required: true, position: 0 },
+        ],
+      }]);
+      runMocks.run.mockImplementation(async (_file: string, _args: string[], options: any) => {
+        options.onEvent?.({ type: 'output', content: 'skill output' });
+        return { output: ['skill output'], answer: 'skill answer' };
+      });
+
+      await runSkillCommand('/tmp/workspace', 'summarize', [], {
+        sessionId: 'session-1',
+      });
+
+      // Empty args should stay empty, not become ['']
+      expect(conductorMocks.createSessionExecutionLogWriter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: [],
+          skillName: 'summarize',
+        }),
+      );
+    });
+  });
+
+  describe('runSlashCommand', () => {
+    it('collapses args for known single-parameter skill', async () => {
+      commandMocks.listCommands.mockResolvedValue([{
+        name: 'summarize',
+        path: '/tmp/workspace/.deepclause/tools/summarize.dml',
+        description: 'Summarizes text',
+        usage: '/summarize <text>',
+        parameters: [
+          { name: 'text', description: 'Text to summarize', required: true, position: 0 },
+        ],
+      }]);
+      runMocks.run.mockImplementation(async (_file: string, _args: string[], options: any) => {
+        options.onEvent?.({ type: 'output', content: 'skill output' });
+        return { output: ['skill output'], answer: 'skill answer' };
+      });
+
+      await runSlashCommand('/tmp/workspace', 'summarize', ['hello world', 'foo bar'], {
+        sessionId: 'session-1',
+      });
+
+      expect(conductorMocks.createSessionExecutionLogWriter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: ['hello world foo bar'],
+          skillName: 'summarize',
+        }),
+      );
+    });
+
+    it('does not collapse args for multi-parameter skill', async () => {
+      commandMocks.listCommands.mockResolvedValue([{
+        name: 'compare',
+        path: '/tmp/workspace/.deepclause/tools/compare.dml',
+        description: 'Compares two items',
+        usage: '/compare <source> <target>',
+        parameters: [
+          { name: 'source', description: 'Source item', required: true, position: 0 },
+          { name: 'target', description: 'Target item', required: true, position: 1 },
+        ],
+      }]);
+      runMocks.run.mockImplementation(async (_file: string, _args: string[], options: any) => {
+        options.onEvent?.({ type: 'output', content: 'skill output' });
+        return { output: ['skill output'], answer: 'skill answer' };
+      });
+
+      await runSlashCommand('/tmp/workspace', 'compare', ['alpha', 'beta'], {
+        sessionId: 'session-1',
+      });
+
+      expect(conductorMocks.createSessionExecutionLogWriter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: ['alpha', 'beta'],
+          skillName: 'compare',
+        }),
+      );
+    });
+
+    it('passes through args unchanged for unknown skills (fallback to plans)', async () => {
+      const workspaceRoot = await mkdirTempWorkspace();
+
+      try {
+        commandMocks.listCommands.mockResolvedValue([]);
+
+        const plansDir = join(workspaceRoot, 'plans');
+        await mkdir(plansDir, { recursive: true });
+        await writeFile(join(plansDir, 'feature_x.dml'), 'agent_main :- answer("ok").\n', 'utf8');
+
+        let capturedArgs: string[] = [];
+        runMocks.run.mockImplementation(async (_file, args: string[], options: any) => {
+          capturedArgs = args;
+          options.onEvent?.({ type: 'output', content: 'plan output' });
+          return { output: ['plan output'], answer: 'plan answer' };
+        });
+
+        await runSlashCommand(workspaceRoot, 'feature_x', ['arg1', 'arg2'], {
+          sessionId: 'session-1',
+        });
+
+        // When falling back to plans, no metadata is available so args pass through unchanged
+        expect(capturedArgs).toEqual(['arg1', 'arg2']);
+      } finally {
+        await rm(workspaceRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('collapses args even with many space-separated tokens', async () => {
+      commandMocks.listCommands.mockResolvedValue([{
+        name: 'summarize',
+        path: '/tmp/workspace/.deepclause/tools/summarize.dml',
+        description: 'Summarizes text',
+        usage: '/summarize <text>',
+        parameters: [
+          { name: 'text', description: 'Text to summarize', required: true, position: 0 },
+        ],
+      }]);
+      runMocks.run.mockImplementation(async (_file: string, _args: string[], options: any) => {
+        options.onEvent?.({ type: 'output', content: 'skill output' });
+        return { output: ['skill output'], answer: 'skill answer' };
+      });
+
+      await runSlashCommand('/tmp/workspace', 'summarize', ['a', 'b', 'c', 'd', 'e'], {
+        sessionId: 'session-1',
+      });
+
+      expect(conductorMocks.createSessionExecutionLogWriter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          args: ['a b c d e'],
+          skillName: 'summarize',
+        }),
+      );
+    });
+  });
+});
+
 
 async function mkdirTempWorkspace(): Promise<string> {
   const workspaceRoot = join(tmpdir(), `deepclause-tui-${Date.now()}-${Math.random().toString(36).slice(2)}`);

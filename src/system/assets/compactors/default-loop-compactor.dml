@@ -13,8 +13,18 @@ agent_main :-
 agent_main :-
     param(message_count, MessageCount),
     param(estimated_tokens, EstimatedTokens),
-    param(messages_json, MessagesJSON),
-    system("You compact the live prompt history of a long-running DeepClause task loop. Return only strict JSON with keys apply and messages. If no compaction is needed, return {\"apply\":false}. If compaction is needed, return {\"apply\":true,\"messages\":[...]}. Messages must be an array of objects with role and content string fields. Preserve the current objective, the latest working state, unfinished tool findings, user constraints, and the most recent actionable context needed for the next model call. Each content string must be readable natural-language notes for the next assistant step, not raw JSON, escaped JSON, YAML, XML, or key-value dumps."),
-    format(string(ReviewPrompt), "Review this live task-loop message history and decide whether it should be compacted before the next model call.\n\nMessage count: ~w\nEstimated tokens: ~w\n\nMessages JSON:\n~w\n\nReturn strict JSON only with no markdown fences and no commentary. If the history is already compact enough, return exactly {\"apply\":false}. Otherwise return a materially smaller replacement message array in the shape {\"apply\":true,\"messages\":[{\"role\":\"system|user|assistant\",\"content\":\"...\"}, ...]}. Preserve the task objective, the latest assistant state, crucial tool results, and anything the next model step still needs. Each replacement content string must be concise, readable prose for the next assistant step. Do not put JSON fragments, escaped structures, or schema-like key/value dumps inside message content. Prefer short labeled paragraphs or bullet-style plain text when summarizing.", [MessageCount, EstimatedTokens, MessagesJSON]),
-    task(ReviewPrompt, string(ResultJSON)),
-    answer(ResultJSON).
+    get_memory(HistoryMessages),
+    format(string(ReviewPrompt), "You compact the live prompt history of a long-running DeepClause task loop before the next model call.\n\nReturn exactly one of these:\n- SKIP\n- A concise plain-text working-memory summary only\n\nRules:\n- If compaction is unnecessary, return exactly SKIP.\n- If compaction is needed, preserve the active objective, latest state, important tool findings, unresolved blockers, and the next action.\n- The runtime will keep all system messages plus the last 3 raw non-system messages itself, so do not restate them verbatim.\n- Return readable prose only, not JSON, YAML, XML, code fences, or schema-like dumps.\n\nLoop stats:\n- Message count: ~w\n- Estimated tokens: ~w", [MessageCount, EstimatedTokens]),
+    PromptMessage = message{role: system, content: ReviewPrompt},
+    append([PromptMessage], HistoryMessages, LlmMessages),
+     ( llm(LlmMessages, Summary)
+     -> normalize_space(string(NormalizedSummary), Summary),
+         ( NormalizedSummary == "SKIP"
+         -> answer("{\"apply\":false}")
+         ;  Summary \= ""
+         -> format(string(ResultSpec), "DC_COMPACTOR_REWRITE_V1\napply=true\nkeep_last_messages=3\nsummary:\n~w", [Summary]),
+             answer(ResultSpec)
+         ;  answer("{\"apply\":false}")
+         )
+    ;  answer("{\"apply\":false}")
+    ).

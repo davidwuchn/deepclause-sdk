@@ -36,7 +36,7 @@ export interface CreateOptions {
 export type CompactorSourceType = 'inline' | 'file' | 'auto';
 export type CompactionScope = 'session' | 'loop' | 'run';
 export type CompactionTrigger = 'before_user_message' | 'before_model_call' | 'before_task' | 'after_task';
-export type CompactionAction = 'applied' | 'skipped' | 'failed';
+export type CompactionAction = 'running' | 'applied' | 'skipped' | 'failed';
 
 export interface CompactorDefinition {
   /** Inline DML source or a path to a DML file */
@@ -92,8 +92,8 @@ export interface RunOptions {
   /** Abort signal for cancellation */
   signal?: AbortSignal;
   /** Initial conversation messages seeded into memory before DML execution.
-   *  These appear as proper user/assistant turns, not in the system prompt. */
-  initialMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+    *  These appear as proper memory messages, not in the synthesized system prompt. */
+    initialMessages?: MemoryMessage[];
   /** Per-run override for SDK compaction settings. */
   compaction?: CompactionOptions;
 }
