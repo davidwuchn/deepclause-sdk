@@ -780,11 +780,22 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
   }
   dockerArgs.push(
     useSwebenchImage ? swebenchImageName : config.docker.workerImage,
-    'node',
-    '/benchmarks-src/worker/run-instance.mjs',
-    '/work-input/input.json',
-    '/work-output',
   );
+  if (useSwebenchImage) {
+    dockerArgs.push(
+      'bash',
+      '/benchmarks-src/worker/bootstrap-swebench.sh',
+      '/work-input/input.json',
+      '/work-output',
+    );
+  } else {
+    dockerArgs.push(
+      'node',
+      '/benchmarks-src/worker/run-instance.mjs',
+      '/work-input/input.json',
+      '/work-output',
+    );
+  }
 
   console.log(`${taskLabel} starting worker container ${containerName} (${useSwebenchImage ? swebenchImageName : config.docker.workerImage})`);
   console.log(`${taskLabel} input -> ${path.relative(runRoot, inputPath)}`);

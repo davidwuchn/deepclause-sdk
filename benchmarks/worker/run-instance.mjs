@@ -159,20 +159,6 @@ async function setupSwebenchEnvironment({ result, logsDir, repoDir, agentHome, s
   await runBestEffortStep(result, logsDir, 'git_config_name', ['git', 'config', 'user.name', 'DeepClause Benchmark'], { cwd: repoDir });
   await runBestEffortStep(result, logsDir, 'git_config_email', ['git', 'config', 'user.email', 'benchmark@deepclause.local'], { cwd: repoDir });
 
-  await runStep(result, logsDir, 'install_nodejs', ['bash', '-lc', [
-    'set -euo pipefail',
-    'if ! command -v node >/dev/null 2>&1; then',
-    '  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -',
-    '  apt-get install -y nodejs',
-    'fi',
-    'node --version',
-    'npm --version',
-  ].join('\n')], {
-    cwd: '/work',
-    timeoutSeconds: spec.execution.setupTimeoutSeconds,
-    env: buildCommandEnv(),
-  });
-
   const deepclauseInstallTarget = spec.deepclausePackageTarball ?? `deepclause-sdk@${spec.deepclauseVersion}`;
   logProgress(`Installing DeepClause from ${deepclauseInstallTarget}`);
   await runStep(result, logsDir, 'npm_install_deepclause', ['npm', 'install', '-g', deepclauseInstallTarget], {
