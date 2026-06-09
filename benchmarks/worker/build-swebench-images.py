@@ -38,6 +38,8 @@ def main():
     if failed:
         for exc in failed:
             print(f"  FAILED: {exc}", file=sys.stderr)
+
+    if len(successful) == 0 and len(filtered) > 0:
         sys.exit(1)
 
 

@@ -712,14 +712,33 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
 
   if (useSwebenchImage && !config.docker.skipImageBuild && !await dockerImageExists(swebenchImageName)) {
     console.log(`${taskLabel} building SWE-bench instance image ${swebenchImageName}`);
-    await buildSwebenchInstanceImage({
-      instance: task.instance,
-      evaluatorImage: config.docker.evaluatorImage,
-      platform: config.docker.platform,
-      namespace: config.docker.swebenchNamespace,
-      datasetName: config.dataset.name,
-      datasetSplit: config.dataset.split,
-    });
+    try {
+      await buildSwebenchInstanceImage({
+        instance: task.instance,
+        evaluatorImage: config.docker.evaluatorImage,
+        platform: config.docker.platform,
+        namespace: config.docker.swebenchNamespace,
+        datasetName: config.dataset.name,
+        datasetSplit: config.dataset.split,
+      });
+    } catch (buildError) {
+      console.log(`${taskLabel} image build failed: ${buildError.message}`);
+    }
+  }
+
+  if (useSwebenchImage && !await dockerImageExists(swebenchImageName)) {
+    console.log(`${taskLabel} skipping: SWE-bench instance image not available`);
+    const fallbackResult = {
+      success: false,
+      instanceId: task.instance.instance_id,
+      mode: task.mode,
+      patch: '',
+      error: `SWE-bench instance image ${swebenchImageName} not available`,
+      commands: [],
+      warnings: [],
+    };
+    await writeJson(resultPath, fallbackResult);
+    return fallbackResult;
   }
 
   const dockerArgs = [
