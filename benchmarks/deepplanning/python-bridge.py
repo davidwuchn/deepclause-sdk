@@ -147,10 +147,12 @@ def main():
     parser.add_argument('--args', default=None, help='JSON-encoded tool arguments')
     parser.add_argument('--args-file', default=None, help='Path to file containing JSON-encoded tool arguments')
     parser.add_argument('--args-stdin', action='store_true', help='Read JSON tool arguments from stdin')
+    parser.add_argument('--kv', action='append', default=[], help='Key=value pair for tool arguments (repeatable)')
     args = parser.parse_args()
 
-    if not args.args and not args.args_file and not args.args_stdin:
-        print(json.dumps({'error': 'One of --args, --args-file, or --args-stdin is required'}))
+    has_args = args.args or args.args_file or args.args_stdin or args.kv
+    if not has_args:
+        print(json.dumps({'error': 'One of --args, --args-file, --args-stdin, or --kv is required'}))
         sys.exit(1)
 
     bench_dir = args.bench_dir or _find_qwen_bench_dir()
@@ -164,7 +166,15 @@ def main():
         print(json.dumps({'error': f'Tool not found: {args.tool}. Available: {list(registry.keys())}'}))
         sys.exit(1)
 
-    if args.args_file:
+    if args.kv:
+        tool_args = {}
+        for pair in args.kv:
+            key, _, val = pair.partition('=')
+            try:
+                tool_args[key] = json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                tool_args[key] = val
+    elif args.args_file:
         with open(args.args_file, 'r', encoding='utf-8') as f:
             tool_args = json.load(f)
     elif args.args_stdin:
