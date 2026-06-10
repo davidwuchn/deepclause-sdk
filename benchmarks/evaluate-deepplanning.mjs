@@ -215,17 +215,19 @@ async function evaluateTravel(benchDir, instancesDir, instanceDirs, evalDir) {
 
   const databaseDir = path.join(benchDir, 'travelplanning', 'database', 'database_en');
   const testDataPath = path.join(benchDir, 'travelplanning', 'data', 'travelplanning_query_en.json');
-  const evaluationOutputDir = path.join(resultDir, 'evaluation');
-  await fs.mkdir(evaluationOutputDir, { recursive: true });
 
   try {
+    const evalScript = [
+      'import sys; sys.path.insert(0, sys.argv[1]);',
+      'from travelplanning.evaluation.eval_converted import evaluate_plans;',
+      'evaluate_plans(result_dir=sys.argv[2], test_data_path=sys.argv[3], database_dir=sys.argv[4], workers=1)',
+    ].join(' ');
     await runCommand('python3', [
-      '-m', 'travelplanning.evaluation.eval_converted',
-      '--plans-dir', convertedDir,
-      '--output-dir', evaluationOutputDir,
-      '--test-data', testDataPath,
-      '--database-dir', databaseDir,
-      '--workers', '1',
+      '-c', evalScript,
+      benchDir,
+      resultDir,
+      testDataPath,
+      databaseDir,
     ], { cwd: benchDir, streamOutput: true });
   } catch (error) {
     console.warn(`[travel] Evaluation failed: ${error.message}`);
