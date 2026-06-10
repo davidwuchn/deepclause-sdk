@@ -196,13 +196,6 @@ def main():
             print(f"[bridge] db_path is NOT a directory: {args.db_path}", file=sys.stderr)
         sys.exit(1)
 
-    if BM25Okapi is None:
-        try:
-            from rank_bm25 import BM25Okapi as _BM25
-        except ImportError:
-            print(json.dumps({'error': 'rank_bm25 package is not installed. Run: pip install rank-bm25'}))
-            sys.exit(1)
-
     tool_instance = tool_cls(cfg)
 
     if args.domain == 'shopping' and hasattr(tool_instance, 'bm25') and tool_instance.bm25 is None:
