@@ -192,27 +192,43 @@ function buildCommandEnv(spec) {
 }
 
 function extractAgentOutput(stdout, stderr) {
-  if (stdout) {
-    const lines = stdout.split('\n');
-    const answerLines = [];
-    let inAnswer = false;
-    for (const line of lines) {
-      if (line.includes('ANSWER:') || line.includes('answer:')) {
-        inAnswer = true;
-        answerLines.push(line.replace(/^.*?(ANSWER|answer):\s*/, ''));
-      } else if (inAnswer) {
-        answerLines.push(line);
-      }
-    }
-    if (answerLines.length > 0) {
-      return answerLines.join('\n').trim();
-    }
-    const planMatch = stdout.match(/<plan>[\s\S]*?<\/plan>/);
-    if (planMatch) {
-      return planMatch[0];
+  if (!stdout) return '';
+
+  const planMatch = stdout.match(/<plan>[\s\S]*?<\/plan>/);
+  if (planMatch) {
+    return planMatch[0];
+  }
+
+  const jsonPlanMatch = stdout.match(/<plan>\\n[\s\S]*?<\\\/plan>/);
+  if (jsonPlanMatch) {
+    try {
+      return JSON.parse(`"${jsonPlanMatch[0].replace(/<\\\/plan>/, '</plan>')}"`);
+    } catch {}
+  }
+
+  const setResultMatch = stdout.match(/"value"\s*:\s*"((?:<plan>|[\s\S])*?(?:<\/plan>|$))"/);
+  if (setResultMatch) {
+    try {
+      return JSON.parse(`"${setResultMatch[1]}"`);
+    } catch {}
+  }
+
+  const lines = stdout.split('\n');
+  const answerLines = [];
+  let inAnswer = false;
+  for (const line of lines) {
+    if (line.includes('ANSWER:') || line.includes('answer:')) {
+      inAnswer = true;
+      answerLines.push(line.replace(/^.*?(ANSWER|answer):\s*/, ''));
+    } else if (inAnswer) {
+      answerLines.push(line);
     }
   }
-  return stdout?.slice(-10000) ?? '';
+  if (answerLines.length > 0) {
+    return answerLines.join('\n').trim();
+  }
+
+  return stdout.slice(-10000);
 }
 
 async function runStep(result, logsDir, stepName, command, options = {}) {
