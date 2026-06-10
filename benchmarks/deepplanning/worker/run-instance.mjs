@@ -37,8 +37,8 @@ async function main() {
     await setupDeepClauseWorkspace(agentHome, spec);
 
     const dmlFile = spec.domain === 'travel'
-      ? path.join(BENCHMARKS_ROOT, 'deepplanning', 'travel.dml')
-      : path.join(BENCHMARKS_ROOT, 'deepplanning', 'shopping.dml');
+      ? path.join(BENCHMARKS_ROOT, 'travel.dml')
+      : path.join(BENCHMARKS_ROOT, 'shopping.dml');
 
     const request = buildRequest(spec);
     const env = buildCommandEnv(spec);
