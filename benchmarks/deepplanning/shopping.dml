@@ -1,0 +1,161 @@
+% DeepPlanning Shopping Planning skill
+% Evaluates long-horizon agentic planning with verifiable constraints.
+% Uses bash + python-bridge.py to call Qwen-Agent shopping tools.
+%
+% Required params:
+%   db_path     - Per-task database directory
+%   bridge_dir  - Directory containing python-bridge.py
+
+tool(search_products(Query, Result),
+     "Search for products matching a natural language query. Returns matching product_ids.") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool search_products --args '{\"query\":\"~w\"}'", [BridgeDir, DbPath, Query]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(search_products_limited(Query, Limit, Result),
+     "Search for products with a result limit.") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool search_products --args '{\"query\":\"~w\",\"limit\":~w}'", [BridgeDir, DbPath, Query, Limit]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(filter_by_brand(BrandNames, Result),
+     "Filter products by brand names (OR logic). BrandNames is a JSON array like [\"Nike\",\"Adidas\"].") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool filter_by_brand --args '{\"brand_names\":~w}'", [BridgeDir, DbPath, BrandNames]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(filter_by_color(Colors, Result),
+     "Filter products by colors (OR logic). Colors is a JSON array like [\"White\",\"Black\"].") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool filter_by_color --args '{\"colors\":~w}'", [BridgeDir, DbPath, Colors]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(filter_by_size(Sizes, Result),
+     "Filter products by sizes (OR logic). Sizes is a JSON array like [\"M\",\"L\"].") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool filter_by_size --args '{\"sizes\":~w}'", [BridgeDir, DbPath, Sizes]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(filter_by_range(ConditionKey, Operator, Value, Result),
+     "Filter by numerical feature. ConditionKey: price, stock_quantity, sales_volume.monthly, sales_volume.total, rating.average_score, rating.total_reviews. Operator: >, >=, <, <=, ==.") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool filter_by_range --args '{\"condition_key\":\"~w\",\"operator\":\"~w\",\"value\":~w}'", [BridgeDir, DbPath, ConditionKey, Operator, Value]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(sort_products(Dimension, Order, Result),
+     "Sort products. Dimension: price, stock_quantity, sales_volume.monthly, etc. Order: asc or desc.") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool sort_products --args '{\"dimension\":\"~w\",\"order\":\"~w\"}'", [BridgeDir, DbPath, Dimension, Order]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(get_product_details(ProductId, Result),
+     "Get full details for a specific product by product_id.") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool get_product_details --args '{\"product_id\":\"~w\"}'", [BridgeDir, DbPath, ProductId]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(get_user_info(Result),
+     "Get user profile: address, sizes, and available coupons.") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool get_user_info --args '{}'", [BridgeDir, DbPath]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(add_product_to_cart(ProductId, Result),
+     "Add one unit of a product to the shopping cart. Validates stock.") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool add_product_to_cart --args '{\"product_id\":\"~w\"}'", [BridgeDir, DbPath, ProductId]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(delete_product_from_cart(ProductId, Result),
+     "Remove a product from the cart.") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool delete_product_from_cart --args '{\"product_id\":\"~w\"}'", [BridgeDir, DbPath, ProductId]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(get_cart_info(Result),
+     "Get current cart contents: items list and summary (total items, total price).") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool get_cart_info --args '{}'", [BridgeDir, DbPath]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(add_coupon_to_cart(CouponName, Result),
+     "Apply a coupon to the cart. Validates ownership and threshold.") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool add_coupon_to_cart --args '{\"coupon_name\":\"~w\"}'", [BridgeDir, DbPath, CouponName]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(delete_coupon_from_cart(CouponName, Result),
+     "Remove a coupon from the cart.") :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool delete_coupon_from_cart --args '{\"coupon_name\":\"~w\"}'", [BridgeDir, DbPath, CouponName]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+parse_bridge_result(Raw, Result) :-
+    get_dict(stdout, Raw, Stdout),
+    !,
+    Result = Stdout.
+
+parse_bridge_result(_, "Error: tool call failed").
+
+agent_main(Request) :-
+    system("You are an expert and highly strategic AI Shopping Assistant. Your mission is to understand a user's shopping request and assemble the combination of products (and coupons if applicable) that results in the absolute lowest final price.
+
+CORE WORKFLOW:
+1. Get user info to understand sizes, address, and available coupons.
+2. Search for products matching the user's request.
+3. Filter and refine using brand, color, size, price range, and rating filters.
+4. Get detailed product information for promising candidates.
+5. Add the best products to the cart.
+6. If coupons are available, apply the optimal coupon strategy.
+7. Verify the final cart state with get_cart_info.
+8. Provide a final summary with cart contents, coupon usage, and total price.
+
+CART IS THE SINGLE SOURCE OF TRUTH: Always verify the current cart using get_cart_info before making final decisions.
+
+COUPON STRATEGY (if applicable):
+- Cross-store coupons apply to the entire cart total.
+- Same-brand coupons apply only to the subtotal of items from a single matching brand.
+- Multiple different coupons can stack if each meets its threshold individually.
+- A more expensive product enabling a better coupon may result in a lower final price.
+
+BUDGET: If specified, the final cart total must not exceed it.
+
+Do not ask the user questions. Use the available tools to gather all needed information."),
+    user(Request),
+    task("Get the user's profile information and available coupons, then search for products matching the request. Store in SearchResults.", string(SearchResults)),
+    task("Refine the product selection: get details for the best candidates, compare prices, and add the selected products to the cart. Store in SelectionInfo.", string(SelectionInfo)),
+    task("If coupons are available, evaluate the optimal coupon strategy and apply the best coupons. Then verify the final cart with get_cart_info. Store in FinalCart.", string(FinalCart)),
+    task("Provide the final shopping summary: list all cart items with prices, applied coupons with discount calculations, and the final total price. If a budget was specified, confirm whether it is met.", string(Summary)),
+    answer(Summary).
+
+agent_main(Request) :-
+    task("Help the user with their shopping request. Search products, filter, add to cart, apply coupons, and verify the final cart. Provide a summary with final price.", string(Plan)),
+    answer(Plan).
