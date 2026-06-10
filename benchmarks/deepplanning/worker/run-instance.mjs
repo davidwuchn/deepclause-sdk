@@ -50,6 +50,7 @@ async function main() {
       '--param', `db_path=${spec.dbPath}`,
       '--param', `bridge_dir=${bridgeDir}`,
       '--param', `bench_dir=${spec.benchDir}`,
+      '--param', `python_path=${spec.pythonPath ?? 'python3'}`,
     ];
     const runModel = spec.models?.run;
     if (runModel) {

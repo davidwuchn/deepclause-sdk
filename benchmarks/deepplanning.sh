@@ -32,6 +32,7 @@ Run options:
   --agent-timeout <secs>   Per-task timeout in seconds (default: 600)
   --run-model <id>         Run model (default: openai:gpt-4o)
   --run-temp <n>           Run temperature (default: 0.7)
+  --python-path <path>     Python interpreter path (default: python3)
   --verbose, -v            Stream worker output
 
 Evaluate options:
@@ -155,6 +156,7 @@ cmd_run() {
   [[ -n "${AGENT_TIMEOUT:-}" ]] && run_args+=(--agent-timeout "$AGENT_TIMEOUT")
   [[ -n "${RUN_MODEL:-}" ]] && run_args+=(--run-model "$RUN_MODEL")
   [[ -n "${RUN_TEMP:-}" ]] && run_args+=(--run-temp "$RUN_TEMP")
+  [[ -n "${PYTHON_PATH:-}" ]] && run_args+=(--python-path "$PYTHON_PATH")
   [[ "${VERBOSE:-}" == "1" ]] && run_args+=(--verbose)
 
   cd "$REPO_ROOT"
@@ -222,6 +224,7 @@ main() {
   local AGENT_TIMEOUT=""
   local RUN_MODEL=""
   local RUN_TEMP=""
+  local PYTHON_PATH=""
   local ENV_FILE=""
   local VERBOSE=""
   local EXTRA_ARGS=()
@@ -286,6 +289,11 @@ main() {
         shift
         [[ $# -gt 0 ]] || die "missing value for --run-temp"
         RUN_TEMP="$1"
+        ;;
+      --python-path)
+        shift
+        [[ $# -gt 0 ]] || die "missing value for --python-path"
+        PYTHON_PATH="$1"
         ;;
       --env-file)
         shift

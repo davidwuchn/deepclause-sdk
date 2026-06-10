@@ -6,8 +6,16 @@
 %   bridge_dir  - Directory containing python-bridge.py
 %   bench_dir   - Path to Qwen-Agent benchmark/deepplanning directory
 
+% Required params:
+%   db_path     - Per-task database directory
+%   bridge_dir  - Directory containing python-bridge.py
+%   bench_dir   - Path to Qwen-Agent benchmark/deepplanning directory
+%   python_path - Path to Python interpreter with rank_bm25 installed
+
 run_tool(BridgeDir, DbPath, BenchDir, ToolName, KvArgs, Result) :-
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool ~w ~w", [BridgeDir, DbPath, BenchDir, ToolName, KvArgs]),
+    param(python_path, PythonPath),
+    (var(PythonPath) -> PythonPath = 'python3' ; true),
+    format(string(Cmd), "~w '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool ~w ~w", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName, KvArgs]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 

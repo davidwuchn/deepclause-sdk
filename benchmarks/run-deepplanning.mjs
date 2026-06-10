@@ -211,6 +211,7 @@ async function runWorkerTask({ task, instanceDir, benchDir, config }) {
     temperatures: config.temperatures,
     agentTimeoutSeconds: config.execution.agentTimeoutSeconds,
     benchDir,
+    pythonPath: config.pythonPath,
   };
   await writeJson(inputPath, workerInput);
 
@@ -266,6 +267,7 @@ function buildConfig(args) {
   if (args.gatewayTemp) config.temperatures.gateway = args.gatewayTemp;
   if (args.runTemp) config.temperatures.run = args.runTemp;
   if (args.compileTemp) config.temperatures.compile = args.compileTemp;
+  config.pythonPath = args.pythonPath ?? 'python3';
   config.instanceIds = args.instanceIds ?? [];
   config.offset = args.offset ?? 0;
   config.limit = args.limit;
@@ -307,6 +309,7 @@ function parseArgs(argv) {
     if (arg === '--gateway-temp') { args.gatewayTemp = Number(readValue()); continue; }
     if (arg === '--run-temp') { args.runTemp = Number(readValue()); continue; }
     if (arg === '--compile-temp') { args.compileTemp = Number(readValue()); continue; }
+    if (arg === '--python-path') { args.pythonPath = readValue(); continue; }
     if (arg === '--verbose' || arg === '-v') { args.verbose = true; continue; }
 
     throw new Error(`Unknown argument: ${arg}`);
