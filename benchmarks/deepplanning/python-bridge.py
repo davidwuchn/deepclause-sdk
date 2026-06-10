@@ -156,16 +156,13 @@ def main():
                 parsed = json.loads(val)
                 if isinstance(parsed, (list, dict)):
                     tool_args[key] = parsed
-                elif isinstance(parsed, (int, float)):
-                    tool_args[key] = parsed
-            except (json.JSONDecodeError, ValueError):
-                try:
-                    if '.' in val:
-                        tool_args[key] = float(val)
+                elif isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
+                    if key.endswith('_id') or key.endswith('_name') or key.endswith('_ids'):
+                        pass
                     else:
-                        tool_args[key] = int(val)
-                except (ValueError, TypeError):
-                    pass
+                        tool_args[key] = parsed
+            except (json.JSONDecodeError, ValueError):
+                pass
 
     bench_dir = args.bench_dir or _find_qwen_bench_dir()
     if not bench_dir:
