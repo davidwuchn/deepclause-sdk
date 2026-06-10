@@ -145,6 +145,19 @@ def _get_tool_registry(bench_dir, domain):
         return TOOL_REGISTRY
 
 
+TRAVEL_DB_MAPPING = {
+    'query_train_info': 'trains/trains.csv',
+    'query_flight_info': 'flights/flights.csv',
+    'query_hotel_info': 'hotels/hotels.csv',
+    'query_attraction_details': 'attractions/attractions.csv',
+    'recommend_attractions': 'attractions/attractions.csv',
+    'search_location': 'locations/locations_coords.csv',
+    'query_road_route_info': 'transportation/distance_matrix.csv',
+    'recommend_restaurants': 'restaurants/restaurants.csv',
+    'query_restaurant_details': 'restaurants/restaurants.csv',
+}
+
+
 def main():
     parser = argparse.ArgumentParser(description='DeepPlanning tool bridge')
     parser.add_argument('--domain', required=True, choices=['travel', 'shopping'])
@@ -193,6 +206,9 @@ def main():
     cfg = {'database_path': args.db_path, 'load_schema': True}
     if args.domain == 'travel':
         cfg['language'] = 'en'
+        db_file = TRAVEL_DB_MAPPING.get(args.tool)
+        if db_file:
+            cfg['database_path'] = os.path.join(args.db_path, db_file)
 
     tool_instance = tool_cls(cfg)
     result = tool_instance.call(tool_args)
