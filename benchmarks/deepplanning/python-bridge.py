@@ -163,6 +163,12 @@ def main():
     if args.domain == 'travel':
         cfg['language'] = 'en'
 
+    db_file = os.path.join(args.db_path, 'products.jsonl')
+    if not os.path.exists(db_file):
+        print(f"[bridge] WARNING: database file not found: {db_file}", file=sys.stderr)
+        print(f"[bridge] db_path={args.db_path}", file=sys.stderr)
+        print(f"[bridge] contents of db_path: {os.listdir(args.db_path) if os.path.isdir(args.db_path) else 'NOT A DIR'}", file=sys.stderr)
+
     tool_instance = tool_cls(cfg)
     tool_args = json.loads(args.args)
     result = tool_instance.call(tool_args)
