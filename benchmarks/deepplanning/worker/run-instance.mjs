@@ -71,19 +71,34 @@ async function main() {
       result.errorDetail = error.stderr.slice(-3000);
     }
     logProgress(`Worker failed after ${Date.now() - startedAt}ms: ${result.error}`);
+    if (result.errorDetail) {
+      logProgress(`  stderr (last 1500 chars):\n${result.errorDetail.slice(-1500)}`);
+    }
+    if (error instanceof Error && error.stdout) {
+      logProgress(`  stdout (last 500 chars):\n${error.stdout.slice(-500)}`);
+    }
   } finally {
     await fs.writeFile(path.join(outputDir, 'result.json'), `${JSON.stringify(result, null, 2)}\n`, 'utf8');
   }
 }
 
 async function setupDeepClauseWorkspace(agentHome, spec) {
-  await runStep(null, null, 'deepclause_init', [
-    'deepclause', 'init',
-    '--model', spec.models?.run ?? 'openai:gpt-4o',
+  logProgress(`Running deepclause init in ${agentHome}`);
+  try {
+    await runStep(null, null, 'deepclause_init', [
+      'deepclause', 'init',
+      '--model', spec.models?.run ?? 'openai:gpt-4o',
   ], {
     cwd: agentHome,
     timeoutSeconds: 30,
   });
+  } catch (initErr) {
+    logProgress(`deepclause init failed: ${initErr instanceof Error ? initErr.message : String(initErr)}`);
+    if (initErr instanceof Error && initErr.stderr) {
+      logProgress(`  init stderr: ${initErr.stderr.slice(-1000)}`);
+    }
+    throw initErr;
+  }
 
   const dcDir = path.join(agentHome, '.deepclause');
   const configPath = path.join(dcDir, 'config.json');
