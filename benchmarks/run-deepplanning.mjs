@@ -243,7 +243,7 @@ function resolveBenchDir(args) {
   }
   const localVendor = path.join(BENCHMARKS_ROOT, 'deepplanning', 'vendor', 'Qwen-Agent', 'benchmark', 'deepplanning');
   try {
-    fs.accessSync(localVendor);
+    require('fs').accessSync(localVendor);
     return localVendor;
   } catch {
     return null;

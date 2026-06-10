@@ -24,6 +24,7 @@ async function main() {
     taskId: spec.taskId,
     domain: spec.domain,
     level: spec.level,
+    dbPath: spec.dbPath,
     agentOutput: '',
     commands: [],
     warnings: [],

@@ -103,11 +103,11 @@ def _get_tool_registry(bench_dir, domain):
     if not os.path.isdir(tools_dir):
         raise FileNotFoundError(f'Tools directory not found: {tools_dir}')
 
-    sys.path.insert(0, tools_dir)
     import importlib
     import glob as _glob
 
     if domain == 'shopping':
+        sys.path.insert(0, tools_dir)
         import base_shopping_tool as _bst
         for py_file in sorted(_glob.glob(os.path.join(tools_dir, '*.py'))):
             mod_name = os.path.basename(py_file)[:-3]
@@ -119,16 +119,30 @@ def _get_tool_registry(bench_dir, domain):
                 print(f"Warning: could not import {mod_name}: {e}", file=sys.stderr)
         return _bst.TOOL_REGISTRY
     else:
-        import base_travel_tool as _btt
+        if bench_dir not in sys.path:
+            sys.path.insert(0, bench_dir)
+
+        travel_pkg = type(sys)('travelplanning')
+        travel_pkg.__path__ = [os.path.join(bench_dir, 'travelplanning')]
+        travel_pkg.__package__ = 'travelplanning'
+        sys.modules['travelplanning'] = travel_pkg
+
+        tools_pkg = type(sys)('travelplanning.tools')
+        tools_pkg.__path__ = [tools_dir]
+        tools_pkg.__package__ = 'travelplanning.tools'
+        sys.modules['travelplanning.tools'] = tools_pkg
+
+        from travelplanning.tools.base_travel_tool import TOOL_REGISTRY
         for py_file in sorted(_glob.glob(os.path.join(tools_dir, '*.py'))):
             mod_name = os.path.basename(py_file)[:-3]
             if mod_name.startswith('_') or mod_name == 'base_travel_tool':
                 continue
+            full_mod = f'travelplanning.tools.{mod_name}'
             try:
-                importlib.import_module(mod_name)
+                importlib.import_module(full_mod)
             except Exception as e:
-                print(f"Warning: could not import {mod_name}: {e}", file=sys.stderr)
-        return _btt.TOOL_REGISTRY
+                print(f"Warning: could not import {full_mod}: {e}", file=sys.stderr)
+        return TOOL_REGISTRY
 
 
 def main():
