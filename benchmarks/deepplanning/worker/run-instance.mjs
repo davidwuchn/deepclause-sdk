@@ -45,13 +45,18 @@ async function main() {
     const bridgeDir = path.join(BENCHMARKS_ROOT, 'deepplanning');
 
     logProgress(`Running ${spec.domain} task ${spec.taskId}`);
-    const runResult = await runStep(result, logsDir, 'deepclause_run', [
+    const runArgs = [
       'deepclause', 'run', '--verbose', '--stream',
       '--deepclause-version', spec.deepclauseVersion ?? 'latest',
       '--param', `db_path=${spec.dbPath}`,
       '--param', `bridge_dir=${bridgeDir}`,
-      dmlFile, request,
-    ], {
+    ];
+    const runModel = spec.models?.run;
+    if (runModel) {
+      runArgs.push('--model', runModel);
+    }
+    runArgs.push(dmlFile, request);
+    const runResult = await runStep(result, logsDir, 'deepclause_run', runArgs, {
       cwd: agentHome,
       timeoutSeconds: spec.agentTimeoutSeconds ?? 600,
       env,
@@ -72,26 +77,38 @@ async function main() {
 }
 
 async function setupDeepClauseWorkspace(agentHome, spec) {
-  const dcDir = path.join(agentHome, '.deepclause');
-  await fs.mkdir(dcDir, { recursive: true });
+  await runStep(null, null, 'deepclause_init', [
+    'deepclause', 'init',
+    '--model', spec.models?.run ?? 'openai:gpt-4o',
+  ], {
+    cwd: agentHome,
+    timeoutSeconds: 30,
+  });
 
-  const config = {
-    workspace: agentHome,
-    models: {
-      gateway: spec.models?.gateway ?? 'openai:gpt-4o',
-      run: spec.models?.run ?? 'openai:gpt-4o',
-      compile: spec.models?.compile ?? 'openai:gpt-4o',
-    },
-    temperatures: {
-      gateway: spec.temperatures?.gateway ?? 0.7,
-      run: spec.temperatures?.run ?? 0.7,
-      compile: spec.temperatures?.compile ?? 0.4,
-    },
-    tools: {
-      policy: {
-        mode: 'whitelist',
-        tools: getWhitelistedTools(spec.domain),
-      },
+  const dcDir = path.join(agentHome, '.deepclause');
+  const configPath = path.join(dcDir, 'config.json');
+  let config;
+  try {
+    config = JSON.parse(await fs.readFile(configPath, 'utf8'));
+  } catch {
+    config = {};
+  }
+
+  config.workspace = agentHome;
+  config.models = {
+    gateway: spec.models?.gateway ?? config.models?.gateway ?? 'openai:gpt-4o',
+    run: spec.models?.run ?? config.models?.run ?? 'openai:gpt-4o',
+    compile: spec.models?.compile ?? config.models?.compile ?? 'openai:gpt-4o',
+  };
+  config.temperatures = {
+    gateway: spec.temperatures?.gateway ?? config.temperatures?.gateway ?? 0.7,
+    run: spec.temperatures?.run ?? config.temperatures?.run ?? 0.7,
+    compile: spec.temperatures?.compile ?? config.temperatures?.compile ?? 0.4,
+  };
+  config.tools = {
+    policy: {
+      mode: 'whitelist',
+      tools: getWhitelistedTools(spec.domain),
     },
   };
 
@@ -100,7 +117,7 @@ async function setupDeepClauseWorkspace(agentHome, spec) {
     config.tools.additional = additionalTools;
   }
 
-  await fs.writeFile(path.join(dcDir, 'config.json'), JSON.stringify(config, null, 2), 'utf8');
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2), 'utf8');
 }
 
 function getWhitelistedTools(domain) {
@@ -181,8 +198,8 @@ function extractAgentOutput(stdout, stderr) {
 }
 
 async function runStep(result, logsDir, stepName, command, options = {}) {
-  const logPath = path.join(logsDir, `${stepName}.log`);
-  const logStream = await fs.open(logPath, 'w');
+  const logPath = logsDir ? path.join(logsDir, `${stepName}.log`) : null;
+  const logStream = logPath ? await fs.open(logPath, 'w') : null;
 
   try {
     return await new Promise((resolve, reject) => {
@@ -204,14 +221,14 @@ async function runStep(result, logsDir, stepName, command, options = {}) {
 
       child.stdout.on('data', (chunk) => {
         stdout += chunk;
-        logStream.write(chunk);
+        logStream?.write(chunk);
         if (VERBOSE) {
           process.stdout.write(chunk);
         }
       });
       child.stderr.on('data', (chunk) => {
         stderr += chunk;
-        logStream.write(chunk);
+        logStream?.write(chunk);
       });
 
       child.once('error', (err) => {
@@ -220,7 +237,9 @@ async function runStep(result, logsDir, stepName, command, options = {}) {
       });
       child.once('close', (exitCode) => {
         clearTimeout(timeout);
-        result.commands.push({ step: stepName, exitCode, durationMs: 0 });
+        if (result) {
+          result.commands.push({ step: stepName, exitCode, durationMs: 0 });
+        }
         if (exitCode === 0) {
           resolve({ stdout, stderr, exitCode });
         } else {
@@ -232,7 +251,7 @@ async function runStep(result, logsDir, stepName, command, options = {}) {
       });
     });
   } finally {
-    await logStream.close();
+    await logStream?.close();
   }
 }
 
