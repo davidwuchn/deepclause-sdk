@@ -115,10 +115,39 @@ def _get_tool_registry(bench_dir, domain):
     if domain == 'shopping':
         import shoppingplanning.tools as _pkg
         from shoppingplanning.tools.base_shopping_tool import TOOL_REGISTRY
+        if not TOOL_REGISTRY:
+            import shoppingplanning.tools.base_shopping_tool as _bst
+            for name in dir(_bst):
+                obj = getattr(_bst, name)
+                if isinstance(obj, type) and hasattr(obj, 'call') and hasattr(obj, 'name') and obj.name:
+                    TOOL_REGISTRY[obj.name] = obj
+        if not TOOL_REGISTRY:
+            import importlib
+            for mod_name in ['search_products_tool', 'filter_by_brand_tool', 'filter_by_color_tool',
+                             'filter_by_size_tool', 'filter_by_range_tool', 'sort_product_tool',
+                             'get_product_details_tool', 'calculate_transport_time_tool',
+                             'get_user_info', 'add_product_to_cart', 'delete_product_from_cart',
+                             'get_cart_info', 'add_coupon_to_cart', 'delete_coupon_from_cart']:
+                try:
+                    importlib.import_module(f'shoppingplanning.tools.{mod_name}')
+                except Exception as e:
+                    print(f"Warning: could not import {mod_name}: {e}", file=sys.stderr)
         return TOOL_REGISTRY
     else:
         import travelplanning.tools as _pkg
         from travelplanning.tools.base_travel_tool import TOOL_REGISTRY
+        if not TOOL_REGISTRY:
+            import importlib
+            import glob as _glob
+            travel_tools_dir = os.path.join(bench_dir, 'travelplanning', 'tools')
+            for py_file in _glob.glob(os.path.join(travel_tools_dir, '*.py')):
+                mod_name = os.path.basename(py_file)[:-3]
+                if mod_name.startswith('_'):
+                    continue
+                try:
+                    importlib.import_module(f'travelplanning.tools.{mod_name}')
+                except Exception as e:
+                    print(f"Warning: could not import {mod_name}: {e}", file=sys.stderr)
         return TOOL_REGISTRY
 
 
