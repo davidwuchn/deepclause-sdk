@@ -234,6 +234,7 @@ export class DMLRunner {
   private engine: unknown = null;
   private sessionId: string = '';
   private currentMemory: MemoryMessage[] = [];
+  private stepCounter = 0;
 
   constructor(swipl: SWIPLModule, options: RunnerOptions) {
     this.swipl = swipl;
@@ -556,10 +557,15 @@ export class DMLRunner {
     _memoryId: string, // No longer used - memory comes from payload
     options: InternalRunOptions
   ): AsyncGenerator<DMLEvent> {
-    // Safely extract payload fields with proper conversion
     const rawPayload = payload as Record<string, unknown>;
     const taskDescription = String(toJsValue(rawPayload.taskDescription) ?? '');
-    
+    const stepId = `step_${this.stepCounter++}`;
+
+    yield { type: 'task_activity', taskState: 'started', taskDescription, taskId: stepId };
+
+    let stepSucceeded: boolean | null = null;
+
+    try {
     // Ensure outputVars is an array of either strings or TypedVar objects
     const outputVars = decodeAgentOutputVars(rawPayload.outputVars);
     
@@ -759,6 +765,7 @@ export class DMLRunner {
           this.currentMemory = finalizedMemory;
 
           // Post result back to Prolog
+          stepSucceeded = raceResult.result.success;
           this.postAgentResult(raceResult.result, finalizedMemory);
           return;
         }
@@ -801,7 +808,15 @@ export class DMLRunner {
       this.currentMemory = finalizedMemory;
 
       // Post result back to Prolog
+      stepSucceeded = result.success;
       this.postAgentResult(result, finalizedMemory);
+    }
+    } finally {
+      yield {
+        type: 'task_activity',
+        taskState: stepSucceeded === true ? 'completed' : 'failed',
+        taskId: stepId,
+      };
     }
   }
 
@@ -818,7 +833,12 @@ export class DMLRunner {
     const allowedTokens = Array.isArray(rawAllowedTokens)
       ? rawAllowedTokens.map((token) => String(token))
       : [];
+    const stepId = `step_${this.stepCounter++}`;
+    const taskDescription = prompt || 'sample_token';
 
+    yield { type: 'task_activity', taskState: 'started', taskDescription, taskId: stepId };
+
+    let succeeded = false;
     try {
       const token = await sampleSingleToken({
         prompt,
@@ -832,11 +852,14 @@ export class DMLRunner {
         },
         signal: options.signal,
       });
+      succeeded = true;
       this.postSampleTokenResult({ success: true, token });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.postSampleTokenResult({ success: false, error: message });
       yield { type: 'log', content: `sample_token failed: ${message}` };
+    } finally {
+      yield { type: 'task_activity', taskState: succeeded ? 'completed' : 'failed', taskId: stepId };
     }
   }
 
@@ -849,7 +872,12 @@ export class DMLRunner {
   ): AsyncGenerator<DMLEvent> {
     const data = payload as Record<string, unknown>;
     const messages = this.extractMessagesFromValue(data.messages);
+    const stepId = `step_${this.stepCounter++}`;
+    const taskDescription = summarizeLlmMessages(messages);
 
+    yield { type: 'task_activity', taskState: 'started', taskDescription, taskId: stepId };
+
+    let succeeded = false;
     try {
       const text = await generateLlmReply({
         messages,
@@ -863,11 +891,14 @@ export class DMLRunner {
         },
         signal: options.signal,
       });
+      succeeded = true;
       this.postLlmResult({ success: true, text });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.postLlmResult({ success: false, error: message });
       yield { type: 'log', content: `llm/2 failed: ${message}` };
+    } finally {
+      yield { type: 'task_activity', taskState: succeeded ? 'completed' : 'failed', taskId: stepId };
     }
   }
 
@@ -1281,6 +1312,8 @@ export class DMLRunner {
             const allowedTokens = Array.isArray(rawAllowedTokens)
               ? rawAllowedTokens.map((token) => String(token))
               : [];
+            const nestedStepId = `step_${this.stepCounter++}`;
+            onToolEvent?.({ type: 'task_activity', taskState: 'started', taskDescription: prompt || 'sample_token', taskId: nestedStepId });
 
             try {
               const token = await sampleSingleToken({
@@ -1296,9 +1329,11 @@ export class DMLRunner {
                 signal: runContext.signal,
               });
               this.postSampleTokenResult({ success: true, token });
+              onToolEvent?.({ type: 'task_activity', taskState: 'completed', taskId: nestedStepId });
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               this.postSampleTokenResult({ success: false, error: message });
+              onToolEvent?.({ type: 'task_activity', taskState: 'failed', taskId: nestedStepId });
               if (process.env.DEBUG_RUNNER) {
                 console.log('[RUNNER] sample_token request failed:', message);
               }
@@ -1308,6 +1343,8 @@ export class DMLRunner {
 
           case 'request_llm': {
             const messages = this.extractMessagesFromValue(payload?.messages);
+            const nestedStepId = `step_${this.stepCounter++}`;
+            onToolEvent?.({ type: 'task_activity', taskState: 'started', taskDescription: summarizeLlmMessages(messages), taskId: nestedStepId });
 
             try {
               const text = await generateLlmReply({
@@ -1323,9 +1360,11 @@ export class DMLRunner {
                 signal: runContext.signal,
               });
               this.postLlmResult({ success: true, text });
+              onToolEvent?.({ type: 'task_activity', taskState: 'completed', taskId: nestedStepId });
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               this.postLlmResult({ success: false, error: message });
+              onToolEvent?.({ type: 'task_activity', taskState: 'failed', taskId: nestedStepId });
               if (process.env.DEBUG_RUNNER) {
                 console.log('[RUNNER] llm/2 request failed:', message);
               }
@@ -1449,6 +1488,9 @@ export class DMLRunner {
               nestedToolCallback
             );
             
+            const nestedStepId = `step_${this.stepCounter++}`;
+            onToolEvent?.({ type: 'task_activity', taskState: 'started', taskDescription, taskId: nestedStepId });
+
             try {
               // Run the nested agent loop
               const result = await runAgentLoop({
@@ -1501,6 +1543,7 @@ export class DMLRunner {
               
               // Post result back to tool engine
               this.postToolAgentResult(toolEngineId, result, finalizedMemory);
+              onToolEvent?.({ type: 'task_activity', taskState: 'completed', taskId: nestedStepId });
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               if (process.env.DEBUG_RUNNER) {
@@ -1513,6 +1556,7 @@ export class DMLRunner {
                 variables: {},
                 messages: preparedMemory.filter((message) => message.role !== 'system'),
               });
+              onToolEvent?.({ type: 'task_activity', taskState: 'failed', taskId: nestedStepId });
             }
             break;
           }
@@ -1859,4 +1903,13 @@ export class DMLRunner {
   async dispose(): Promise<void> {
     this.cleanup();
   }
+}
+
+function summarizeLlmMessages(messages: Array<{ role: string; content: string }>): string {
+  if (messages.length === 0) return 'llm()';
+  const last = messages[messages.length - 1];
+  const text = typeof last.content === 'string' ? last.content : '';
+  const summary = text.replace(/\s+/g, ' ').trim();
+  if (!summary) return `llm(${messages.length} messages)`;
+  return summary.length > 80 ? summary.slice(0, 77) + '...' : summary;
 }

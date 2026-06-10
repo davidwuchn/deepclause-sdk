@@ -120,7 +120,7 @@ type TuiInputStream = {
   pause(): void;
   setRawMode?(mode: boolean): void;
 };
-type PaneKind = 'sessions' | 'messages' | 'process' | 'context';
+type PaneKind = 'sessions' | 'messages' | 'process' | 'tasks' | 'context';
 type RenderPaneKind = PaneKind | 'workspace';
 type UiMode = 'command' | 'menu' | 'palette' | 'picker' | 'viewer' | 'editor';
 type MenuId = 'session' | 'skills' | 'files' | 'run' | 'view' | 'help';
@@ -153,6 +153,7 @@ type MenuActionId =
   | 'view.focus.messages'
   | 'view.focus.process'
   | 'view.focus.context'
+  | 'view.focus.tasks'
   | 'view.follow'
   | 'view.palette'
   | 'help.shortcuts'
@@ -308,7 +309,7 @@ export class LiveExecutionPrinter {
   handle(logEvent: ConductorLogEvent): void {
     const { event } = logEvent;
 
-    if (event.type === 'usage' || event.type === 'finished') {
+    if (event.type === 'usage' || event.type === 'finished' || event.type === 'task_activity') {
       return;
     }
 
@@ -412,7 +413,7 @@ export class ActivityBuffer {
   handle(logEvent: ConductorLogEvent): void {
     const { event } = logEvent;
 
-    if (event.type === 'usage' || event.type === 'finished') {
+    if (event.type === 'usage' || event.type === 'finished' || event.type === 'task_activity') {
       return;
     }
 
@@ -590,6 +591,89 @@ export class ActivityBuffer {
   }
 }
 
+function summarizeStepDescription(raw: string): string {
+  const firstLine = raw.split(/\r?\n/)[0] ?? '';
+  const trimmed = firstLine.replace(/\s+/g, ' ').trim();
+  return trimmed.length > 80 ? trimmed.slice(0, 77) + '\u2026' : trimmed;
+}
+
+interface TaskEntry {
+  id: string;
+  description: string;
+  state: 'started' | 'completed' | 'failed';
+  depth: number;
+  startedAt: number;
+  completedAt?: number;
+}
+
+export class TaskTracker {
+  private readonly entries: TaskEntry[] = [];
+  private readonly activeStack: string[] = [];
+  private readonly maxEntries = 200;
+
+  handle(logEvent: ConductorLogEvent): void {
+    const { event } = logEvent;
+    if (event.type !== 'task_activity') return;
+
+    if (event.taskState === 'started' && event.taskId) {
+      const depth = this.activeStack.length;
+      this.activeStack.push(event.taskId);
+      this.entries.push({
+        id: event.taskId,
+        description: summarizeStepDescription(event.taskDescription ?? ''),
+        state: 'started',
+        depth,
+        startedAt: Date.now(),
+      });
+      this.trim();
+    } else if ((event.taskState === 'completed' || event.taskState === 'failed') && event.taskId) {
+      const idx = this.entries.findIndex(e => e.id === event.taskId);
+      if (idx >= 0) {
+        this.entries[idx].state = event.taskState;
+        this.entries[idx].completedAt = Date.now();
+      }
+      const stackIdx = this.activeStack.lastIndexOf(event.taskId);
+      if (stackIdx >= 0) {
+        this.activeStack.splice(stackIdx, 1);
+      }
+    }
+  }
+
+  buildPaneBody(_width: number): string[] {
+    if (this.entries.length === 0) {
+      return ['No steps yet.', 'Step activity renders here.'];
+    }
+
+    const lines: string[] = [];
+
+    for (const entry of this.entries) {
+      const indent = '  '.repeat(entry.depth);
+      let marker: string;
+      if (entry.state === 'started') {
+        marker = '>';
+      } else if (entry.state === 'completed') {
+        marker = '\u2713';
+      } else {
+        marker = '\u2717';
+      }
+      lines.push(`${indent}${marker} ${entry.description}`);
+    }
+
+    return lines;
+  }
+
+  clear(): void {
+    this.entries.length = 0;
+    this.activeStack.length = 0;
+  }
+
+  private trim(): void {
+    if (this.entries.length > this.maxEntries) {
+      this.entries.splice(0, this.entries.length - this.maxEntries);
+    }
+  }
+}
+
 export function releaseTuiInputStream(stream: TuiInputStream): void {
   if (stream.isTTY && typeof stream.setRawMode === 'function') {
     stream.setRawMode(false);
@@ -675,6 +759,7 @@ class FullscreenTui {
   private commands: CommandInfo[] = [];
   private readonly activityBySessionId = new Map<string, ActivityBuffer>();
   private readonly ephemeralMessagesBySessionId = new Map<string, DisplayMessage[]>();
+  private readonly taskTrackerBySessionId = new Map<string, TaskTracker>();
   private focusedPane: PaneKind = 'messages';
   private uiMode: UiMode = 'command';
   private menuReturnMode: Exclude<UiMode, 'menu'> = 'command';
@@ -688,12 +773,14 @@ class FullscreenTui {
     sessions: 0,
     messages: 0,
     process: 0,
+    tasks: 0,
     context: 0,
   };
   private readonly lastPaneMetrics: Record<PaneKind, PaneMetricsSnapshot> = {
     sessions: { maxStart: 0, viewportLines: 0, maxStartIsExact: true },
     messages: { maxStart: 0, viewportLines: 0, maxStartIsExact: true },
     process: { maxStart: 0, viewportLines: 0, maxStartIsExact: true },
+    tasks: { maxStart: 0, viewportLines: 0, maxStartIsExact: true },
     context: { maxStart: 0, viewportLines: 0, maxStartIsExact: true },
   };
   private currentPreview: RunningPreview | null = null;
@@ -928,10 +1015,15 @@ class FullscreenTui {
         paneWidth = widths.right;
         paneTop = 0;
         break;
-      case 'context':
+      case 'tasks':
         paneLeft = widths.left + 1 + widths.center + 1;
         paneWidth = widths.right;
         paneTop = rightHeights.process;
+        break;
+      case 'context':
+        paneLeft = widths.left + 1 + widths.center + 1;
+        paneWidth = widths.right;
+        paneTop = rightHeights.process + rightHeights.tasks;
         break;
     }
 
@@ -987,7 +1079,7 @@ class FullscreenTui {
   private applySelectionHighlight(
     lines: string[],
     widths: { left: number; center: number; right: number },
-    rightHeights: { process: number; context: number },
+    rightHeights: { process: number; tasks: number; context: number },
     _contentHeight: number,
   ): void {
     const sel = this.selection;
@@ -1018,10 +1110,15 @@ class FullscreenTui {
         paneWidth = widths.right;
         paneTop = 0;
         break;
-      case 'context':
+      case 'tasks':
         paneLeft = widths.left + 1 + widths.center + 1;
         paneWidth = widths.right;
         paneTop = rightHeights.process;
+        break;
+      case 'context':
+        paneLeft = widths.left + 1 + widths.center + 1;
+        paneWidth = widths.right;
+        paneTop = rightHeights.process + rightHeights.tasks;
         break;
     }
 
@@ -1066,6 +1163,7 @@ class FullscreenTui {
     if (column <= widths.left) return 'sessions';
     if (column <= widths.left + 1 + widths.center) return 'messages';
     if (contentRow <= rightHeights.process) return 'process';
+    if (contentRow <= rightHeights.process + rightHeights.tasks) return 'tasks';
     return 'context';
   }
 
@@ -1708,6 +1806,7 @@ class FullscreenTui {
         onEvent: (event) => {
           this.manageToolAbortSignal(event.event);
           activity.handle(event);
+          this.taskTrackerFor(sessionId).handle(event);
           this.updatePreviewFromEvent(event);
           this.requestRender();
         },
@@ -1769,6 +1868,7 @@ class FullscreenTui {
         onEvent: (event) => {
           this.manageToolAbortSignal(event.event);
           activity.handle(event);
+          this.taskTrackerFor(sessionId).handle(event);
           this.updatePreviewFromEvent(event);
           this.requestRender();
         },
@@ -1838,6 +1938,7 @@ class FullscreenTui {
         onEvent: (event) => {
           this.manageToolAbortSignal(event.event);
           activity.handle(event);
+          this.taskTrackerFor(sessionId).handle(event);
           this.updatePreviewFromEvent(event);
           this.requestRender();
         },
@@ -1904,6 +2005,7 @@ class FullscreenTui {
         onEvent: (event) => {
           this.manageToolAbortSignal(event.event);
           activity.handle(event);
+          this.taskTrackerFor(sessionId).handle(event);
           this.updatePreviewFromEvent(event);
           this.requestRender();
         },
@@ -1972,6 +2074,7 @@ class FullscreenTui {
         signal: this.currentAbortController.signal,
         onEvent: (event) => {
           activity.handle(event);
+          this.taskTrackerFor(sessionId).handle(event);
           this.requestRender();
         },
       });
@@ -2104,7 +2207,7 @@ class FullscreenTui {
   }
 
   private cyclePaneFocus(direction: -1 | 1): void {
-    const order: PaneKind[] = ['sessions', 'messages', 'process', 'context'];
+    const order: PaneKind[] = ['sessions', 'messages', 'process', 'tasks', 'context'];
     const currentIndex = order.indexOf(this.focusedPane);
     const nextIndex = (currentIndex + direction + order.length) % order.length;
     this.focusedPane = order[nextIndex];
@@ -2237,6 +2340,7 @@ class FullscreenTui {
           { id: 'view.focus.sessions', label: 'Focus Sessions Pane', description: 'Focus the session list pane.' },
           { id: 'view.focus.messages', label: 'Focus Messages Pane', description: 'Focus the conversation history pane.' },
           { id: 'view.focus.process', label: 'Focus Execution Pane', description: 'Focus the live execution log pane.' },
+          { id: 'view.focus.tasks', label: 'Focus Tasks Pane', description: 'Focus the step tracker pane.' },
           { id: 'view.focus.context', label: 'Focus Context Pane', description: 'Focus the session context and token usage pane.' },
           { id: 'view.follow', label: 'Follow Focused Pane', description: 'Jump back to the newest visible content in the active pane.' },
           { id: 'view.palette', label: 'Open Action Palette', description: 'Search all menu actions from one picker.', shortcut: 'Ctrl+P' },
@@ -2380,6 +2484,7 @@ class FullscreenTui {
       case 'view.focus.sessions':
       case 'view.focus.messages':
       case 'view.focus.process':
+      case 'view.focus.tasks':
       case 'view.focus.context': {
         const pane = actionId.slice('view.focus.'.length) as PaneKind;
         this.focusedPane = pane;
@@ -3556,6 +3661,15 @@ class FullscreenTui {
     return created;
   }
 
+  private taskTrackerFor(sessionId: string): TaskTracker {
+    let tracker = this.taskTrackerBySessionId.get(sessionId);
+    if (!tracker) {
+      tracker = new TaskTracker();
+      this.taskTrackerBySessionId.set(sessionId, tracker);
+    }
+    return tracker;
+  }
+
   private async persistShellCommandResult(command: string, result: ShellExecResult): Promise<string> {
     let sessionId = this.selectedSessionId;
     if (!sessionId) {
@@ -3604,6 +3718,7 @@ class FullscreenTui {
     const sessionsPane = this.buildPaneView('sessions', 'Sessions', widths.left, contentHeight);
     const messagesPane = this.buildPaneView('messages', 'Messages', widths.center, contentHeight);
     const processPane = this.buildPaneView('process', 'Execution', widths.right, rightHeights.process);
+    const tasksPane = this.buildPaneView('tasks', 'Tasks', widths.right, rightHeights.tasks);
     const contextPane = this.buildPaneView('context', 'Context', widths.right, rightHeights.context);
     const workspaceView = this.uiMode === 'command'
       ? null
@@ -3621,9 +3736,14 @@ class FullscreenTui {
       lines.push(...workspaceView.lines);
     } else {
       for (let index = 0; index < contentHeight; index += 1) {
-        const rightLine = index < rightHeights.process
-          ? processPane[index]
-          : contextPane[index - rightHeights.process];
+        let rightLine: string;
+        if (index < rightHeights.process) {
+          rightLine = processPane[index];
+        } else if (index < rightHeights.process + rightHeights.tasks) {
+          rightLine = tasksPane[index - rightHeights.process];
+        } else {
+          rightLine = contextPane[index - rightHeights.process - rightHeights.tasks];
+        }
         lines.push(`${sessionsPane[index]}${gap}${messagesPane[index]}${gap}${rightLine}`);
       }
     }
@@ -3822,6 +3942,13 @@ class FullscreenTui {
       'Tool calls, logs, outputs, and exceptions render here.',
       'Use /cancel to abort the current execution.',
     ];
+  }
+
+  private buildTasksPaneBody(): string[] {
+    const tracker = this.taskTrackerFor(this.selectedSessionId);
+    const columns = output.columns ?? 120;
+    const widths = computePaneWidths(columns);
+    return tracker.buildPaneBody(widths.right);
   }
 
   private buildContextPaneBody(): string[] {
@@ -4180,6 +4307,8 @@ class FullscreenTui {
         return this.buildMessagesPaneBody();
       case 'process':
         return this.buildProcessPaneBody({ tailLineLimit: MAX_ACTIVITY_LINES });
+      case 'tasks':
+        return this.buildTasksPaneBody();
       case 'context':
         return this.buildContextPaneBody();
     }
@@ -5581,20 +5710,26 @@ function computePaneWidths(columns: number): { left: number; center: number; rig
   return { left, center, right };
 }
 
-function computeRightPaneHeights(totalHeight: number): { process: number; context: number } {
-  if (totalHeight <= 8) {
-    return { process: Math.max(1, totalHeight - 1), context: 1 };
+function computeRightPaneHeights(totalHeight: number): { process: number; tasks: number; context: number } {
+  if (totalHeight <= 12) {
+    return { process: Math.max(1, totalHeight - 2), tasks: 1, context: 1 };
   }
 
-  let process = Math.max(8, Math.floor(totalHeight * 0.58));
-  let context = totalHeight - process;
-  if (context < 6) {
-    const deficit = 6 - context;
-    process = Math.max(6, process - deficit);
-    context = totalHeight - process;
+  let process = Math.max(6, Math.floor(totalHeight * 0.40));
+  let tasks = Math.max(4, Math.floor(totalHeight * 0.25));
+  let context = totalHeight - process - tasks;
+  if (context < 4) {
+    const deficit = 4 - context;
+    process = Math.max(4, process - deficit);
+    context = totalHeight - process - tasks;
+  }
+  if (context < 4) {
+    const deficit = 4 - context;
+    tasks = Math.max(3, tasks - deficit);
+    context = totalHeight - process - tasks;
   }
 
-  return { process, context };
+  return { process, tasks, context };
 }
 
 function buildPane(
@@ -6027,8 +6162,21 @@ function renderWindowBody(text: string, innerWidth: number, kind: RenderPaneKind
       return `${border}${paint(content, ANSI.yellow, ANSI.bgBlue, ANSI.bold)}${border}`;
     }
     if (normalized.startsWith('task') || normalized.startsWith('skill')) {
-      return `${border}${paint(content, ANSI.brightWhite, ANSI.bgBlue, ANSI.bold)}${border}`;
+      return `${border}${paint(content, ANSI.brightWhite, ANSI.bgBlue, ANSI.bold)}`;
     }
+  }
+
+  if (kind === 'tasks') {
+    if (text.startsWith('>')) {
+      return `${border}${paint(content, ANSI.brightCyan, ANSI.bgBlue, ANSI.bold)}${border}`;
+    }
+    if (text.startsWith('\u2713')) {
+      return `${border}${paint(content, ANSI.green, ANSI.bgBlue)}${border}`;
+    }
+    if (text.startsWith('\u2717')) {
+      return `${border}${paint(content, ANSI.red, ANSI.bgBlue)}${border}`;
+    }
+    return `${border}${paint(content, ANSI.white, ANSI.bgBlue)}${border}`;
   }
 
   if (
@@ -6065,6 +6213,8 @@ function paneDisplayName(kind: PaneKind): string {
       return 'Messages';
     case 'process':
       return 'Execution';
+    case 'tasks':
+      return 'Tasks';
     case 'context':
       return 'Context';
   }
@@ -6080,6 +6230,8 @@ function paneDimensionsForKind(kind: PaneKind, columns: number, rows: number): {
       return { width: widths.center, height: Math.max(1, rows - 3) };
     case 'process':
       return { width: widths.right, height: rightHeights.process };
+    case 'tasks':
+      return { width: widths.right, height: rightHeights.tasks };
     case 'context':
       return { width: widths.right, height: rightHeights.context };
   }

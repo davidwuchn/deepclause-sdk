@@ -132,7 +132,7 @@ export interface LLMUsage {
 }
 
 export interface DMLEvent {
-  type: 'output' | 'log' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'tool_call' | 'usage' | 'memory_compaction';
+  type: 'output' | 'log' | 'answer' | 'input_required' | 'error' | 'finished' | 'stream' | 'tool_call' | 'usage' | 'memory_compaction' | 'task_activity';
   content?: string;
   prompt?: string;
   /** Execution trace (only present in 'finished' event when trace mode enabled) */
@@ -173,6 +173,12 @@ export interface DMLEvent {
   afterTokens?: number;
   /** Optional failure reason when compaction could not be applied */
   compactionError?: string;
+  /** Step lifecycle state (only for 'task_activity' events) */
+  taskState?: 'started' | 'completed' | 'failed';
+  /** Step description (only for 'task_activity' started events) */
+  taskDescription?: string;
+  /** Correlation ID for matching start/end of a step (only for 'task_activity' events) */
+  taskId?: string;
 }
 
 /**

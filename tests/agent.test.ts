@@ -513,4 +513,116 @@ describe('runAgentLoop', () => {
     expect(result.success).toBe(false);
     expect(result.outputs).toContain('Agent loop detected repeated non-progressing responses and stopped early.');
   });
+
+  it('inserts a continuation user turn before retrying a failed task/N non-streaming step', async () => {
+    let callCount = 0;
+    let trailingRolesOnFinalAttempt: string[] = [];
+
+    aiMocks.generateText.mockImplementation(async ({ messages, tools }: {
+      messages: Array<{ role: string; content: unknown }>;
+      tools: Record<string, { execute: (input: unknown) => Promise<unknown> }>;
+    }) => {
+      callCount += 1;
+
+      if (callCount < 3) {
+        await tools.set_result.execute({ variable: 'Count', value: 'not-a-number' });
+        return {
+          text: '',
+          toolCalls: [
+            { toolName: 'set_result', input: { variable: 'Count', value: 'not-a-number' } },
+          ],
+          toolResults: [],
+          response: { messages: [{ role: 'assistant', content: `Attempt ${callCount} failed.` }] },
+          finishReason: 'tool-calls',
+        };
+      }
+
+      trailingRolesOnFinalAttempt = messages.slice(-2).map((message) => message.role);
+      await tools.finish.execute({ success: false });
+      return {
+        text: '',
+        toolCalls: [
+          { toolName: 'finish', input: { success: false } },
+        ],
+        toolResults: [],
+        response: { messages: [] },
+        finishReason: 'tool-calls',
+      };
+    });
+
+    const result = await runAgentLoop({
+      taskDescription: 'Return a numeric count.',
+      outputVars: [{ name: 'Count', type: 'integer' }],
+      memory: [],
+      tools: new Map(),
+      modelOptions: {
+        model: 'mock-model',
+        provider: 'openai',
+        temperature: 0,
+        maxOutputTokens: 1024,
+      },
+      onOutput: vi.fn(),
+      onStream: vi.fn(),
+      onAskUser: vi.fn(),
+      streaming: false,
+    });
+
+    expect(callCount).toBe(3);
+    expect(trailingRolesOnFinalAttempt).toEqual(['assistant', 'user']);
+    expect(result.success).toBe(false);
+  });
+
+  it('inserts a continuation user turn before retrying a failed task/N streaming step', async () => {
+    let callCount = 0;
+    let trailingRolesOnFinalAttempt: string[] = [];
+
+    aiMocks.streamText.mockImplementation(({ messages, tools }: {
+      messages: Array<{ role: string; content: unknown }>;
+      tools: Record<string, { execute: (input: unknown) => Promise<unknown> }>;
+    }) => {
+      callCount += 1;
+
+      if (callCount < 3) {
+        return {
+          fullStream: (async function* () {
+            await tools.set_result.execute({ variable: 'Count', value: 'not-a-number' });
+            yield { type: 'tool-call', toolName: 'set_result', input: { variable: 'Count', value: 'not-a-number' } };
+            yield { type: 'finish-step', finishReason: 'tool-calls' };
+          })(),
+          response: Promise.resolve({ messages: [{ role: 'assistant', content: `Attempt ${callCount} failed.` }] }),
+        };
+      }
+
+      trailingRolesOnFinalAttempt = messages.slice(-2).map((message) => message.role);
+      return {
+        fullStream: (async function* () {
+          await tools.finish.execute({ success: false });
+          yield { type: 'tool-call', toolName: 'finish', input: { success: false } };
+          yield { type: 'finish-step', finishReason: 'stop' };
+        })(),
+        response: Promise.resolve({ messages: [] }),
+      };
+    });
+
+    const result = await runAgentLoop({
+      taskDescription: 'Return a numeric count.',
+      outputVars: [{ name: 'Count', type: 'integer' }],
+      memory: [],
+      tools: new Map(),
+      modelOptions: {
+        model: 'mock-model',
+        provider: 'openai',
+        temperature: 0,
+        maxOutputTokens: 1024,
+      },
+      onOutput: vi.fn(),
+      onStream: vi.fn(),
+      onAskUser: vi.fn(),
+      streaming: true,
+    });
+
+    expect(callCount).toBe(3);
+    expect(trailingRolesOnFinalAttempt).toEqual(['assistant', 'user']);
+    expect(result.success).toBe(false);
+  });
 });

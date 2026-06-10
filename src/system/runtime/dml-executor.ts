@@ -164,6 +164,9 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
 
       case 'usage':
         break;
+
+      case 'task_activity':
+        break;
     }
   };
 
