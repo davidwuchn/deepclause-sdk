@@ -2,9 +2,6 @@
 """
 Bridge script that dispatches DeepPlanning tool calls.
 
-Expects QWEN_AGENT_BENCH_DIR to point to the benchmark/deepplanning/ directory
-inside the Qwen-Agent repo. If not set, looks for it relative to this script.
-
 For travel tools, patches qwen_agent imports so they work without the full framework.
 """
 
@@ -30,8 +27,6 @@ def _find_qwen_bench_dir():
 
 
 def _make_base_tool_shim():
-    """Create a minimal BaseTool shim for travel tools that depend on qwen_agent.tools.base."""
-
     class BaseShoppingTool:
         name = ''
         description = ''
@@ -44,8 +39,7 @@ def _make_base_tool_shim():
 
         def _verify_json_format_args(self, params):
             if isinstance(params, str):
-                import json as _json
-                params = _json.loads(params)
+                params = json.loads(params)
             if isinstance(self.parameters, dict):
                 for p in self.parameters.get('required', []):
                     if p not in params:
@@ -79,7 +73,6 @@ def _make_base_tool_shim():
 
 
 def _patch_qwen_agent_imports():
-    """Patch sys.modules so travel tools can import from qwen_agent.tools.base."""
     BaseTool, register_tool, registry = _make_base_tool_shim()
 
     qwen_agent = type(sys)('qwen_agent')
@@ -146,15 +139,15 @@ def main():
     parser.add_argument('--bench-dir', default=None, help='Path to Qwen-Agent benchmark/deepplanning dir')
     parser.add_argument('--args', default=None, help='JSON-encoded tool arguments')
     parser.add_argument('--args-file', default=None, help='Path to file containing JSON-encoded tool arguments')
-    parser.add_argument('--args-stdin', action='store_true', help='Read JSON tool arguments from stdin')
-    parser.add_argument('--kv', action='append', default=[], help='Key=value pair for tool arguments (repeatable)')
-    parser.add_argument('--kv-file', default=None, help='Path to file with key=value lines for tool arguments')
     args = parser.parse_args()
 
-    has_args = args.args or args.args_file or args.args_stdin or args.kv or args.kv_file
-    if not has_args:
-        print(json.dumps({'error': 'One of --args, --args-file, --args-stdin, --kv, or --kv-file is required'}))
-        sys.exit(1)
+    if not args.args and not args.args_file:
+        tool_args = {}
+    elif args.args_file:
+        with open(args.args_file, 'r', encoding='utf-8') as f:
+            tool_args = json.load(f)
+    else:
+        tool_args = json.loads(args.args)
 
     bench_dir = args.bench_dir or _find_qwen_bench_dir()
     if not bench_dir:
@@ -167,67 +160,12 @@ def main():
         print(json.dumps({'error': f'Tool not found: {args.tool}. Available: {list(registry.keys())}'}))
         sys.exit(1)
 
-    if args.kv_file:
-        tool_args = {}
-        if os.path.exists(args.kv_file) and os.path.getsize(args.kv_file) > 0:
-            with open(args.kv_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.rstrip('\n')
-                    if not line or line.startswith('#'):
-                        continue
-                    key, _, val = line.partition('=')
-                    try:
-                        tool_args[key] = json.loads(val)
-                    except (json.JSONDecodeError, ValueError):
-                        tool_args[key] = val
-    elif args.kv:
-        tool_args = {}
-        for pair in args.kv:
-            key, _, val = pair.partition('=')
-            try:
-                tool_args[key] = json.loads(val)
-            except (json.JSONDecodeError, ValueError):
-                tool_args[key] = val
-    elif args.args_file:
-        with open(args.args_file, 'r', encoding='utf-8') as f:
-            tool_args = json.load(f)
-    elif args.args_stdin:
-        tool_args = json.load(sys.stdin)
-    else:
-        tool_args = json.loads(args.args)
-
     tool_cls = registry[args.tool]
     cfg = {'database_path': args.db_path, 'load_schema': True}
     if args.domain == 'travel':
         cfg['language'] = 'en'
 
-    products_file = os.path.join(args.db_path, 'products.jsonl')
-    if args.domain == 'shopping' and not os.path.exists(products_file):
-        print(json.dumps({'error': f'Database file not found: {products_file}', 'db_path': args.db_path}), file=sys.stderr)
-        if os.path.isdir(args.db_path):
-            print(f"[bridge] dir contents: {os.listdir(args.db_path)}", file=sys.stderr)
-        else:
-            print(f"[bridge] db_path is NOT a directory: {args.db_path}", file=sys.stderr)
-        sys.exit(1)
-
     tool_instance = tool_cls(cfg)
-
-    if args.domain == 'shopping' and hasattr(tool_instance, 'bm25') and tool_instance.bm25 is None:
-        products_file = os.path.join(args.db_path, 'products.jsonl')
-        if not os.path.exists(products_file):
-            print(json.dumps({'error': f'Database file not found: {products_file}', 'db_path': args.db_path}))
-            sys.exit(1)
-        if os.path.getsize(products_file) == 0:
-            print(json.dumps({'error': f'Database file is empty: {products_file}'}))
-            sys.exit(1)
-        try:
-            from rank_bm25 import BM25Okapi as _check
-        except ImportError:
-            print(json.dumps({'error': 'rank_bm25 package is not installed. Run: pip install rank-bm25'}))
-            sys.exit(1)
-        print(json.dumps({'error': f'BM25 index failed to build. db_path={args.db_path}, products_file={products_file}, file_exists={os.path.exists(products_file)}, file_size={os.path.getsize(products_file) if os.path.exists(products_file) else 0}'}))
-        sys.exit(1)
-
     result = tool_instance.call(tool_args)
     sys.stdout.write(result)
 

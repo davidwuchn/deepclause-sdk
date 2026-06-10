@@ -7,152 +7,76 @@
 %   bench_dir   - Path to Qwen-Agent benchmark/deepplanning directory
 %   python_path - Path to Python interpreter with rank_bm25 installed
 
-run_tool(BridgeDir, DbPath, BenchDir, ToolName, KvContent, Result) :-
+:- use_module(library(http/json)).
+
+run_tool(ToolName, ArgsDict, Result) :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    param(bench_dir, BenchDir),
     param(python_path, PythonPath),
     (var(PythonPath) -> PythonPath = 'python3' ; true),
-    (KvContent = '' ->
-        format(string(Cmd), "~w '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool ~w --kv-file /dev/null", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName])
-    ;
-        format(string(KvFile), "/tmp/dc_travel_~w.kv", [ToolName]),
-        exec(write_file(path: KvFile, content: KvContent), _),
-        format(string(Cmd), "~w '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool ~w --kv-file '~w'", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName, KvFile])
+    atom_json_dict(ArgsJson, ArgsDict, []),
+    format(string(ArgsFile), "/tmp/dc_travel_~w.json", [ToolName]),
+    setup_call_cleanup(
+        open(ArgsFile, write, Stream),
+        write(Stream, ArgsJson),
+        close(Stream)
     ),
+    format(string(Cmd), "~w '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool ~w --args-file '~w'", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName, ArgsFile]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
-kv_line(Key, Value, Line) :-
-    format(string(Line), "~w=~w", [Key, Value]).
-
 tool(query_train_info(Origin, Dest, Date, Result),
      "Search for train tickets between two cities on a given date. Returns train number, times, stations, duration, seat class, remaining seats, price.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(origin, Origin, L1),
-    kv_line(destination, Dest, L2),
-    kv_line(depDate, Date, L3),
-    format(string(Kv), "~w\n~w\n~w", [L1, L2, L3]),
-    run_tool(BridgeDir, DbPath, BenchDir, query_train_info, Kv, Result).
+    run_tool(query_train_info, _{origin: Origin, destination: Dest, depDate: Date}, Result).
 
 tool(query_train_info_with_class(Origin, Dest, Date, SeatClass, Result),
      "Search for train tickets with a specific seat class. Options: First Class Seat, Second Class Seat, Business Seat.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(origin, Origin, L1),
-    kv_line(destination, Dest, L2),
-    kv_line(depDate, Date, L3),
-    kv_line(seatClassName, SeatClass, L4),
-    format(string(Kv), "~w\n~w\n~w\n~w", [L1, L2, L3, L4]),
-    run_tool(BridgeDir, DbPath, BenchDir, query_train_info, Kv, Result).
+    run_tool(query_train_info, _{origin: Origin, destination: Dest, depDate: Date, seatClassName: SeatClass}, Result).
 
 tool(query_flight_info(Origin, Dest, Date, Result),
      "Search for flights between two cities on a given date. Returns flight number, times, airports, duration, seat class, remaining seats, price, aircraft type.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(origin, Origin, L1),
-    kv_line(destination, Dest, L2),
-    kv_line(depDate, Date, L3),
-    format(string(Kv), "~w\n~w\n~w", [L1, L2, L3]),
-    run_tool(BridgeDir, DbPath, BenchDir, query_flight_info, Kv, Result).
+    run_tool(query_flight_info, _{origin: Origin, destination: Dest, depDate: Date}, Result).
 
 tool(query_flight_info_with_class(Origin, Dest, Date, SeatClass, Result),
      "Search for flights with a specific seat class. Options: Economy Class, Business Class, First Class.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(origin, Origin, L1),
-    kv_line(destination, Dest, L2),
-    kv_line(depDate, Date, L3),
-    kv_line(seatClassName, SeatClass, L4),
-    format(string(Kv), "~w\n~w\n~w\n~w", [L1, L2, L3, L4]),
-    run_tool(BridgeDir, DbPath, BenchDir, query_flight_info, Kv, Result).
+    run_tool(query_flight_info, _{origin: Origin, destination: Dest, depDate: Date, seatClassName: SeatClass}, Result).
 
 tool(query_hotel_info(Dest, CheckIn, CheckOut, Result),
      "Search for hotels in a city for given dates. Returns hotel name, price, rating, amenities.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(destination, Dest, L1),
-    kv_line(checkinDate, CheckIn, L2),
-    kv_line(checkoutDate, CheckOut, L3),
-    format(string(Kv), "~w\n~w\n~w", [L1, L2, L3]),
-    run_tool(BridgeDir, DbPath, BenchDir, query_hotel_info, Kv, Result).
+    run_tool(query_hotel_info, _{destination: Dest, checkinDate: CheckIn, checkoutDate: CheckOut}, Result).
 
 tool(query_hotel_info_with_star(Dest, CheckIn, CheckOut, Star, Result),
      "Search for hotels filtered by star rating (1-5).") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(destination, Dest, L1),
-    kv_line(checkinDate, CheckIn, L2),
-    kv_line(checkoutDate, CheckOut, L3),
-    kv_line(hotelStar, Star, L4),
-    format(string(Kv), "~w\n~w\n~w\n~w", [L1, L2, L3, L4]),
-    run_tool(BridgeDir, DbPath, BenchDir, query_hotel_info, Kv, Result).
+    run_tool(query_hotel_info, _{destination: Dest, checkinDate: CheckIn, checkoutDate: CheckOut, hotelStar: Star}, Result).
 
 tool(recommend_attractions(City, Result),
      "Search popular attractions in a city. All attraction info in the plan MUST come from this tool.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(city, City, Line),
-    run_tool(BridgeDir, DbPath, BenchDir, recommend_attractions, Line, Result).
+    run_tool(recommend_attractions, _{city: City}, Result).
 
 tool(recommend_attractions_by_type(City, Type, Result),
      "Search attractions filtered by type. Options: Historical and Cultural, Natural Scenery, Art Exhibition, City Landmark, Theme Park, Leisure Experience.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(city, City, L1),
-    kv_line(attraction_type, Type, L2),
-    format(string(Kv), "~w\n~w", [L1, L2]),
-    run_tool(BridgeDir, DbPath, BenchDir, recommend_attractions, Kv, Result).
+    run_tool(recommend_attractions, _{city: City, attraction_type: Type}, Result).
 
 tool(query_attraction_details(Name, Result),
      "Get detailed info about an attraction: coordinates, description, rating, hours, closing dates, visit duration, ticket price, type.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(attraction_name, Name, Line),
-    run_tool(BridgeDir, DbPath, BenchDir, query_attraction_details, Line, Result).
+    run_tool(query_attraction_details, _{attraction_name: Name}, Result).
 
 tool(search_location(Place, Result),
      "Get latitude/longitude coordinates for a place name. Names must exactly match tool results.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(place_name, Place, Line),
-    run_tool(BridgeDir, DbPath, BenchDir, search_location, Line, Result).
+    run_tool(search_location, _{place_name: Place}, Result).
 
 tool(query_road_route_info(OriginCoord, DestCoord, Result),
      "Calculate road route between two coordinates (lat,lng format). Returns distance, duration, cost. Walking <=2km (free), driving >2km. Cost per vehicle (4 passengers).") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(origin, OriginCoord, L1),
-    kv_line(destination, DestCoord, L2),
-    format(string(Kv), "~w\n~w", [L1, L2]),
-    run_tool(BridgeDir, DbPath, BenchDir, query_road_route_info, Kv, Result).
+    run_tool(query_road_route_info, _{origin: OriginCoord, destination: DestCoord}, Result).
 
 tool(recommend_restaurants(Lat, Lng, Result),
      "Find restaurants near given coordinates. Returns names, coordinates, price/person, rating, hours.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(latitude, Lat, L1),
-    kv_line(longitude, Lng, L2),
-    format(string(Kv), "~w\n~w", [L1, L2]),
-    run_tool(BridgeDir, DbPath, BenchDir, recommend_restaurants, Kv, Result).
+    run_tool(recommend_restaurants, _{latitude: Lat, longitude: Lng}, Result).
 
 tool(query_restaurant_details(Name, Result),
      "Get detailed info about a restaurant: coordinates, price/person, hours, rating.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(restaurant_name, Name, Line),
-    run_tool(BridgeDir, DbPath, BenchDir, query_restaurant_details, Line, Result).
+    run_tool(query_restaurant_details, _{restaurant_name: Name}, Result).
 
 parse_bridge_result(Raw, Result) :-
     get_dict(stdout, Raw, Stdout),

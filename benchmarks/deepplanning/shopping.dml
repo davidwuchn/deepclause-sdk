@@ -7,138 +7,80 @@
 %   bench_dir   - Path to Qwen-Agent benchmark/deepplanning directory
 %   python_path - Path to Python interpreter with rank_bm25 installed
 
-run_tool(BridgeDir, DbPath, BenchDir, ToolName, KvContent, Result) :-
+:- use_module(library(http/json)).
+
+run_tool(ToolName, ArgsDict, Result) :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    param(bench_dir, BenchDir),
     param(python_path, PythonPath),
     (var(PythonPath) -> PythonPath = 'python3' ; true),
-    (KvContent = '' ->
-        format(string(Cmd), "~w '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool ~w --kv-file /dev/null", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName])
-    ;
-        format(string(KvFile), "/tmp/dc_shop_~w.kv", [ToolName]),
-        exec(write_file(path: KvFile, content: KvContent), _),
-        format(string(Cmd), "~w '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool ~w --kv-file '~w'", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName, KvFile])
+    atom_json_dict(ArgsJson, ArgsDict, []),
+    format(string(ArgsFile), "/tmp/dc_shop_~w.json", [ToolName]),
+    setup_call_cleanup(
+        open(ArgsFile, write, Stream),
+        write(Stream, ArgsJson),
+        close(Stream)
     ),
+    format(string(Cmd), "~w '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool ~w --args-file '~w'", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName, ArgsFile]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
-kv_line(Key, Value, Line) :-
-    format(string(Line), "~w=~w", [Key, Value]).
-
 tool(search_products(Query, Result),
      "Search for products matching a natural language query. Returns matching product_ids.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(query, Query, Line),
-    run_tool(BridgeDir, DbPath, BenchDir, search_products, Line, Result).
+    run_tool(search_products, _{query: Query}, Result).
 
 tool(search_products_limited(Query, Limit, Result),
      "Search for products with a result limit.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(query, Query, L1),
-    kv_line(limit, Limit, L2),
-    format(string(Kv), "~w\n~w", [L1, L2]),
-    run_tool(BridgeDir, DbPath, BenchDir, search_products, Kv, Result).
+    run_tool(search_products, _{query: Query, limit: Limit}, Result).
 
 tool(filter_by_brand(BrandNames, Result),
      "Filter products by brand names (OR logic). BrandNames is a JSON array like [\"Nike\",\"Adidas\"].") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(brand_names, BrandNames, Line),
-    run_tool(BridgeDir, DbPath, BenchDir, filter_by_brand, Line, Result).
+    run_tool(filter_by_brand, _{brand_names: BrandNames}, Result).
 
 tool(filter_by_color(Colors, Result),
      "Filter products by colors (OR logic). Colors is a JSON array like [\"White\",\"Black\"].") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(colors, Colors, Line),
-    run_tool(BridgeDir, DbPath, BenchDir, filter_by_color, Line, Result).
+    run_tool(filter_by_color, _{colors: Colors}, Result).
 
 tool(filter_by_size(Sizes, Result),
      "Filter products by sizes (OR logic). Sizes is a JSON array like [\"M\",\"L\"].") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(sizes, Sizes, Line),
-    run_tool(BridgeDir, DbPath, BenchDir, filter_by_size, Line, Result).
+    run_tool(filter_by_size, _{sizes: Sizes}, Result).
 
 tool(filter_by_range(ConditionKey, Operator, Value, Result),
      "Filter by numerical feature. ConditionKey: price, stock_quantity, sales_volume.monthly, sales_volume.total, rating.average_score, rating.total_reviews. Operator: >, >=, <, <=, ==.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(condition_key, ConditionKey, L1),
-    kv_line(operator, Operator, L2),
-    kv_line(value, Value, L3),
-    format(string(Kv), "~w\n~w\n~w", [L1, L2, L3]),
-    run_tool(BridgeDir, DbPath, BenchDir, filter_by_range, Kv, Result).
+    run_tool(filter_by_range, _{condition_key: ConditionKey, operator: Operator, value: Value}, Result).
 
 tool(sort_products(Dimension, Order, Result),
      "Sort products. Dimension: price, stock_quantity, sales_volume.monthly, etc. Order: asc or desc.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(dimension, Dimension, L1),
-    kv_line(order, Order, L2),
-    format(string(Kv), "~w\n~w", [L1, L2]),
-    run_tool(BridgeDir, DbPath, BenchDir, sort_products, Kv, Result).
+    run_tool(sort_products, _{dimension: Dimension, order: Order}, Result).
 
-tool(get_product_details(ProductId, Result),
-     "Get full details for specific products by product_ids (accepts one or more product IDs).") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(product_ids, ProductId, Line),
-    run_tool(BridgeDir, DbPath, BenchDir, get_product_details, Line, Result).
+tool(get_product_details(ProductIds, Result),
+     "Get full details for specific products by product_ids. ProductIds should be a list like [\"id1\",\"id2\"].") :-
+    run_tool(get_product_details, _{product_ids: ProductIds}, Result).
 
 tool(get_user_info(Result),
      "Get user profile: address, sizes, and available coupons.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    run_tool(BridgeDir, DbPath, BenchDir, get_user_info, '', Result).
+    run_tool(get_user_info, _{}, Result).
 
 tool(add_product_to_cart(ProductId, Result),
      "Add one unit of a product to the shopping cart. Validates stock.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(product_id, ProductId, Line),
-    run_tool(BridgeDir, DbPath, BenchDir, add_product_to_cart, Line, Result).
+    run_tool(add_product_to_cart, _{product_id: ProductId}, Result).
 
 tool(delete_product_from_cart(ProductId, Result),
      "Remove a product from the cart.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(product_id, ProductId, Line),
-    run_tool(BridgeDir, DbPath, BenchDir, delete_product_from_cart, Line, Result).
+    run_tool(delete_product_from_cart, _{product_id: ProductId}, Result).
 
 tool(get_cart_info(Result),
      "Get current cart contents: items list and summary (total items, total price).") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    run_tool(BridgeDir, DbPath, BenchDir, get_cart_info, '', Result).
+    run_tool(get_cart_info, _{}, Result).
 
 tool(add_coupon_to_cart(CouponName, Result),
      "Apply a coupon to the cart. Validates ownership and threshold.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(coupon_name, CouponName, Line),
-    run_tool(BridgeDir, DbPath, BenchDir, add_coupon_to_cart, Line, Result).
+    run_tool(add_coupon_to_cart, _{coupon_name: CouponName}, Result).
 
 tool(delete_coupon_from_cart(CouponName, Result),
      "Remove a coupon from the cart.") :-
-    param(db_path, DbPath),
-    param(bridge_dir, BridgeDir),
-    param(bench_dir, BenchDir),
-    kv_line(coupon_name, CouponName, Line),
-    run_tool(BridgeDir, DbPath, BenchDir, delete_coupon_from_cart, Line, Result).
+    run_tool(delete_coupon_from_cart, _{coupon_name: CouponName}, Result).
 
 parse_bridge_result(Raw, Result) :-
     get_dict(stdout, Raw, Stdout),
