@@ -16,7 +16,7 @@ run_tool(ToolName, ArgsDict, Result) :-
     param(python_path, PythonPath),
     (var(PythonPath) -> PythonPath = 'python3' ; true),
     atom_json_dict(ArgsJson, ArgsDict, []),
-    format(string(ArgsFile), "/tmp/dc_travel_~w.json", [ToolName]),
+    format(string(ArgsFile), "~w/.dc_bridge_~w.json", [DbPath, ToolName]),
     setup_call_cleanup(
         open(ArgsFile, write, Stream),
         write(Stream, ArgsJson),
