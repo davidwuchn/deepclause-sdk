@@ -88,9 +88,9 @@ async function setupDeepClauseWorkspace(agentHome, spec) {
   logProgress(`Running deepclause init in ${agentHome}`);
   try {
     await runStep(null, null, 'deepclause_init', [
-      'deepclause', 'init',
+      'deepclause', 'init', '--force',
       '--model', spec.models?.run ?? 'openai:gpt-4o',
-  ], {
+    ], {
     cwd: agentHome,
     timeoutSeconds: 30,
   });
