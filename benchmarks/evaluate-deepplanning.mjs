@@ -218,9 +218,9 @@ async function evaluateTravel(benchDir, instancesDir, instanceDirs, evalDir) {
 
   try {
     const evalScript = [
-      'import sys; sys.path.insert(0, sys.argv[1]);',
+      'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]);',
       'from travelplanning.evaluation.eval_converted import evaluate_plans;',
-      'evaluate_plans(result_dir=sys.argv[2], test_data_path=sys.argv[3], database_dir=sys.argv[4], workers=1)',
+      'evaluate_plans(result_dir=Path(sys.argv[2]), test_data_path=Path(sys.argv[3]), database_dir=Path(sys.argv[4]), workers=1)',
     ].join(' ');
     await runCommand('python3', [
       '-c', evalScript,
