@@ -5,12 +5,14 @@
 % Required params:
 %   db_path     - Per-task database directory
 %   bridge_dir  - Directory containing python-bridge.py
+%   bench_dir   - Path to Qwen-Agent benchmark/deepplanning directory
 
 tool(search_products(Query, Result),
      "Search for products matching a natural language query. Returns matching product_ids.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool search_products --args '{\"query\":\"~w\"}'", [BridgeDir, DbPath, Query]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool search_products --args '{\"query\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, Query]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -18,7 +20,8 @@ tool(search_products_limited(Query, Limit, Result),
      "Search for products with a result limit.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool search_products --args '{\"query\":\"~w\",\"limit\":~w}'", [BridgeDir, DbPath, Query, Limit]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool search_products --args '{\"query\":\"~w\",\"limit\":~w}'", [BridgeDir, DbPath, BenchDir, Query, Limit]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -26,7 +29,8 @@ tool(filter_by_brand(BrandNames, Result),
      "Filter products by brand names (OR logic). BrandNames is a JSON array like [\"Nike\",\"Adidas\"].") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool filter_by_brand --args '{\"brand_names\":~w}'", [BridgeDir, DbPath, BrandNames]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool filter_by_brand --args '{\"brand_names\":~w}'", [BridgeDir, DbPath, BenchDir, BrandNames]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -34,7 +38,8 @@ tool(filter_by_color(Colors, Result),
      "Filter products by colors (OR logic). Colors is a JSON array like [\"White\",\"Black\"].") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool filter_by_color --args '{\"colors\":~w}'", [BridgeDir, DbPath, Colors]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool filter_by_color --args '{\"colors\":~w}'", [BridgeDir, DbPath, BenchDir, Colors]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -42,7 +47,8 @@ tool(filter_by_size(Sizes, Result),
      "Filter products by sizes (OR logic). Sizes is a JSON array like [\"M\",\"L\"].") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool filter_by_size --args '{\"sizes\":~w}'", [BridgeDir, DbPath, Sizes]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool filter_by_size --args '{\"sizes\":~w}'", [BridgeDir, DbPath, BenchDir, Sizes]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -50,7 +56,8 @@ tool(filter_by_range(ConditionKey, Operator, Value, Result),
      "Filter by numerical feature. ConditionKey: price, stock_quantity, sales_volume.monthly, sales_volume.total, rating.average_score, rating.total_reviews. Operator: >, >=, <, <=, ==.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool filter_by_range --args '{\"condition_key\":\"~w\",\"operator\":\"~w\",\"value\":~w}'", [BridgeDir, DbPath, ConditionKey, Operator, Value]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool filter_by_range --args '{\"condition_key\":\"~w\",\"operator\":\"~w\",\"value\":~w}'", [BridgeDir, DbPath, BenchDir, ConditionKey, Operator, Value]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -58,7 +65,8 @@ tool(sort_products(Dimension, Order, Result),
      "Sort products. Dimension: price, stock_quantity, sales_volume.monthly, etc. Order: asc or desc.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool sort_products --args '{\"dimension\":\"~w\",\"order\":\"~w\"}'", [BridgeDir, DbPath, Dimension, Order]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool sort_products --args '{\"dimension\":\"~w\",\"order\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, Dimension, Order]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -66,7 +74,8 @@ tool(get_product_details(ProductId, Result),
      "Get full details for a specific product by product_id.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool get_product_details --args '{\"product_id\":\"~w\"}'", [BridgeDir, DbPath, ProductId]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool get_product_details --args '{\"product_id\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, ProductId]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -74,7 +83,8 @@ tool(get_user_info(Result),
      "Get user profile: address, sizes, and available coupons.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool get_user_info --args '{}'", [BridgeDir, DbPath]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool get_user_info --args '{}'", [BridgeDir, DbPath, BenchDir]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -82,7 +92,8 @@ tool(add_product_to_cart(ProductId, Result),
      "Add one unit of a product to the shopping cart. Validates stock.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool add_product_to_cart --args '{\"product_id\":\"~w\"}'", [BridgeDir, DbPath, ProductId]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool add_product_to_cart --args '{\"product_id\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, ProductId]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -90,7 +101,8 @@ tool(delete_product_from_cart(ProductId, Result),
      "Remove a product from the cart.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool delete_product_from_cart --args '{\"product_id\":\"~w\"}'", [BridgeDir, DbPath, ProductId]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool delete_product_from_cart --args '{\"product_id\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, ProductId]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -98,7 +110,8 @@ tool(get_cart_info(Result),
      "Get current cart contents: items list and summary (total items, total price).") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool get_cart_info --args '{}'", [BridgeDir, DbPath]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool get_cart_info --args '{}'", [BridgeDir, DbPath, BenchDir]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -106,7 +119,8 @@ tool(add_coupon_to_cart(CouponName, Result),
      "Apply a coupon to the cart. Validates ownership and threshold.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool add_coupon_to_cart --args '{\"coupon_name\":\"~w\"}'", [BridgeDir, DbPath, CouponName]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool add_coupon_to_cart --args '{\"coupon_name\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, CouponName]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -114,7 +128,8 @@ tool(delete_coupon_from_cart(CouponName, Result),
      "Remove a coupon from the cart.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --tool delete_coupon_from_cart --args '{\"coupon_name\":\"~w\"}'", [BridgeDir, DbPath, CouponName]),
+    param(bench_dir, BenchDir),
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool delete_coupon_from_cart --args '{\"coupon_name\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, CouponName]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 

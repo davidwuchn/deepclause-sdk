@@ -49,6 +49,7 @@ async function main() {
       'deepclause', 'run', '--verbose', '--stream',
       '--param', `db_path=${spec.dbPath}`,
       '--param', `bridge_dir=${bridgeDir}`,
+      '--param', `bench_dir=${spec.benchDir}`,
     ];
     const runModel = spec.models?.run;
     if (runModel) {
