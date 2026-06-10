@@ -151,7 +151,7 @@ async function loadTasks(benchDir, config, domain) {
         continue;
       }
       for (const entry of entries) {
-        const caseDir = path.join(benchDir, 'shoppingplanning', 'database', `case_${entry.case_id ?? entry.id ?? tasks.length}`);
+        const caseDir = path.join(benchDir, 'shoppingplanning', 'database', `level_${level}`, `case_${entry.case_id ?? entry.id ?? tasks.length}`);
         tasks.push({
           taskId: entry.case_id ?? entry.id ?? `shopping-l${level}-${tasks.length}`,
           domain: 'shopping',

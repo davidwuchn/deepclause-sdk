@@ -90,49 +90,45 @@ cmd_setup() {
   echo ""
   echo "Downloading databases from HuggingFace ..."
   local shop_db_dir="$bench_dir/shoppingplanning/database"
-  local shop_zip_dir="$bench_dir/shoppingplanning/database_zip"
   local travel_db_dir="$bench_dir/travelplanning/database"
 
-  if [[ -d "$shop_db_dir" && -f "$shop_db_dir/case_0/products.jsonl" ]]; then
+  if [[ -d "$shop_db_dir/level_1" && -f "$shop_db_dir/level_1/case_1/products.jsonl" ]]; then
     echo "Shopping databases already extracted."
   else
-    mkdir -p "$shop_zip_dir"
+    mkdir -p "$bench_dir/.tmp_download"
     for level in 1 2 3; do
-      local archive="$shop_zip_dir/database_level${level}.tar.gz"
+      echo "  Downloading shopping level $level ..."
+      python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download('Qwen/DeepPlanning', 'database_level${level}.tar.gz', repo_type='dataset', local_dir='$bench_dir/.tmp_download')" 2>/dev/null
+      local archive="$bench_dir/.tmp_download/database_level${level}.tar.gz"
       if [[ -f "$archive" ]]; then
         echo "  Extracting shopping level $level ..."
-        tar -xzf "$archive" -C "$bench_dir/shoppingplanning"
+        tar -xzf "$archive" -C "$bench_dir/.tmp_download"
+        mkdir -p "$shop_db_dir/level_${level}"
+        cp -r "$bench_dir/.tmp_download/database_level${level}"/* "$shop_db_dir/level_${level}/"
       else
-        echo "  Downloading shopping level $level ..."
-        python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download('Qwen/DeepPlanning', 'shoppingplanning/database_zip/database_level${level}.tar.gz', repo_type='dataset', local_dir='$bench_dir')" 2>/dev/null
-        if [[ -f "$archive" ]]; then
-          tar -xzf "$archive" -C "$bench_dir/shoppingplanning"
-        else
-          echo "  WARNING: Could not download shopping level $level. Download manually from https://huggingface.co/datasets/Qwen/DeepPlanning"
-        fi
+        echo "  WARNING: Could not download shopping level $level. Download manually from https://huggingface.co/datasets/Qwen/DeepPlanning"
       fi
     done
+    rm -rf "$bench_dir/.tmp_download"
   fi
 
   if [[ -d "$travel_db_dir/database_en" ]]; then
     echo "Travel databases already extracted."
   else
+    mkdir -p "$bench_dir/.tmp_download"
     for lang in en zh; do
-      local zipname="database_${lang}.zip"
-      local zipfile="$travel_db_dir/$zipname"
+      echo "  Downloading travel $lang database ..."
+      python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download('Qwen/DeepPlanning', 'database_${lang}.zip', repo_type='dataset', local_dir='$bench_dir/.tmp_download')" 2>/dev/null
+      local zipfile="$bench_dir/.tmp_download/database_${lang}.zip"
       if [[ -f "$zipfile" ]]; then
         echo "  Extracting travel $lang database ..."
+        mkdir -p "$travel_db_dir"
         unzip -o -q "$zipfile" -d "$travel_db_dir"
       else
-        echo "  Downloading travel $lang database ..."
-        python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download('Qwen/DeepPlanning', 'travelplanning/database/${zipname}', repo_type='dataset', local_dir='$bench_dir')" 2>/dev/null
-        if [[ -f "$zipfile" ]]; then
-          unzip -o -q "$zipfile" -d "$travel_db_dir"
-        else
-          echo "  WARNING: Could not download travel $lang database. Download manually from https://huggingface.co/datasets/Qwen/DeepPlanning"
-        fi
+        echo "  WARNING: Could not download travel $lang database. Download manually from https://huggingface.co/datasets/Qwen/DeepPlanning"
       fi
     done
+    rm -rf "$bench_dir/.tmp_download"
   fi
 
   echo ""
