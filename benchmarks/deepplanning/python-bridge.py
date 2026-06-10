@@ -111,6 +111,7 @@ def _get_tool_registry(bench_dir, domain):
         raise FileNotFoundError(f'Tools directory not found: {tools_dir}')
 
     sys.path.insert(0, bench_dir)
+    sys.path.insert(0, tools_dir)
     if domain == 'shopping':
         import shoppingplanning.tools as _pkg
         from shoppingplanning.tools.base_shopping_tool import TOOL_REGISTRY
