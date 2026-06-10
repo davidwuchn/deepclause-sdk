@@ -187,6 +187,15 @@ def main():
     if args.domain == 'travel':
         cfg['language'] = 'en'
 
+    products_file = os.path.join(args.db_path, 'products.jsonl')
+    if args.domain == 'shopping' and not os.path.exists(products_file):
+        print(f"[bridge] ERROR: products.jsonl not found at {products_file}", file=sys.stderr)
+        print(f"[bridge] db_path={args.db_path}", file=sys.stderr)
+        if os.path.isdir(args.db_path):
+            print(f"[bridge] dir contents: {os.listdir(args.db_path)}", file=sys.stderr)
+        else:
+            print(f"[bridge] db_path is NOT a directory", file=sys.stderr)
+
     tool_instance = tool_cls(cfg)
     result = tool_instance.call(tool_args)
     sys.stdout.write(result)
