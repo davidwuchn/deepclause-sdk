@@ -189,14 +189,38 @@ def main():
 
     products_file = os.path.join(args.db_path, 'products.jsonl')
     if args.domain == 'shopping' and not os.path.exists(products_file):
-        print(f"[bridge] ERROR: products.jsonl not found at {products_file}", file=sys.stderr)
-        print(f"[bridge] db_path={args.db_path}", file=sys.stderr)
+        print(json.dumps({'error': f'Database file not found: {products_file}', 'db_path': args.db_path}), file=sys.stderr)
         if os.path.isdir(args.db_path):
             print(f"[bridge] dir contents: {os.listdir(args.db_path)}", file=sys.stderr)
         else:
-            print(f"[bridge] db_path is NOT a directory", file=sys.stderr)
+            print(f"[bridge] db_path is NOT a directory: {args.db_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if BM25Okapi is None:
+        try:
+            from rank_bm25 import BM25Okapi as _BM25
+        except ImportError:
+            print(json.dumps({'error': 'rank_bm25 package is not installed. Run: pip install rank-bm25'}))
+            sys.exit(1)
 
     tool_instance = tool_cls(cfg)
+
+    if args.domain == 'shopping' and hasattr(tool_instance, 'bm25') and tool_instance.bm25 is None:
+        products_file = os.path.join(args.db_path, 'products.jsonl')
+        if not os.path.exists(products_file):
+            print(json.dumps({'error': f'Database file not found: {products_file}', 'db_path': args.db_path}))
+            sys.exit(1)
+        if os.path.getsize(products_file) == 0:
+            print(json.dumps({'error': f'Database file is empty: {products_file}'}))
+            sys.exit(1)
+        try:
+            from rank_bm25 import BM25Okapi as _check
+        except ImportError:
+            print(json.dumps({'error': 'rank_bm25 package is not installed. Run: pip install rank-bm25'}))
+            sys.exit(1)
+        print(json.dumps({'error': f'BM25 index failed to build. db_path={args.db_path}, products_file={products_file}, file_exists={os.path.exists(products_file)}, file_size={os.path.getsize(products_file) if os.path.exists(products_file) else 0}'}))
+        sys.exit(1)
+
     result = tool_instance.call(tool_args)
     sys.stdout.write(result)
 
