@@ -110,12 +110,14 @@ def _get_tool_registry(bench_dir, domain):
     if not os.path.isdir(tools_dir):
         raise FileNotFoundError(f'Tools directory not found: {tools_dir}')
 
-    sys.path.insert(0, tools_dir)
+    sys.path.insert(0, os.path.dirname(tools_dir))
     if domain == 'shopping':
-        from base_shopping_tool import TOOL_REGISTRY
+        import shoppingplanning.tools as _pkg
+        from shoppingplanning.tools.base_shopping_tool import TOOL_REGISTRY
         return TOOL_REGISTRY
     else:
-        from base_travel_tool import TOOL_REGISTRY
+        import travelplanning.tools as _pkg
+        from travelplanning.tools.base_travel_tool import TOOL_REGISTRY
         return TOOL_REGISTRY
 
 
