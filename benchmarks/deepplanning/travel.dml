@@ -10,9 +10,13 @@
 run_tool(BridgeDir, DbPath, BenchDir, ToolName, KvContent, Result) :-
     param(python_path, PythonPath),
     (var(PythonPath) -> PythonPath = 'python3' ; true),
-    format(string(KvFile), "/tmp/dc_travel_~w.kv", [ToolName]),
-    exec(write_file(path: KvFile, content: KvContent), _),
-    format(string(Cmd), "~w '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool ~w --kv-file '~w'", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName, KvFile]),
+    (KvContent = '' ->
+        format(string(Cmd), "~w '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool ~w --kv-file /dev/null", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName])
+    ;
+        format(string(KvFile), "/tmp/dc_travel_~w.kv", [ToolName]),
+        exec(write_file(path: KvFile, content: KvContent), _),
+        format(string(Cmd), "~w '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool ~w --kv-file '~w'", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName, KvFile])
+    ),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 

@@ -169,16 +169,17 @@ def main():
 
     if args.kv_file:
         tool_args = {}
-        with open(args.kv_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.rstrip('\n')
-                if not line or line.startswith('#'):
-                    continue
-                key, _, val = line.partition('=')
-                try:
-                    tool_args[key] = json.loads(val)
-                except (json.JSONDecodeError, ValueError):
-                    tool_args[key] = val
+        if os.path.exists(args.kv_file) and os.path.getsize(args.kv_file) > 0:
+            with open(args.kv_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if not line or line.startswith('#'):
+                        continue
+                    key, _, val = line.partition('=')
+                    try:
+                        tool_args[key] = json.loads(val)
+                    except (json.JSONDecodeError, ValueError):
+                        tool_args[key] = val
     elif args.kv:
         tool_args = {}
         for pair in args.kv:
