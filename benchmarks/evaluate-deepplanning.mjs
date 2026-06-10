@@ -189,6 +189,7 @@ async function evaluateTravel(benchDir, instancesDir, instanceDirs, evalDir) {
   }
 
   const convertScript = path.join(benchDir, 'travelplanning', 'evaluation', 'convert_report.py');
+  console.log(`[travel] Looking for convert script: ${convertScript} (exists: ${await fileExists(convertScript)})`);
   if (await fileExists(convertScript)) {
     console.log('[travel] Converting reports to structured JSON (requires LLM API access)...');
     try {

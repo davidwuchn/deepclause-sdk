@@ -174,7 +174,7 @@ async function loadTasks(benchDir, config, domain) {
     }
     for (const entry of entries) {
       const taskId = entry.id ?? entry.task_id ?? `travel-${tasks.length}`;
-      const dbDir = path.join(benchDir, 'travelplanning', 'database', `database_${lang}`, String(taskId));
+      const dbDir = path.join(benchDir, 'travelplanning', 'database', `database_${lang}`, `id_${taskId}`);
       tasks.push({
         taskId: `travel-${taskId}`,
         domain: 'travel',
