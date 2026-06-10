@@ -194,23 +194,13 @@ function buildCommandEnv(spec) {
 function extractAgentOutput(stdout, stderr) {
   if (!stdout) return '';
 
-  const planMatch = stdout.match(/<plan>[\s\S]*?<\/plan>/);
-  if (planMatch) {
-    return planMatch[0];
-  }
-
-  const jsonPlanMatch = stdout.match(/<plan>\\n[\s\S]*?<\\\/plan>/);
-  if (jsonPlanMatch) {
-    try {
-      return JSON.parse(`"${jsonPlanMatch[0].replace(/<\\\/plan>/, '</plan>')}"`);
-    } catch {}
-  }
-
-  const setResultMatch = stdout.match(/"value"\s*:\s*"((?:<plan>|[\s\S])*?(?:<\/plan>|$))"/);
-  if (setResultMatch) {
-    try {
-      return JSON.parse(`"${setResultMatch[1]}"`);
-    } catch {}
+  const allPlans = [...stdout.matchAll(/<plan>([\s\S]*?)<\/plan>/g)];
+  if (allPlans.length > 0) {
+    let best = allPlans[0];
+    for (const m of allPlans) {
+      if (m[1].trim().length > best[1].trim().length) best = m;
+    }
+    if (best[1].trim().length > 0) return best[0];
   }
 
   const lines = stdout.split('\n');
@@ -225,7 +215,8 @@ function extractAgentOutput(stdout, stderr) {
     }
   }
   if (answerLines.length > 0) {
-    return answerLines.join('\n').trim();
+    const answer = answerLines.join('\n').trim();
+    if (answer.length > 0) return answer;
   }
 
   return stdout.slice(-10000);
