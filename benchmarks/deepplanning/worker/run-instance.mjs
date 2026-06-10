@@ -119,6 +119,7 @@ async function setupDeepClauseWorkspace(agentHome, spec) {
     run: spec.temperatures?.run ?? config.temperatures?.run ?? 0.7,
     compile: spec.temperatures?.compile ?? config.temperatures?.compile ?? 0.4,
   };
+  config.shell = { wrapper: 'clean-room', strictIsolation: false };
   config.tools = {
     policy: {
       mode: 'whitelist',
