@@ -61,6 +61,9 @@ async function main() {
     logProgress(`Worker completed successfully in ${Date.now() - startedAt}ms`);
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
+    if (error instanceof Error && error.stderr) {
+      result.errorDetail = error.stderr.slice(-3000);
+    }
     logProgress(`Worker failed after ${Date.now() - startedAt}ms: ${result.error}`);
   } finally {
     await fs.writeFile(path.join(outputDir, 'result.json'), `${JSON.stringify(result, null, 2)}\n`, 'utf8');
