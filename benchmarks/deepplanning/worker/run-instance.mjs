@@ -42,7 +42,7 @@ async function main() {
 
     const request = buildRequest(spec);
     const env = buildCommandEnv(spec);
-    const bridgeDir = path.join(BENCHMARKS_ROOT, 'deepplanning');
+    const bridgeDir = BENCHMARKS_ROOT;
 
     logProgress(`Running ${spec.domain} task ${spec.taskId}`);
     const runArgs = [
@@ -183,7 +183,7 @@ function buildCommandEnv(spec) {
   if (spec.dbPath) {
     env.DEEPPLANNING_DB_PATH = spec.dbPath;
   }
-  env.DEEPPLANNING_BRIDGE_DIR = path.join(BENCHMARKS_ROOT, 'deepplanning');
+  env.DEEPPLANNING_BRIDGE_DIR = BENCHMARKS_ROOT;
   return env;
 }
 
