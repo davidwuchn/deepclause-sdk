@@ -16,12 +16,8 @@ run_tool(ToolName, ArgsDict, Result) :-
     param(python_path, PythonPath),
     (var(PythonPath) -> PythonPath = 'python3' ; true),
     atom_json_dict(ArgsJson, ArgsDict, []),
-    format(string(ArgsFile), "~w/.dc_bridge_~w.json", [DbPath, ToolName]),
-    setup_call_cleanup(
-        open(ArgsFile, write, Stream),
-        write(Stream, ArgsJson),
-        close(Stream)
-    ),
+    format(string(ArgsFile), ".dc_bridge_~w.json", [ToolName]),
+    exec(write_file(path: ArgsFile, content: ArgsJson), _),
     format(string(Cmd), "~w '~w/python-bridge.py' --domain shopping --db-path '~w' --bench-dir '~w' --tool ~w --args-file '~w'", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName, ArgsFile]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
