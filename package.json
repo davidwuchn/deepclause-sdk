@@ -35,7 +35,9 @@
     "compaction:probe": "tsx scripts/compaction-probe.ts",
     "benchmark:swebench": "node benchmarks/run-swebench-lite.mjs",
     "benchmark:swebench:prefetch": "node benchmarks/prefetch-swebench-lite.mjs",
-    "benchmark:swebench:evaluate": "node benchmarks/evaluate-predictions.mjs"
+    "benchmark:swebench:evaluate": "node benchmarks/evaluate-predictions.mjs",
+    "benchmark:deepplanning": "node benchmarks/run-deepplanning.mjs",
+    "benchmark:deepplanning:evaluate": "node benchmarks/evaluate-deepplanning.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.35",
