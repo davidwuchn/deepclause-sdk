@@ -146,10 +146,11 @@ def main():
     parser.add_argument('--bench-dir', default=None, help='Path to Qwen-Agent benchmark/deepplanning dir')
     parser.add_argument('--args', default=None, help='JSON-encoded tool arguments')
     parser.add_argument('--args-file', default=None, help='Path to file containing JSON-encoded tool arguments')
+    parser.add_argument('--args-stdin', action='store_true', help='Read JSON tool arguments from stdin')
     args = parser.parse_args()
 
-    if not args.args and not args.args_file:
-        print(json.dumps({'error': 'Either --args or --args-file is required'}))
+    if not args.args and not args.args_file and not args.args_stdin:
+        print(json.dumps({'error': 'One of --args, --args-file, or --args-stdin is required'}))
         sys.exit(1)
 
     bench_dir = args.bench_dir or _find_qwen_bench_dir()
@@ -166,6 +167,8 @@ def main():
     if args.args_file:
         with open(args.args_file, 'r', encoding='utf-8') as f:
             tool_args = json.load(f)
+    elif args.args_stdin:
+        tool_args = json.load(sys.stdin)
     else:
         tool_args = json.loads(args.args)
 

@@ -1,5 +1,4 @@
 % DeepPlanning Travel Planning skill
-% Evaluates long-horizon agentic planning with verifiable constraints.
 % Uses bash + python-bridge.py to call Qwen-Agent travel tools.
 %
 % Required params:
@@ -7,13 +6,8 @@
 %   bridge_dir  - Directory containing python-bridge.py
 %   bench_dir   - Path to Qwen-Agent benchmark/deepplanning directory
 
-bridge_cmd(BridgeDir, DbPath, BenchDir, ToolName, ArgsFile, Cmd) :-
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool ~w --args-file '~w'", [BridgeDir, DbPath, BenchDir, ToolName, ArgsFile]).
-
-write_and_run(BridgeDir, DbPath, BenchDir, ToolName, ArgsJson, Result) :-
-    format(string(ArgsFile), "/tmp/dc_travel_~w.json", [ToolName]),
-    exec(write_file(path: ArgsFile, content: ArgsJson), _),
-    bridge_cmd(BridgeDir, DbPath, BenchDir, ToolName, ArgsFile, Cmd),
+run_tool(BridgeDir, DbPath, BenchDir, ToolName, ArgsJson, Result) :-
+    format(string(Cmd), "echo '~w' | python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool ~w --args-stdin", [ArgsJson, BridgeDir, DbPath, BenchDir, ToolName]),
     exec(bash(command: Cmd), Raw),
     parse_bridge_result(Raw, Result).
 
@@ -23,7 +17,7 @@ tool(query_train_info(Origin, Dest, Date, Result),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
     format(string(ArgsJson), '{"origin":"~w","destination":"~w","depDate":"~w"}', [Origin, Dest, Date]),
-    write_and_run(BridgeDir, DbPath, BenchDir, query_train_info, ArgsJson, Result).
+    run_tool(BridgeDir, DbPath, BenchDir, query_train_info, ArgsJson, Result).
 
 tool(query_train_info_with_class(Origin, Dest, Date, SeatClass, Result),
      "Search for train tickets with a specific seat class. Options: First Class Seat, Second Class Seat, Business Seat.") :-
@@ -31,7 +25,7 @@ tool(query_train_info_with_class(Origin, Dest, Date, SeatClass, Result),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
     format(string(ArgsJson), '{"origin":"~w","destination":"~w","depDate":"~w","seatClassName":"~w"}', [Origin, Dest, Date, SeatClass]),
-    write_and_run(BridgeDir, DbPath, BenchDir, query_train_info, ArgsJson, Result).
+    run_tool(BridgeDir, DbPath, BenchDir, query_train_info, ArgsJson, Result).
 
 tool(query_flight_info(Origin, Dest, Date, Result),
      "Search for flights between two cities on a given date. Returns flight number, times, airports, duration, seat class, remaining seats, price, aircraft type.") :-
@@ -39,7 +33,7 @@ tool(query_flight_info(Origin, Dest, Date, Result),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
     format(string(ArgsJson), '{"origin":"~w","destination":"~w","depDate":"~w"}', [Origin, Dest, Date]),
-    write_and_run(BridgeDir, DbPath, BenchDir, query_flight_info, ArgsJson, Result).
+    run_tool(BridgeDir, DbPath, BenchDir, query_flight_info, ArgsJson, Result).
 
 tool(query_flight_info_with_class(Origin, Dest, Date, SeatClass, Result),
      "Search for flights with a specific seat class. Options: Economy Class, Business Class, First Class.") :-
@@ -47,7 +41,7 @@ tool(query_flight_info_with_class(Origin, Dest, Date, SeatClass, Result),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
     format(string(ArgsJson), '{"origin":"~w","destination":"~w","depDate":"~w","seatClassName":"~w"}', [Origin, Dest, Date, SeatClass]),
-    write_and_run(BridgeDir, DbPath, BenchDir, query_flight_info, ArgsJson, Result).
+    run_tool(BridgeDir, DbPath, BenchDir, query_flight_info, ArgsJson, Result).
 
 tool(query_hotel_info(Dest, CheckIn, CheckOut, Result),
      "Search for hotels in a city for given dates. Returns hotel name, price, rating, amenities.") :-
@@ -55,7 +49,7 @@ tool(query_hotel_info(Dest, CheckIn, CheckOut, Result),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
     format(string(ArgsJson), '{"destination":"~w","checkinDate":"~w","checkoutDate":"~w"}', [Dest, CheckIn, CheckOut]),
-    write_and_run(BridgeDir, DbPath, BenchDir, query_hotel_info, ArgsJson, Result).
+    run_tool(BridgeDir, DbPath, BenchDir, query_hotel_info, ArgsJson, Result).
 
 tool(query_hotel_info_with_star(Dest, CheckIn, CheckOut, Star, Result),
      "Search for hotels filtered by star rating (1-5).") :-
@@ -63,7 +57,7 @@ tool(query_hotel_info_with_star(Dest, CheckIn, CheckOut, Star, Result),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
     format(string(ArgsJson), '{"destination":"~w","checkinDate":"~w","checkoutDate":"~w","hotelStar":"~w"}', [Dest, CheckIn, CheckOut, Star]),
-    write_and_run(BridgeDir, DbPath, BenchDir, query_hotel_info, ArgsJson, Result).
+    run_tool(BridgeDir, DbPath, BenchDir, query_hotel_info, ArgsJson, Result).
 
 tool(recommend_attractions(City, Result),
      "Search popular attractions in a city. All attraction info in the plan MUST come from this tool.") :-
@@ -71,7 +65,7 @@ tool(recommend_attractions(City, Result),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
     format(string(ArgsJson), '{"city":"~w"}', [City]),
-    write_and_run(BridgeDir, DbPath, BenchDir, recommend_attractions, ArgsJson, Result).
+    run_tool(BridgeDir, DbPath, BenchDir, recommend_attractions, ArgsJson, Result).
 
 tool(recommend_attractions_by_type(City, Type, Result),
      "Search attractions filtered by type. Options: Historical and Cultural, Natural Scenery, Art Exhibition, City Landmark, Theme Park, Leisure Experience.") :-
@@ -79,7 +73,7 @@ tool(recommend_attractions_by_type(City, Type, Result),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
     format(string(ArgsJson), '{"city":"~w","attraction_type":"~w"}', [City, Type]),
-    write_and_run(BridgeDir, DbPath, BenchDir, recommend_attractions, ArgsJson, Result).
+    run_tool(BridgeDir, DbPath, BenchDir, recommend_attractions, ArgsJson, Result).
 
 tool(query_attraction_details(Name, Result),
      "Get detailed info about an attraction: coordinates, description, rating, hours, closing dates, visit duration, ticket price, type.") :-
@@ -87,7 +81,7 @@ tool(query_attraction_details(Name, Result),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
     format(string(ArgsJson), '{"attraction_name":"~w"}', [Name]),
-    write_and_run(BridgeDir, DbPath, BenchDir, query_attraction_details, ArgsJson, Result).
+    run_tool(BridgeDir, DbPath, BenchDir, query_attraction_details, ArgsJson, Result).
 
 tool(search_location(Place, Result),
      "Get latitude/longitude coordinates for a place name. Names must exactly match tool results.") :-
@@ -95,7 +89,7 @@ tool(search_location(Place, Result),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
     format(string(ArgsJson), '{"place_name":"~w"}', [Place]),
-    write_and_run(BridgeDir, DbPath, BenchDir, search_location, ArgsJson, Result).
+    run_tool(BridgeDir, DbPath, BenchDir, search_location, ArgsJson, Result).
 
 tool(query_road_route_info(OriginCoord, DestCoord, Result),
      "Calculate road route between two coordinates (lat,lng format). Returns distance, duration, cost. Walking <=2km (free), driving >2km. Cost per vehicle (4 passengers).") :-
@@ -103,7 +97,7 @@ tool(query_road_route_info(OriginCoord, DestCoord, Result),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
     format(string(ArgsJson), '{"origin":"~w","destination":"~w"}', [OriginCoord, DestCoord]),
-    write_and_run(BridgeDir, DbPath, BenchDir, query_road_route_info, ArgsJson, Result).
+    run_tool(BridgeDir, DbPath, BenchDir, query_road_route_info, ArgsJson, Result).
 
 tool(recommend_restaurants(Lat, Lng, Result),
      "Find restaurants near given coordinates. Returns names, coordinates, price/person, rating, hours.") :-
@@ -111,7 +105,7 @@ tool(recommend_restaurants(Lat, Lng, Result),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
     format(string(ArgsJson), '{"latitude":"~w","longitude":"~w"}', [Lat, Lng]),
-    write_and_run(BridgeDir, DbPath, BenchDir, recommend_restaurants, ArgsJson, Result).
+    run_tool(BridgeDir, DbPath, BenchDir, recommend_restaurants, ArgsJson, Result).
 
 tool(query_restaurant_details(Name, Result),
      "Get detailed info about a restaurant: coordinates, price/person, hours, rating.") :-
@@ -119,7 +113,7 @@ tool(query_restaurant_details(Name, Result),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
     format(string(ArgsJson), '{"restaurant_name":"~w"}', [Name]),
-    write_and_run(BridgeDir, DbPath, BenchDir, query_restaurant_details, ArgsJson, Result).
+    run_tool(BridgeDir, DbPath, BenchDir, query_restaurant_details, ArgsJson, Result).
 
 parse_bridge_result(Raw, Result) :-
     get_dict(stdout, Raw, Stdout),
