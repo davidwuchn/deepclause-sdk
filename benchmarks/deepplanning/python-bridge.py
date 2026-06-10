@@ -153,12 +153,19 @@ def main():
         val = tool_args[key]
         if isinstance(val, str):
             try:
-                if '.' in val:
-                    tool_args[key] = float(val)
-                else:
-                    tool_args[key] = int(val)
-            except (ValueError, TypeError):
-                pass
+                parsed = json.loads(val)
+                if isinstance(parsed, (list, dict)):
+                    tool_args[key] = parsed
+                elif isinstance(parsed, (int, float)):
+                    tool_args[key] = parsed
+            except (json.JSONDecodeError, ValueError):
+                try:
+                    if '.' in val:
+                        tool_args[key] = float(val)
+                    else:
+                        tool_args[key] = int(val)
+                except (ValueError, TypeError):
+                    pass
 
     bench_dir = args.bench_dir or _find_qwen_bench_dir()
     if not bench_dir:
