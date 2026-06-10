@@ -149,6 +149,17 @@ def main():
     else:
         tool_args = json.loads(args.args)
 
+    for key in list(tool_args.keys()):
+        val = tool_args[key]
+        if isinstance(val, str):
+            try:
+                if '.' in val:
+                    tool_args[key] = float(val)
+                else:
+                    tool_args[key] = int(val)
+            except (ValueError, TypeError):
+                pass
+
     bench_dir = args.bench_dir or _find_qwen_bench_dir()
     if not bench_dir:
         print(json.dumps({'error': 'Cannot find Qwen-Agent benchmark directory. Set QWEN_AGENT_BENCH_DIR or clone Qwen-Agent repo.'}))
