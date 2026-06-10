@@ -144,8 +144,13 @@ def main():
     parser.add_argument('--db-path', required=True, help='Per-task database directory')
     parser.add_argument('--tool', required=True, help='Tool name to invoke')
     parser.add_argument('--bench-dir', default=None, help='Path to Qwen-Agent benchmark/deepplanning dir')
-    parser.add_argument('--args', required=True, help='JSON-encoded tool arguments')
+    parser.add_argument('--args', default=None, help='JSON-encoded tool arguments')
+    parser.add_argument('--args-file', default=None, help='Path to file containing JSON-encoded tool arguments')
     args = parser.parse_args()
+
+    if not args.args and not args.args_file:
+        print(json.dumps({'error': 'Either --args or --args-file is required'}))
+        sys.exit(1)
 
     bench_dir = args.bench_dir or _find_qwen_bench_dir()
     if not bench_dir:
@@ -158,19 +163,18 @@ def main():
         print(json.dumps({'error': f'Tool not found: {args.tool}. Available: {list(registry.keys())}'}))
         sys.exit(1)
 
+    if args.args_file:
+        with open(args.args_file, 'r', encoding='utf-8') as f:
+            tool_args = json.load(f)
+    else:
+        tool_args = json.loads(args.args)
+
     tool_cls = registry[args.tool]
     cfg = {'database_path': args.db_path, 'load_schema': True}
     if args.domain == 'travel':
         cfg['language'] = 'en'
 
-    db_file = os.path.join(args.db_path, 'products.jsonl')
-    if not os.path.exists(db_file):
-        print(f"[bridge] WARNING: database file not found: {db_file}", file=sys.stderr)
-        print(f"[bridge] db_path={args.db_path}", file=sys.stderr)
-        print(f"[bridge] contents of db_path: {os.listdir(args.db_path) if os.path.isdir(args.db_path) else 'NOT A DIR'}", file=sys.stderr)
-
     tool_instance = tool_cls(cfg)
-    tool_args = json.loads(args.args)
     result = tool_instance.call(tool_args)
     sys.stdout.write(result)
 

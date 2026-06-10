@@ -82,10 +82,59 @@ cmd_setup() {
 
   echo ""
   echo "Installing Python dependencies ..."
-  pip3 install --quiet pandas rank-bm25 2>/dev/null || pip install --quiet pandas rank-bm25
+  pip3 install --quiet pandas rank-bm25 huggingface_hub 2>/dev/null || pip install --quiet pandas rank-bm25 huggingface_hub
   echo "Done."
 
   bench_dir=$(resolve_bench_dir)
+
+  echo ""
+  echo "Downloading databases from HuggingFace ..."
+  local shop_db_dir="$bench_dir/shoppingplanning/database"
+  local shop_zip_dir="$bench_dir/shoppingplanning/database_zip"
+  local travel_db_dir="$bench_dir/travelplanning/database"
+
+  if [[ -d "$shop_db_dir" && -f "$shop_db_dir/case_0/products.jsonl" ]]; then
+    echo "Shopping databases already extracted."
+  else
+    mkdir -p "$shop_zip_dir"
+    for level in 1 2 3; do
+      local archive="$shop_zip_dir/database_level${level}.tar.gz"
+      if [[ -f "$archive" ]]; then
+        echo "  Extracting shopping level $level ..."
+        tar -xzf "$archive" -C "$bench_dir/shoppingplanning"
+      else
+        echo "  Downloading shopping level $level ..."
+        python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download('Qwen/DeepPlanning', 'shoppingplanning/database_zip/database_level${level}.tar.gz', repo_type='dataset', local_dir='$bench_dir')" 2>/dev/null
+        if [[ -f "$archive" ]]; then
+          tar -xzf "$archive" -C "$bench_dir/shoppingplanning"
+        else
+          echo "  WARNING: Could not download shopping level $level. Download manually from https://huggingface.co/datasets/Qwen/DeepPlanning"
+        fi
+      fi
+    done
+  fi
+
+  if [[ -d "$travel_db_dir/database_en" ]]; then
+    echo "Travel databases already extracted."
+  else
+    for lang in en zh; do
+      local zipname="database_${lang}.zip"
+      local zipfile="$travel_db_dir/$zipname"
+      if [[ -f "$zipfile" ]]; then
+        echo "  Extracting travel $lang database ..."
+        unzip -o -q "$zipfile" -d "$travel_db_dir"
+      else
+        echo "  Downloading travel $lang database ..."
+        python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download('Qwen/DeepPlanning', 'travelplanning/database/${zipname}', repo_type='dataset', local_dir='$bench_dir')" 2>/dev/null
+        if [[ -f "$zipfile" ]]; then
+          unzip -o -q "$zipfile" -d "$travel_db_dir"
+        else
+          echo "  WARNING: Could not download travel $lang database. Download manually from https://huggingface.co/datasets/Qwen/DeepPlanning"
+        fi
+      fi
+    done
+  fi
+
   echo ""
   echo "Setup complete. Benchmark directory: $bench_dir"
 }

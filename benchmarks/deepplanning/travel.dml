@@ -7,122 +7,119 @@
 %   bridge_dir  - Directory containing python-bridge.py
 %   bench_dir   - Path to Qwen-Agent benchmark/deepplanning directory
 
+bridge_cmd(BridgeDir, DbPath, BenchDir, ToolName, ArgsFile, Cmd) :-
+    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool ~w --args-file '~w'", [BridgeDir, DbPath, BenchDir, ToolName, ArgsFile]).
+
+write_and_run(BridgeDir, DbPath, BenchDir, ToolName, ArgsJson, Result) :-
+    format(string(ArgsFile), "/tmp/dc_travel_~w.json", [ToolName]),
+    exec(write_file(path: ArgsFile, content: ArgsJson), _),
+    bridge_cmd(BridgeDir, DbPath, BenchDir, ToolName, ArgsFile, Cmd),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
 tool(query_train_info(Origin, Dest, Date, Result),
      "Search for train tickets between two cities on a given date. Returns train number, times, stations, duration, seat class, remaining seats, price.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool query_train_info --args '{\"origin\":\"~w\",\"destination\":\"~w\",\"depDate\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, Origin, Dest, Date]),
-    exec(bash(command: Cmd), Raw),
-    parse_bridge_result(Raw, Result).
+    format(string(ArgsJson), '{"origin":"~w","destination":"~w","depDate":"~w"}', [Origin, Dest, Date]),
+    write_and_run(BridgeDir, DbPath, BenchDir, query_train_info, ArgsJson, Result).
 
 tool(query_train_info_with_class(Origin, Dest, Date, SeatClass, Result),
      "Search for train tickets with a specific seat class. Options: First Class Seat, Second Class Seat, Business Seat.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool query_train_info --args '{\"origin\":\"~w\",\"destination\":\"~w\",\"depDate\":\"~w\",\"seatClassName\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, Origin, Dest, Date, SeatClass]),
-    exec(bash(command: Cmd), Raw),
-    parse_bridge_result(Raw, Result).
+    format(string(ArgsJson), '{"origin":"~w","destination":"~w","depDate":"~w","seatClassName":"~w"}', [Origin, Dest, Date, SeatClass]),
+    write_and_run(BridgeDir, DbPath, BenchDir, query_train_info, ArgsJson, Result).
 
 tool(query_flight_info(Origin, Dest, Date, Result),
      "Search for flights between two cities on a given date. Returns flight number, times, airports, duration, seat class, remaining seats, price, aircraft type.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool query_flight_info --args '{\"origin\":\"~w\",\"destination\":\"~w\",\"depDate\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, Origin, Dest, Date]),
-    exec(bash(command: Cmd), Raw),
-    parse_bridge_result(Raw, Result).
+    format(string(ArgsJson), '{"origin":"~w","destination":"~w","depDate":"~w"}', [Origin, Dest, Date]),
+    write_and_run(BridgeDir, DbPath, BenchDir, query_flight_info, ArgsJson, Result).
 
 tool(query_flight_info_with_class(Origin, Dest, Date, SeatClass, Result),
      "Search for flights with a specific seat class. Options: Economy Class, Business Class, First Class.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool query_flight_info --args '{\"origin\":\"~w\",\"destination\":\"~w\",\"depDate\":\"~w\",\"seatClassName\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, Origin, Dest, Date, SeatClass]),
-    exec(bash(command: Cmd), Raw),
-    parse_bridge_result(Raw, Result).
+    format(string(ArgsJson), '{"origin":"~w","destination":"~w","depDate":"~w","seatClassName":"~w"}', [Origin, Dest, Date, SeatClass]),
+    write_and_run(BridgeDir, DbPath, BenchDir, query_flight_info, ArgsJson, Result).
 
 tool(query_hotel_info(Dest, CheckIn, CheckOut, Result),
      "Search for hotels in a city for given dates. Returns hotel name, price, rating, amenities.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool query_hotel_info --args '{\"destination\":\"~w\",\"checkinDate\":\"~w\",\"checkoutDate\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, Dest, CheckIn, CheckOut]),
-    exec(bash(command: Cmd), Raw),
-    parse_bridge_result(Raw, Result).
+    format(string(ArgsJson), '{"destination":"~w","checkinDate":"~w","checkoutDate":"~w"}', [Dest, CheckIn, CheckOut]),
+    write_and_run(BridgeDir, DbPath, BenchDir, query_hotel_info, ArgsJson, Result).
 
 tool(query_hotel_info_with_star(Dest, CheckIn, CheckOut, Star, Result),
      "Search for hotels filtered by star rating (1-5).") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool query_hotel_info --args '{\"destination\":\"~w\",\"checkinDate\":\"~w\",\"checkoutDate\":\"~w\",\"hotelStar\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, Dest, CheckIn, CheckOut, Star]),
-    exec(bash(command: Cmd), Raw),
-    parse_bridge_result(Raw, Result).
+    format(string(ArgsJson), '{"destination":"~w","checkinDate":"~w","checkoutDate":"~w","hotelStar":"~w"}', [Dest, CheckIn, CheckOut, Star]),
+    write_and_run(BridgeDir, DbPath, BenchDir, query_hotel_info, ArgsJson, Result).
 
 tool(recommend_attractions(City, Result),
      "Search popular attractions in a city. All attraction info in the plan MUST come from this tool.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool recommend_attractions --args '{\"city\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, City]),
-    exec(bash(command: Cmd), Raw),
-    parse_bridge_result(Raw, Result).
+    format(string(ArgsJson), '{"city":"~w"}', [City]),
+    write_and_run(BridgeDir, DbPath, BenchDir, recommend_attractions, ArgsJson, Result).
 
 tool(recommend_attractions_by_type(City, Type, Result),
      "Search attractions filtered by type. Options: Historical and Cultural, Natural Scenery, Art Exhibition, City Landmark, Theme Park, Leisure Experience.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool recommend_attractions --args '{\"city\":\"~w\",\"attraction_type\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, City, Type]),
-    exec(bash(command: Cmd), Raw),
-    parse_bridge_result(Raw, Result).
+    format(string(ArgsJson), '{"city":"~w","attraction_type":"~w"}', [City, Type]),
+    write_and_run(BridgeDir, DbPath, BenchDir, recommend_attractions, ArgsJson, Result).
 
 tool(query_attraction_details(Name, Result),
      "Get detailed info about an attraction: coordinates, description, rating, hours, closing dates, visit duration, ticket price, type.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool query_attraction_details --args '{\"attraction_name\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, Name]),
-    exec(bash(command: Cmd), Raw),
-    parse_bridge_result(Raw, Result).
+    format(string(ArgsJson), '{"attraction_name":"~w"}', [Name]),
+    write_and_run(BridgeDir, DbPath, BenchDir, query_attraction_details, ArgsJson, Result).
 
 tool(search_location(Place, Result),
      "Get latitude/longitude coordinates for a place name. Names must exactly match tool results.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool search_location --args '{\"place_name\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, Place]),
-    exec(bash(command: Cmd), Raw),
-    parse_bridge_result(Raw, Result).
+    format(string(ArgsJson), '{"place_name":"~w"}', [Place]),
+    write_and_run(BridgeDir, DbPath, BenchDir, search_location, ArgsJson, Result).
 
 tool(query_road_route_info(OriginCoord, DestCoord, Result),
      "Calculate road route between two coordinates (lat,lng format). Returns distance, duration, cost. Walking <=2km (free), driving >2km. Cost per vehicle (4 passengers).") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool query_road_route_info --args '{\"origin\":\"~w\",\"destination\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, OriginCoord, DestCoord]),
-    exec(bash(command: Cmd), Raw),
-    parse_bridge_result(Raw, Result).
+    format(string(ArgsJson), '{"origin":"~w","destination":"~w"}', [OriginCoord, DestCoord]),
+    write_and_run(BridgeDir, DbPath, BenchDir, query_road_route_info, ArgsJson, Result).
 
 tool(recommend_restaurants(Lat, Lng, Result),
      "Find restaurants near given coordinates. Returns names, coordinates, price/person, rating, hours.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool recommend_restaurants --args '{\"latitude\":\"~w\",\"longitude\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, Lat, Lng]),
-    exec(bash(command: Cmd), Raw),
-    parse_bridge_result(Raw, Result).
+    format(string(ArgsJson), '{"latitude":"~w","longitude":"~w"}', [Lat, Lng]),
+    write_and_run(BridgeDir, DbPath, BenchDir, recommend_restaurants, ArgsJson, Result).
 
 tool(query_restaurant_details(Name, Result),
      "Get detailed info about a restaurant: coordinates, price/person, hours, rating.") :-
     param(db_path, DbPath),
     param(bridge_dir, BridgeDir),
     param(bench_dir, BenchDir),
-    format(string(Cmd), "python3 '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool query_restaurant_details --args '{\"restaurant_name\":\"~w\"}'", [BridgeDir, DbPath, BenchDir, Name]),
-    exec(bash(command: Cmd), Raw),
-    parse_bridge_result(Raw, Result).
+    format(string(ArgsJson), '{"restaurant_name":"~w"}', [Name]),
+    write_and_run(BridgeDir, DbPath, BenchDir, query_restaurant_details, ArgsJson, Result).
 
 parse_bridge_result(Raw, Result) :-
     get_dict(stdout, Raw, Stdout),
