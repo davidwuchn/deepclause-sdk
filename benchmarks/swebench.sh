@@ -152,7 +152,14 @@ run_evaluate() {
 
   if [[ "$auto_discover" == "1" && -z "$config_path" ]]; then
     output_root="benchmarks/runs"
-    dataset_name="lite"
+    local manifest_path="$output_root/$benchmark_run_id/manifest.json"
+    if [[ -f "$manifest_path" ]]; then
+      dataset_name=$(json_get "$manifest_path" "config.dataset.name" "lite")
+      echo "Detected dataset from manifest: $dataset_name"
+    else
+      dataset_name="lite"
+      echo "Warning: Could not read manifest.json, defaulting to dataset \"lite\""
+    fi
     max_workers="4"
     cache_level="env"
     clean_value="false"

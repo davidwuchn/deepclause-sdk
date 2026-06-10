@@ -29,6 +29,18 @@ async function mainFromRun(args) {
   const runRoot = path.resolve(REPO_ROOT, args.runRoot ?? 'benchmarks/runs', runDirName);
   const instancesDir = path.join(runRoot, mode, 'instances');
 
+  let datasetName = args.dataset;
+  if (!datasetName) {
+    try {
+      const manifest = JSON.parse(await fs.readFile(path.join(runRoot, 'manifest.json'), 'utf8'));
+      datasetName = manifest?.config?.dataset?.name ?? 'lite';
+      console.log(`Detected dataset from manifest: ${datasetName}`);
+    } catch {
+      datasetName = 'lite';
+      console.warn('Could not read manifest.json, defaulting to dataset "lite"');
+    }
+  }
+
   const entries = await fs.readdir(instancesDir, { withFileTypes: true });
   const instanceDirs = entries.filter((e) => e.isDirectory());
   if (instanceDirs.length === 0) {
@@ -104,7 +116,7 @@ async function mainFromRun(args) {
     imageTag,
     'python',
     '-m', 'swebench.harness.run_evaluation',
-    '--dataset_name', normalizeDatasetName(args.dataset),
+    '--dataset_name', normalizeDatasetName(datasetName),
     '--split', args.split ?? 'test',
     '--predictions_path', toContainerPath(tmpPredictionsPath),
     '--max_workers', String(args.maxWorkers ?? 4),
