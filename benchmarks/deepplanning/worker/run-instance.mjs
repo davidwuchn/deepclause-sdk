@@ -47,7 +47,6 @@ async function main() {
     logProgress(`Running ${spec.domain} task ${spec.taskId}`);
     const runArgs = [
       'deepclause', 'run', '--verbose', '--stream',
-      '--deepclause-version', spec.deepclauseVersion ?? 'latest',
       '--param', `db_path=${spec.dbPath}`,
       '--param', `bridge_dir=${bridgeDir}`,
     ];
