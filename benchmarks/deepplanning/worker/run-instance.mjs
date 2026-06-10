@@ -25,6 +25,7 @@ async function main() {
     domain: spec.domain,
     level: spec.level,
     agentOutput: '',
+    commands: [],
     warnings: [],
   };
 
