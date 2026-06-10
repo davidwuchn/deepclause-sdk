@@ -26,11 +26,13 @@ Evaluate-only options:
   --predictions <file>     Optional explicit predictions path
   --eval-run-id <id>       Optional explicit evaluation run id (defaults to <benchmark-run-id>-<mode>)
   --report-dir <dir>       Optional explicit evaluation report dir
+  --auto-discover          Auto-discover instances from run dir instead of using predictions.jsonl
 
 Examples:
   benchmarks/swebench.sh prefetch --env-file benchmarks/benchmark.env --config benchmarks/config.qwen3.6-27b.json
   benchmarks/swebench.sh run --env-file benchmarks/benchmark.env --config benchmarks/cache/config.qwen3.6-27b-offline/config.offline.json -- --repo-setup none
   benchmarks/swebench.sh evaluate --config benchmarks/cache/config.qwen3.6-27b-offline/config.offline.json --benchmark-run-id run-2026-06-05T12-00-00-000Z --mode plan-execute
+  benchmarks/swebench.sh evaluate --benchmark-run-id run-2026-06-05T12-00-00-000Z --mode prompt --auto-discover
 EOF
 }
 
@@ -136,7 +138,8 @@ run_evaluate() {
   local predictions_path="$4"
   local eval_run_id="$5"
   local report_dir="$6"
-  shift 6
+  local auto_discover="$7"
+  shift 7
 
   local output_root
   local dataset_name
@@ -147,14 +150,25 @@ run_evaluate() {
   local swebench_version
   local evaluator_image
 
-  output_root=$(json_get "$config_path" "artifacts.outputRoot" "benchmarks/runs")
-  dataset_name=$(json_get "$config_path" "evaluation.datasetName" "SWE-bench/SWE-bench_Lite")
-  max_workers=$(json_get "$config_path" "evaluation.maxWorkers" "4")
-  cache_level=$(json_get "$config_path" "evaluation.cacheLevel" "env")
-  clean_value=$(json_get "$config_path" "evaluation.clean" "false")
-  namespace=$(json_get "$config_path" "evaluation.namespace" "swebench")
-  swebench_version=$(json_get "$config_path" "evaluation.swebenchVersion" "latest")
-  evaluator_image=$(json_get "$config_path" "docker.evaluatorImage" "deepclause-swebench-evaluator:latest")
+  if [[ "$auto_discover" == "1" && -z "$config_path" ]]; then
+    output_root="benchmarks/runs"
+    dataset_name="lite"
+    max_workers="4"
+    cache_level="env"
+    clean_value="false"
+    namespace="swebench"
+    swebench_version="latest"
+    evaluator_image="deepclause-swebench-evaluator:latest"
+  else
+    output_root=$(json_get "$config_path" "artifacts.outputRoot" "benchmarks/runs")
+    dataset_name=$(json_get "$config_path" "evaluation.datasetName" "SWE-bench/SWE-bench_Lite")
+    max_workers=$(json_get "$config_path" "evaluation.maxWorkers" "4")
+    cache_level=$(json_get "$config_path" "evaluation.cacheLevel" "env")
+    clean_value=$(json_get "$config_path" "evaluation.clean" "false")
+    namespace=$(json_get "$config_path" "evaluation.namespace" "swebench")
+    swebench_version=$(json_get "$config_path" "evaluation.swebenchVersion" "latest")
+    evaluator_image=$(json_get "$config_path" "docker.evaluatorImage" "deepclause-swebench-evaluator:latest")
+  fi
 
   if [[ -z "$predictions_path" ]]; then
     predictions_path="$output_root/$benchmark_run_id/$mode/predictions.jsonl"
@@ -167,18 +181,39 @@ run_evaluate() {
   fi
 
   cd "$REPO_ROOT"
-  npm run benchmark:swebench:evaluate -- \
-    --predictions "$predictions_path" \
-    --run-id "$eval_run_id" \
-    --dataset "$dataset_name" \
-    --max-workers "$max_workers" \
-    --cache-level "$cache_level" \
-    --clean "$clean_value" \
-    --namespace "$namespace" \
-    --report-dir "$report_dir" \
-    --swebench-version "$swebench_version" \
-    --image "$evaluator_image" \
-    "$@"
+  if [[ "$auto_discover" == "1" ]]; then
+    local eval_args=(
+      --run "$benchmark_run_id"
+      --mode "$mode"
+      --dataset "$dataset_name"
+      --max-workers "$max_workers"
+      --cache-level "$cache_level"
+      --clean "$clean_value"
+      --namespace "$namespace"
+      --swebench-version "$swebench_version"
+      --image "$evaluator_image"
+    )
+    if [[ -n "$eval_run_id" ]]; then
+      eval_args+=(--run-id "$eval_run_id")
+    fi
+    if [[ -n "$report_dir" ]]; then
+      eval_args+=(--report-dir "$report_dir")
+    fi
+    npm run benchmark:swebench:evaluate -- "${eval_args[@]}" "$@"
+  else
+    npm run benchmark:swebench:evaluate -- \
+      --predictions "$predictions_path" \
+      --run-id "$eval_run_id" \
+      --dataset "$dataset_name" \
+      --max-workers "$max_workers" \
+      --cache-level "$cache_level" \
+      --clean "$clean_value" \
+      --namespace "$namespace" \
+      --report-dir "$report_dir" \
+      --swebench-version "$swebench_version" \
+      --image "$evaluator_image" \
+      "$@"
+  fi
 }
 
 main() {
@@ -200,6 +235,7 @@ main() {
   local predictions_path=""
   local eval_run_id=""
   local report_dir=""
+  local auto_discover=""
   local extra_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -243,6 +279,9 @@ main() {
         [[ $# -gt 0 ]] || die "missing value for --report-dir"
         report_dir="$1"
         ;;
+      --auto-discover)
+        auto_discover=1
+        ;;
       --)
         shift
         while [[ $# -gt 0 ]]; do
@@ -258,7 +297,9 @@ main() {
     shift || true
   done
 
-  [[ -n "$config_path" ]] || die "--config is required"
+  if [[ "$auto_discover" != "1" ]]; then
+    [[ -n "$config_path" ]] || die "--config is required (or use --auto-discover for evaluate)"
+  fi
   if [[ -n "$env_file" ]]; then
     load_env_file "$env_file"
   fi
@@ -273,7 +314,7 @@ main() {
     evaluate)
       [[ -n "$benchmark_run_id" ]] || die "--benchmark-run-id is required for evaluate"
       [[ -n "$mode" ]] || die "--mode is required for evaluate"
-      run_evaluate "$config_path" "$benchmark_run_id" "$mode" "$predictions_path" "$eval_run_id" "$report_dir" "${extra_args[@]}"
+      run_evaluate "$config_path" "$benchmark_run_id" "$mode" "$predictions_path" "$eval_run_id" "$report_dir" "$auto_discover" "${extra_args[@]}"
       ;;
     *)
       die "unknown command: $command"

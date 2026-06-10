@@ -23,14 +23,123 @@ const DATASET_ALIASES = new Map([
   ['scaleai/swe-bench_pro', 'ScaleAI/SWE-bench_Pro'],
 ]);
 
+async function mainFromRun(args) {
+  const runDirName = args.run;
+  const mode = args.mode ?? 'prompt';
+  const runRoot = path.resolve(REPO_ROOT, args.runRoot ?? 'benchmarks/runs', runDirName);
+  const instancesDir = path.join(runRoot, mode, 'instances');
+
+  const entries = await fs.readdir(instancesDir, { withFileTypes: true });
+  const instanceDirs = entries.filter((e) => e.isDirectory());
+  if (instanceDirs.length === 0) {
+    throw new Error(`No instance directories found in ${instancesDir}`);
+  }
+
+  const predictions = [];
+  const discoveredIds = [];
+  for (const entry of instanceDirs) {
+    const resultPath = path.join(instancesDir, entry.name, 'result.json');
+    let result;
+    try {
+      result = JSON.parse(await fs.readFile(resultPath, 'utf8'));
+    } catch {
+      console.warn(`Skipping ${entry.name}: no readable result.json`);
+      continue;
+    }
+    if (!result.patch && result.patch !== '') {
+      console.warn(`Skipping ${entry.name}: result.json has no patch field`);
+      continue;
+    }
+    predictions.push({
+      instance_id: result.instanceId ?? entry.name,
+      model_name_or_path: result.modelNameOrPath ?? 'unknown',
+      model_patch: result.patch ?? '',
+    });
+    discoveredIds.push(result.instanceId ?? entry.name);
+  }
+
+  if (predictions.length === 0) {
+    throw new Error('No completed instances with patches found');
+  }
+
+  console.log(`Discovered ${predictions.length} completed instances from ${instancesDir}`);
+
+  const evalRunId = args.runId ?? `${runDirName}-${mode}-eval`;
+  const reportDir = path.resolve(REPO_ROOT, args.reportDir ?? path.join(runRoot, mode, 'evaluation'));
+  await fs.mkdir(reportDir, { recursive: true });
+
+  const tmpPredictionsPath = path.join(reportDir, '_predictions_from_run.jsonl');
+  const lines = predictions.map((p) => JSON.stringify(p));
+  await fs.writeFile(tmpPredictionsPath, `${lines.join('\n')}\n`, 'utf8');
+  console.log(`Wrote temporary predictions to ${tmpPredictionsPath}`);
+
+  if (args.instanceIds.length > 0) {
+    const idSet = new Set(args.instanceIds);
+    const before = discoveredIds.length;
+    const filtered = discoveredIds.filter((id) => idSet.has(id));
+    if (filtered.length === 0) {
+      throw new Error(`None of the --instance-id values match discovered instances (${before} total)`);
+    }
+    discoveredIds.length = 0;
+    discoveredIds.push(...filtered);
+    console.log(`Filtered to ${filtered.length}/${before} instances via --instance-id`);
+  }
+
+  const swebenchVersion = args.swebenchVersion ?? 'latest';
+  const imageTag = args.image ?? 'deepclause-swebench-evaluator:latest';
+  if (!args.skipImageBuild) {
+    await ensureEvaluatorImage({
+      imageTag,
+      swebenchVersion,
+      rebuild: Boolean(args.rebuildImage),
+    });
+  }
+
+  const dockerArgs = [
+    'run',
+    '--rm',
+    '-v', '/var/run/docker.sock:/var/run/docker.sock',
+    '-v', `${REPO_ROOT}:/repo`,
+    '-w', '/repo',
+    imageTag,
+    'python',
+    '-m', 'swebench.harness.run_evaluation',
+    '--dataset_name', normalizeDatasetName(args.dataset),
+    '--split', args.split ?? 'test',
+    '--predictions_path', toContainerPath(tmpPredictionsPath),
+    '--max_workers', String(args.maxWorkers ?? 4),
+    '--run_id', evalRunId,
+    '--cache_level', args.cacheLevel ?? 'env',
+    '--clean', String(parseBoolean(args.clean ?? 'false')),
+    '--report_dir', toContainerPath(reportDir),
+  ];
+
+  const namespace = args.namespace ?? 'swebench';
+  if (namespace.toLowerCase() === 'none') {
+    dockerArgs.push('--namespace', 'none');
+  } else {
+    dockerArgs.push('--namespace', namespace);
+  }
+
+  dockerArgs.push('--instance_ids', ...discoveredIds);
+
+  await runCommand('docker', dockerArgs, { cwd: REPO_ROOT, streamOutput: true });
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     printHelp();
     return;
   }
+
+  if (args.run) {
+    await mainFromRun(args);
+    return;
+  }
+
   if (!args.predictions) {
-    throw new Error('--predictions is required');
+    throw new Error('--predictions or --run is required');
   }
   if (!args.runId) {
     throw new Error('--run-id is required');
@@ -107,6 +216,18 @@ function parseArgs(argv) {
       args.predictions = readValue();
       continue;
     }
+    if (arg === '--run') {
+      args.run = readValue();
+      continue;
+    }
+    if (arg === '--mode') {
+      args.mode = readValue();
+      continue;
+    }
+    if (arg === '--run-root') {
+      args.runRoot = readValue();
+      continue;
+    }
     if (arg === '--run-id') {
       args.runId = readValue();
       continue;
@@ -169,9 +290,17 @@ function parseArgs(argv) {
 function printHelp() {
   console.log(`Usage: node benchmarks/evaluate-predictions.mjs [options]
 
+Modes:
+  Explicit predictions file:
+    --predictions <file>       Predictions JSONL file to evaluate
+    --run-id <name>            SWE-bench evaluation run id
+
+  Auto-discover from run directory:
+    --run <run-id>             Run directory name under benchmarks/runs/
+    --mode <prompt|plan-execute> Mode subdirectory (default: prompt)
+    --run-root <path>          Root for run directories (default: benchmarks/runs)
+
 Options:
-  --predictions <file>         Predictions JSONL file to evaluate
-  --run-id <name>              SWE-bench evaluation run id
   --dataset <name>             Dataset alias or name (default: lite)
   --split <name>               Dataset split (default: test)
   --max-workers <n>            Evaluation max_workers value
@@ -179,7 +308,7 @@ Options:
   --clean <true|false>         Clean images above cache level
   --namespace <name|none>      Docker namespace for SWE-bench images
   --report-dir <dir>           Report output directory
-  --instance-id <id>           Repeatable instance selector
+  --instance-id <id>           Repeatable instance selector (filters discovered instances)
   --swebench-version <ver>     latest or exact swebench version
   --image <tag>                Evaluator image tag
   --rebuild-image              Rebuild evaluator image
