@@ -236,13 +236,12 @@ async function runStep(result, logsDir, stepName, command, options = {}) {
       child.stdout.on('data', (chunk) => {
         stdout += chunk;
         logStream?.write(chunk);
-        if (VERBOSE) {
-          process.stdout.write(chunk);
-        }
+        process.stdout.write(chunk);
       });
       child.stderr.on('data', (chunk) => {
         stderr += chunk;
         logStream?.write(chunk);
+        process.stderr.write(chunk);
       });
 
       child.once('error', (err) => {
