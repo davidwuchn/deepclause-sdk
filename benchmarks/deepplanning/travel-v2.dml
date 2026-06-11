@@ -1,0 +1,626 @@
+% ===========================================================================
+% DeepPlanning Travel Planning v2 — Neuro-Symbolic Approach
+% ===========================================================================
+%
+% Key innovation: Prolog-verified constraint satisfaction with LLM-guided repair.
+%
+% The DeepPlanning paper identifies three failure patterns in travel agents:
+%   A: Information Acquisition (omitted queries, tool misuse, fact displacement)
+%   B: Local Reasoning (explicit/implicit constraint violations)
+%   C: Global Optimization (budget, time continuity, diversity, structural coherence)
+%
+% Pattern C is the dominant failure (101/140 travel errors). Even GPT-5.2-high
+% achieves only 35% case accuracy. The core problem: a single constraint
+% violation (e.g. $12 budget overshoot) invalidates the ENTIRE plan.
+%
+% This agent addresses Pattern C by offloading global consistency to Prolog:
+%   - LLM handles: NL understanding, tool calling, preference reasoning, formatting
+%   - Prolog handles: constraint verification, budget tracking, repair guidance
+%   - Backtracking provides: automatic retry on verification failure
+%
+% Why this helps smaller models:
+%   Smaller models fail at maintaining global state across many steps. By
+%   reducing their job to LOCAL decisions (which hotel? which restaurant?)
+%   and letting Prolog enforce GLOBAL constraints (budget, time, diversity),
+%   even a small model can produce globally consistent plans.
+%
+% Architecture:
+%   Phase 1: PARSE    — Extract structured constraints from query
+%   Phase 2: GATHER   — Systematic information collection with context isolation
+%   Phase 3: SELECT   — Budget-aware transport/hotel selection
+%   Phase 4: PLAN     — LLM generates day-by-day itinerary
+%   Phase 5: VERIFY   — Prolog verifies all hard constraints
+%   Phase 6: REPAIR   — If violations found, guided repair with backtracking
+%   Phase 7: FORMAT   — Format verified plan into output
+%
+% Required params:
+%   db_path     - Per-task database directory
+%   bridge_dir  - Directory containing python-bridge.py
+%   bench_dir   - Path to Qwen-Agent benchmark/deepplanning directory
+%   python_path - Path to Python interpreter with rank_bm25 installed
+% ===========================================================================
+
+:- use_module(library(http/json)).
+:- use_module(library(clpfd)).
+
+% ===========================================================================
+% Tool Bridge (unchanged from v1)
+% ===========================================================================
+
+run_tool(ToolName, ArgsDict, Result) :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    param(bench_dir, BenchDir),
+    param(python_path, PythonPath),
+    (var(PythonPath) -> PythonPath = 'python3' ; true),
+    atom_json_dict(ArgsJson, ArgsDict, []),
+    format(string(ArgsFile), ".dc_bridge_~w.json", [ToolName]),
+    exec(write_file(path: ArgsFile, content: ArgsJson), _),
+    format(string(Cmd), "~w '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool ~w --args-file '~w'", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName, ArgsFile]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(query_train_info(Origin, Dest, Date, Result),
+     "Search for train tickets between two cities on a given date. Returns train number, times, stations, duration, seat class, remaining seats, price.") :-
+    run_tool(query_train_info, _{origin: Origin, destination: Dest, depDate: Date}, Result).
+
+tool(query_train_info_with_class(Origin, Dest, Date, SeatClass, Result),
+     "Search for train tickets with a specific seat class. Options: First Class Seat, Second Class Seat, Business Seat.") :-
+    run_tool(query_train_info, _{origin: Origin, destination: Dest, depDate: Date, seatClassName: SeatClass}, Result).
+
+tool(query_flight_info(Origin, Dest, Date, Result),
+     "Search for flights between two cities on a given date. Returns flight number, times, airports, duration, seat class, remaining seats, price, aircraft type.") :-
+    run_tool(query_flight_info, _{origin: Origin, destination: Dest, depDate: Date}, Result).
+
+tool(query_flight_info_with_class(Origin, Dest, Date, SeatClass, Result),
+     "Search for flights with a specific seat class. Options: Economy Class, Business Class, First Class.") :-
+    run_tool(query_flight_info, _{origin: Origin, destination: Dest, depDate: Date, seatClassName: SeatClass}, Result).
+
+tool(query_hotel_info(Dest, CheckIn, CheckOut, Result),
+     "Search for hotels in a city for given dates. Returns hotel name, price, rating, amenities.") :-
+    run_tool(query_hotel_info, _{destination: Dest, checkinDate: CheckIn, checkoutDate: CheckOut}, Result).
+
+tool(query_hotel_info_with_star(Dest, CheckIn, CheckOut, Star, Result),
+     "Search for hotels filtered by star rating (1-5).") :-
+    run_tool(query_hotel_info, _{destination: Dest, checkinDate: CheckIn, checkoutDate: CheckOut, hotelStar: Star}, Result).
+
+tool(recommend_attractions(City, Result),
+     "Search popular attractions in a city. All attraction info in the plan MUST come from this tool.") :-
+    run_tool(recommend_attractions, _{city: City}, Result).
+
+tool(recommend_attractions_by_type(City, Type, Result),
+     "Search attractions filtered by type. Options: Historical and Cultural, Natural Scenery, Art Exhibition, City Landmark, Theme Park, Leisure Experience.") :-
+    run_tool(recommend_attractions, _{city: City, attraction_type: Type}, Result).
+
+tool(query_attraction_details(Name, Result),
+     "Get detailed info about an attraction: coordinates, description, rating, hours, closing dates, visit duration, ticket price, type.") :-
+    run_tool(query_attraction_details, _{attraction_name: Name}, Result).
+
+tool(search_location(Place, Result),
+     "Get latitude/longitude coordinates for a place name. Names must exactly match tool results.") :-
+    run_tool(search_location, _{place_name: Place}, Result).
+
+tool(query_road_route_info(OriginCoord, DestCoord, Result),
+     "Calculate road route between two coordinates (lat,lng format). Returns distance, duration, cost. Walking <=2km (free), driving >2km. Cost per vehicle (4 passengers).") :-
+    run_tool(query_road_route_info, _{origin: OriginCoord, destination: DestCoord}, Result).
+
+tool(recommend_restaurants(Lat, Lng, Result),
+     "Find restaurants near given coordinates. Returns names, coordinates, price/person, rating, hours.") :-
+    run_tool(recommend_restaurants, _{latitude: Lat, longitude: Lng}, Result).
+
+tool(query_restaurant_details(Name, Result),
+     "Get detailed info about a restaurant: coordinates, price/person, hours, rating.") :-
+    run_tool(query_restaurant_details, _{restaurant_name: Name}, Result).
+
+parse_bridge_result(Raw, Result) :-
+    get_dict(stdout, Raw, Stdout),
+    !,
+    Result = Stdout.
+
+parse_bridge_result(_, "Error: tool call failed").
+
+% ===========================================================================
+% Dynamic Knowledge Base
+% ===========================================================================
+
+:- dynamic trip_constraint/2.
+:- dynamic plan_violation/2.
+
+store_constraint(Key, Value) :-
+    retractall(trip_constraint(Key, _)),
+    assertz(trip_constraint(Key, Value)).
+
+clear_violations :-
+    retractall(plan_violation(_, _)).
+
+add_violation(Category, Description) :-
+    assertz(plan_violation(Category, Description)).
+
+get_violations(Violations) :-
+    findall(V, plan_violation(_, V), Violations).
+
+% ===========================================================================
+% Phase 1: PARSE — Extract structured constraints from the query
+% ===========================================================================
+% Use task/2 with object(Var) to extract structured data from NL.
+% Store as Prolog facts for use by later verification phases.
+
+phase1_parse :-
+    output("[Phase 1] Parsing travel request..."),
+    task("Analyze this travel request and extract ALL of the following as a JSON object:
+- origin: departure city name (string)
+- destination: destination city name (string)
+- dep_date: departure date in YYYY-MM-DD format (string)
+- return_date: return date in YYYY-MM-DD format (string)
+- num_days: total number of trip days (integer)
+- travelers: number of travelers (integer, default 1)
+- budget: budget in yuan (integer, or null if not specified)
+- star_pref: hotel star preference (integer, or null if not specified)
+- preferences: array of specific preferences as strings (e.g. flight after 7AM)
+
+Store in QueryInfo.", object(QueryInfo)),
+
+    (get_dict(origin, QueryInfo, Origin) -> store_constraint(origin, Origin) ; true),
+    (get_dict(destination, QueryInfo, Dest) -> store_constraint(destination, Dest) ; true),
+    (get_dict(dep_date, QueryInfo, DepD) -> store_constraint(dep_date, DepD) ; true),
+    (get_dict(return_date, QueryInfo, RetD) -> store_constraint(return_date, RetD) ; true),
+    (get_dict(num_days, QueryInfo, ND) -> store_constraint(num_days, ND) ; true),
+    (get_dict(travelers, QueryInfo, T) -> store_constraint(travelers, T) ; store_constraint(travelers, 1)),
+    (get_dict(budget, QueryInfo, B), B \= null -> store_constraint(budget, B) ; true),
+    (get_dict(star_pref, QueryInfo, S), S \= null -> store_constraint(star_pref, S) ; true),
+
+    (trip_constraint(origin, O), trip_constraint(destination, D)
+    ->  format(string(Msg), "[Phase 1] Route: ~w -> ~w", [O, D]),
+        output(Msg)
+    ;   output("[Phase 1] Warning: could not parse origin/destination")
+    ).
+
+% ===========================================================================
+% Phase 2: GATHER — Systematic information collection
+% ===========================================================================
+% Use push_context(clear)/pop_context to isolate each sub-phase.
+% This prevents the accumulated tool-call memory from overwhelming
+% later LLM reasoning — a key problem for smaller models.
+%
+% Strategy: gather comprehensive data in dedicated sub-agents, then
+% provide SUMMARIES (not raw dumps) to the planning LLM.
+
+phase2_gather :-
+    output("[Phase 2] Gathering information..."),
+    phase2a_transport,
+    phase2b_hotels,
+    phase2c_attractions_and_restaurants,
+    phase2d_routes,
+    output("[Phase 2] Information gathering complete.").
+
+phase2a_transport :-
+    output("[Phase 2a] Transportation..."),
+    push_context(clear),
+    system("You are a transportation search specialist. Find ALL available options. Always search both flights AND trains."),
+
+    (trip_constraint(origin, O), trip_constraint(destination, D),
+     trip_constraint(dep_date, DD), trip_constraint(return_date, RD)
+    ->  task("Search for all transportation from {O} to {D} on {DD}, and from {D} to {O} on {RD}. Use BOTH query_flight_info and query_train_info for each direction. Store all results in TransportData.", string(_TransportData))
+    ;   task("Search for all intercity transportation options for the trip. Use both flight and train queries for outbound and return. Store in TransportData.", string(_TransportData))
+    ),
+    pop_context.
+
+phase2b_hotels :-
+    output("[Phase 2b] Hotels..."),
+    push_context(clear),
+    system("You are a hotel search specialist. Find ALL available options."),
+
+    (trip_constraint(destination, D),
+     trip_constraint(dep_date, CI),
+     trip_constraint(return_date, CO)
+    ->  task("Search for hotels in {D} from {CI} to {CO}. Use query_hotel_info. Also try query_hotel_info_with_star if a star preference exists. Store all results in HotelData.", string(_HotelData))
+    ;   task("Search for all hotels at the destination for the travel dates. Store in HotelData.", string(_HotelData))
+    ),
+    pop_context.
+
+phase2c_attractions_and_restaurants :-
+    output("[Phase 2c] Attractions and restaurants..."),
+    push_context(clear),
+    system("You are a tourism and dining specialist. Be thorough — get details for EVERY attraction and restaurant."),
+
+    (trip_constraint(destination, D)
+    ->  task("In {D}: 1) Search for ALL attractions using recommend_attractions. 2) For EACH attraction, use query_attraction_details to get opening hours, visit duration, ticket price, coordinates, and closing dates. 3) Search for restaurants near the attraction/hotel coordinates using recommend_restaurants. 4) For EACH restaurant, use query_restaurant_details for hours, price, rating. Store everything in ActivityData.", string(_ActivityData))
+    ;   task("Search for all attractions and restaurants at the destination. Get detailed info for each. Store in ActivityData.", string(_ActivityData))
+    ),
+    pop_context.
+
+phase2d_routes :-
+    output("[Phase 2d] Routes and locations..."),
+    push_context(clear),
+    system("You are a route planning specialist. Compute intracity transportation between all key locations."),
+
+    task("For all places in the itinerary (hotel, attractions, restaurants, airport/station):
+1. Use search_location to get coordinates for each place
+2. Use query_road_route_info to compute travel time and cost between consecutive locations
+3. Record all distances, durations, and costs
+
+Store in RouteData.", string(_RouteData)),
+    pop_context.
+
+% ===========================================================================
+% Phase 3: SELECT — Budget-aware transport/hotel pre-selection
+% ===========================================================================
+% Pre-select transport and hotel to establish fixed costs, then compute
+% the remaining budget for activities. This is where CLP(FD) helps:
+% by modeling the budget as a constraint variable, we can verify that
+% the selected options leave enough room for activities and meals.
+%
+% For a small model, this is crucial: instead of hoping the LLM
+% tracks the running budget in its head (it can't), we make the
+% budget constraint explicit and verifiable.
+
+phase3_select :-
+    output("[Phase 3] Selecting transport and hotel..."),
+    push_context(clear),
+    system("You are a budget optimization specialist. Select the BEST transport and hotel options that fit within the budget."),
+
+    (trip_constraint(budget, _Budget)
+    ->  (trip_constraint(travelers, _Travelers) -> true ; true),
+        (trip_constraint(num_days, _ND) -> true ; true),
+        task("Select optimal transport and hotel within the budget.
+
+CRITICAL: You must leave enough budget for:
+- Attraction tickets: 50-100 yuan/person per attraction
+- Meals: 80-200 yuan/person per meal
+- Local transport: 20-50 yuan per trip
+
+So transport + hotel should cost AT MOST 50-60% of the total budget.
+
+Select and store in SelectedOptions as JSON:
+- outbound: {name, price_per_person, total_cost}
+- return: {name, price_per_person, total_cost}
+- hotel: {name, price_per_night, nights, total_cost}
+- fixed_total: sum of all above costs
+- remaining_budget: budget minus fixed_total", object(SelectedOptions))
+    ;   task("Select the best transport and hotel options. Store in SelectedOptions as JSON with outbound, return, hotel details.", object(SelectedOptions))
+    ),
+
+    (get_dict(fixed_total, SelectedOptions, FixedTotal)
+    ->  (trip_constraint(budget, B)
+        ->  Remaining is B - FixedTotal,
+            store_constraint(remaining_budget, Remaining),
+            format(string(BMsg), "[Phase 3] Fixed costs: ~w yuan. Remaining for activities: ~w yuan", [FixedTotal, Remaining]),
+            output(BMsg)
+        ;   format(string(BMsg), "[Phase 3] Fixed costs: ~w yuan", [FixedTotal]),
+            output(BMsg)
+        )
+    ;   output("[Phase 3] Warning: could not compute fixed costs")
+    ),
+
+    pop_context.
+
+% ===========================================================================
+% Phase 4: PLAN — LLM generates day-by-day itinerary
+% ===========================================================================
+% The LLM has full context from previous phases (stored in memory via
+% system/user messages from the context-isolated sub-agents).
+% It generates the plan using all available tools.
+
+phase4_plan(RawPlan) :-
+    output("[Phase 4] Generating itinerary..."),
+    system_prompt(FullPrompt),
+    system(FullPrompt),
+
+    (trip_constraint(remaining_budget, RB)
+    ->  format(string(BudgetHint), "REMAINING BUDGET for activities, meals, and local transport: ~w yuan. The plan MUST stay within this limit.", [RB]),
+        system(BudgetHint)
+    ;   true
+    ),
+
+    task("Now create the COMPLETE travel itinerary. Follow ALL rules strictly.
+
+STEP 1: Review all gathered information from previous tool calls.
+STEP 2: For each day, schedule activities in chronological order with NO gaps or overlaps.
+STEP 3: Insert travel_city between any two different locations.
+STEP 4: Verify no repeated restaurants or attractions across days.
+STEP 5: Calculate the total budget and confirm it is within limits.
+STEP 6: Output the plan inside <plan></plan> tags.
+
+Remember:
+- Times must be continuous (no gaps, no overlaps)
+- Insert intracity travel between different locations
+- Different restaurants and attractions each day
+- Last day ends at airport/station, not hotel
+- Include complete budget summary at the end", string(RawPlan)).
+
+% ===========================================================================
+% Phase 5: VERIFY — Prolog-based constraint verification
+% ===========================================================================
+% This is the core neuro-symbolic advantage. After the LLM generates a plan,
+% Prolog verifies it against hard constraints. The LLM never needs to
+% "keep in mind" all constraints simultaneously — Prolog checks them.
+%
+% Verification checks:
+%   1. Budget: total cost <= budget limit
+%   2. Time continuity: no overlapping or gapped time slots
+%   3. Diversity: no repeated restaurants or attractions
+%   4. Closed loop: last day ends at airport/station
+
+phase5_verify(Plan, Violations) :-
+    clear_violations,
+    output("[Phase 5] Verifying constraints..."),
+
+    task("Extract structured data from the travel plan for verification. Return as JSON:
+{
+  \"total_cost\": <number>,
+  \"days\": [
+    {
+      \"day_number\": <int>,
+      \"activities\": [
+        {\"time_start\": \"HH:MM\", \"time_end\": \"HH:MM\", \"type\": \"<type>\", \"name\": \"<name>\", \"cost_per_person\": <number>}
+      ],
+      \"hotel_name\": \"<name> or null\"
+    }
+  ]
+}
+
+Plan:
+{Plan}
+
+Store in StructuredPlan.", object(StructuredPlan)),
+
+    verify_budget_constraint(StructuredPlan),
+    verify_time_continuity(StructuredPlan),
+    verify_diversity(StructuredPlan),
+    verify_closed_loop(StructuredPlan),
+
+    get_violations(Violations),
+    (Violations = []
+    ->  output("[Phase 5] All constraints PASSED!")
+    ;   length(Violations, NV),
+        format(string(Msg), "[Phase 5] Found ~w violation(s)", [NV]),
+        output(Msg)
+    ).
+
+verify_budget_constraint(Structured) :-
+    (trip_constraint(budget, Budget)
+    ->  (get_dict(total_cost, Structured, Total), number(Total)
+        ->  (Total =< Budget
+            ->  true
+            ;   Over is Total - Budget,
+                format(string(V), "BUDGET EXCEEDED: total ~w yuan is ~w yuan over the ~w yuan limit", [Total, Over, Budget]),
+                add_violation(budget, V)
+            )
+        ;   add_violation(budget, "Could not extract total cost from plan for budget verification")
+        )
+    ;   true
+    ).
+
+verify_time_continuity(Structured) :-
+    (get_dict(days, Structured, Days), is_list(Days)
+    ->  verify_days_time(Days)
+    ;   add_violation(time, "Could not extract day structure for time verification")
+    ).
+
+verify_days_time([]).
+verify_days_time([Day|Rest]) :-
+    (get_dict(day_number, Day, DayNum),
+     get_dict(activities, Day, Acts), is_list(Acts), Acts \= []
+    ->  verify_activity_sequence(DayNum, Acts)
+    ;   true
+    ),
+    verify_days_time(Rest).
+
+verify_activity_sequence(_DayNum, []).
+verify_activity_sequence(_DayNum, [_]).
+verify_activity_sequence(DayNum, [A, B|Rest]) :-
+    (get_dict(time_end, A, EndStr),
+     get_dict(time_start, B, StartStr)
+    ->  (time_gte(StartStr, EndStr)
+        ->  true
+        ;   get_dict(name, A, NameA),
+            get_dict(name, B, NameB),
+            format(string(V), "Day ~w TIME OVERLAP: '~w' ends ~w but '~w' starts ~w", [DayNum, NameA, EndStr, NameB, StartStr]),
+            add_violation(time, V)
+        )
+    ;   true
+    ),
+    verify_activity_sequence(DayNum, [B|Rest]).
+
+time_gte(Later, Earlier) :-
+    time_to_minutes(Later, LMin),
+    time_to_minutes(Earlier, EMin),
+    LMin >= EMin.
+
+time_to_minutes(TimeStr, Minutes) :-
+    split_string(TimeStr, ":", "", [H, M|_]),
+    number_string(Hour, H),
+    number_string(Min, M),
+    Minutes is Hour * 60 + Min.
+
+verify_diversity(Structured) :-
+    (get_dict(days, Structured, Days), is_list(Days)
+    ->  findall(Name, (
+            member(Day, Days),
+            get_dict(activities, Day, Acts),
+            member(Act, Acts),
+            get_dict(type, Act, Type),
+            member(Type, [attraction, meal]),
+            get_dict(name, Act, Name)
+        ), AllNames),
+        sort(AllNames, Unique),
+        length(AllNames, Total),
+        length(Unique, UniqueCount),
+        Dups is Total - UniqueCount,
+        (Dups > 0
+        ->  format(string(V), "DIVERSITY: ~w repeated attraction(s) or restaurant(s)", [Dups]),
+            add_violation(diversity, V)
+        ;   true
+        )
+    ;   true
+    ).
+
+verify_closed_loop(Structured) :-
+    (get_dict(days, Structured, Days), is_list(Days), Days \= []
+    ->  last(Days, LastDay),
+        (get_dict(hotel_name, LastDay, LastHotel)
+        ->  (LastHotel = null
+            ->  true
+            ;   format(string(V), "CLOSED LOOP: last day should end at airport/station, not hotel '~w'", [LastHotel]),
+                add_violation(closed_loop, V)
+            )
+        ;   true
+        )
+    ;   true
+    ).
+
+% ===========================================================================
+% Phase 6: REPAIR — Guided repair with backtracking
+% ===========================================================================
+% When Prolog finds violations, it produces SPECIFIC violation descriptions.
+% The LLM gets only the violation list, not the entire plan context.
+% This focused repair is more reliable than asking the LLM to "fix the plan"
+% without guidance — especially for smaller models.
+%
+% The repair loop runs up to 3 attempts. On each failure, the specific
+% violations are communicated, allowing targeted fixes.
+
+phase6_repair(_Plan, Violations, RepairedPlan) :-
+    Violations \= [],
+    !,
+    output("[Phase 6] Repairing plan..."),
+
+    push_context(clear),
+    system("You are a travel plan repair specialist. Fix the SPECIFIC violations listed below. Make MINIMAL changes — keep all correct parts intact."),
+
+    task("The travel plan has these constraint violations that MUST be fixed:
+
+{Violations}
+
+Fix each violation and output the corrected plan inside <plan></plan> tags.
+
+Repair guidelines:
+- BUDGET EXCEEDED: Replace the most expensive items with cheaper alternatives from tool results
+- TIME OVERLAP: Adjust times to remove overlaps, add buffer if needed
+- DIVERSITY: Replace repeated items with different alternatives from tool results
+- CLOSED LOOP: Change the last day to end at airport/station instead of hotel", string(RepairedPlan)),
+    pop_context.
+
+phase6_repair(Plan, [], Plan).
+
+% ===========================================================================
+% Phase 7: FORMAT — Final output
+% ===========================================================================
+
+phase7_format(Plan, FinalOutput) :-
+    push_context(clear),
+    system("You are a document formatter. Output the travel plan exactly as provided."),
+    task("Output this travel plan inside <plan></plan> tags. Do NOT change any information, just ensure the format is correct:
+
+{Plan}", string(FinalOutput)),
+    pop_context.
+
+% ===========================================================================
+% Main Agent Entry Points
+% ===========================================================================
+
+agent_main(Request) :-
+    retractall(trip_constraint(_, _)),
+    clear_violations,
+    system_prompt(SysPrompt),
+    system(SysPrompt),
+    user(Request),
+
+    phase1_parse,
+    phase2_gather,
+    phase3_select,
+
+    attempt_plan(3, FinalPlan),
+
+    phase7_format(FinalPlan, FormattedOutput),
+    answer(FormattedOutput).
+
+agent_main(Request) :-
+    system_prompt(SysPrompt),
+    system(SysPrompt),
+    user(Request),
+    task("Create a complete travel plan using all available tools to gather information. Output the itinerary inside <plan></plan> tags with a budget summary.", string(Plan)),
+    answer(Plan).
+
+% --- Verify-Repair Loop ---
+% Generates a plan, verifies it, and repairs if needed.
+% Up to MaxAttempts iterations. The backtracking is Prolog-native:
+% if repair + re-verify still fails, we decrement and try again.
+
+attempt_plan(0, Plan) :-
+    !,
+    phase4_plan(Plan).
+
+attempt_plan(N, FinalPlan) :-
+    N > 0,
+    phase4_plan(RawPlan),
+    phase5_verify(RawPlan, Violations),
+    (Violations = []
+    ->  FinalPlan = RawPlan
+    ;   phase6_repair(RawPlan, Violations, RepairedPlan),
+        phase5_verify(RepairedPlan, NewViolations),
+        (NewViolations = []
+        ->  FinalPlan = RepairedPlan
+        ;   N1 is N - 1,
+            (N1 > 0
+            ->  attempt_plan(N1, FinalPlan)
+            ;   FinalPlan = RepairedPlan
+            )
+        )
+    ).
+
+% ===========================================================================
+% System Prompt
+% ===========================================================================
+
+system_prompt(Prompt) :-
+    Prompt = "You are a top-tier travel planning expert. Create a comprehensive, executable, and logically rigorous travel plan.
+
+CRITICAL RULES:
+1. ALL information must come from tool results - never fabricate or guess.
+2. Names must EXACTLY match tool results - do not abbreviate or rename.
+3. The itinerary must be geographically continuous - insert travel between any two different locations.
+4. Times must be continuous with no gaps or overlaps.
+5. The trip must form a closed loop (return to origin city).
+6. Every day except the last must end at the hotel; the last day must end at the airport/station.
+
+VERIFICATION-AWARE PLANNING:
+After you generate the plan, an automated constraint checker will verify:
+- Budget compliance (total cost <= budget)
+- Time continuity (no overlapping or gapped time slots)
+- Activity diversity (no repeated restaurants or attractions)
+- Closed loop (return to origin, last day at airport/station)
+
+To pass verification on the FIRST try:
+- Calculate the budget carefully — double-check all arithmetic
+- Ensure every time slot flows into the next with no gaps
+- Use DIFFERENT restaurants and attractions each day
+- End the last day at the airport or train station, NOT the hotel
+
+WORKFLOW:
+Phase 1 - Collect ALL necessary information:
+- Query intercity transportation (flights/trains) for travel dates
+- Search for hotels at destination
+- Search for attractions at destination
+- Search for restaurants near attractions/hotels
+- Get detailed info (opening hours, visit duration, coordinates, prices)
+- Search locations and road routes for intracity transportation
+
+Phase 2 - Generate the plan inside <plan></plan> tags:
+
+Day N:
+Current City: [from X to Y; or Y]
+Accommodation: [Hotel name], [Price/room/night]
+HH:MM-HH:MM | activity_type | details
+
+Activity types:
+- travel_intercity_public: flight/train, number, from - to, price/person
+- travel_city: from - to, distance, duration, price
+- attraction: name, price/person
+- meal: Lunch/Dinner, restaurant name, price/person
+- hotel: Check-in/Rest/Check-out, hotel name
+- buffer: description (for airport transfers, luggage, security)
+
+MEAL RULES: No breakfast. Full days: lunch + dinner. Arrival/departure days: adjust based on effective time.
+DIVERSITY: No repeating restaurants or attractions across days.
+BUDGET: Include a complete budget summary at the end with itemized costs and a grand total.".

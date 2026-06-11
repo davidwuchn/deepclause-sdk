@@ -37,9 +37,7 @@ async function main() {
     await fs.mkdir(agentHome, { recursive: true });
     await setupDeepClauseWorkspace(agentHome, spec);
 
-    const dmlFile = spec.domain === 'travel'
-      ? path.join(BENCHMARKS_ROOT, 'travel.dml')
-      : path.join(BENCHMARKS_ROOT, 'shopping.dml');
+    const dmlFile = resolveDmlFile(spec.domain, spec.dmlFiles);
 
     const request = buildRequest(spec);
     const env = buildCommandEnv(spec);
@@ -170,6 +168,16 @@ function buildAdditionalToolsConfig(spec) {
     benchDir,
     pythonPath: spec.pythonPath ?? 'python3',
   };
+}
+
+function resolveDmlFile(domain, dmlFiles) {
+  const custom = dmlFiles?.[domain];
+  if (custom) {
+    return path.isAbsolute(custom) ? custom : path.resolve(BENCHMARKS_ROOT, custom);
+  }
+  return domain === 'travel'
+    ? path.join(BENCHMARKS_ROOT, 'travel.dml')
+    : path.join(BENCHMARKS_ROOT, 'shopping.dml');
 }
 
 function buildRequest(spec) {

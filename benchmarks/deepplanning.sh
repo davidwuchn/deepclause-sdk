@@ -33,6 +33,8 @@ Run options:
   --run-model <id>         Run model (default: openai:gpt-4o)
   --run-temp <n>           Run temperature (default: 0.7)
   --python-path <path>     Python interpreter path (default: python3)
+  --travel-dml <path>      Custom DML file for travel domain (default: travel.dml)
+  --shopping-dml <path>    Custom DML file for shopping domain (default: shopping.dml)
   --verbose, -v            Stream worker output
 
 Evaluate options:
@@ -43,6 +45,7 @@ Examples:
   benchmarks/deepplanning.sh run --domain shopping --level 1 --limit 2
   benchmarks/deepplanning.sh all --domain shopping --domain travel --limit 3
   benchmarks/deepplanning.sh all --limit 2
+  benchmarks/deepplanning.sh run --domain travel --travel-dml benchmarks/deepplanning/travel-v2.dml --limit 2
   benchmarks/deepplanning.sh evaluate --run-id dp-2026-06-10T...
 EOF
 }
@@ -157,6 +160,8 @@ cmd_run() {
   [[ -n "${RUN_MODEL:-}" ]] && run_args+=(--run-model "$RUN_MODEL")
   [[ -n "${RUN_TEMP:-}" ]] && run_args+=(--run-temp "$RUN_TEMP")
   [[ -n "${PYTHON_PATH:-}" ]] && run_args+=(--python-path "$PYTHON_PATH")
+  [[ -n "${TRAVEL_DML:-}" ]] && run_args+=(--travel-dml "$TRAVEL_DML")
+  [[ -n "${SHOPPING_DML:-}" ]] && run_args+=(--shopping-dml "$SHOPPING_DML")
   [[ "${VERBOSE:-}" == "1" ]] && run_args+=(--verbose)
 
   cd "$REPO_ROOT"
@@ -225,6 +230,8 @@ main() {
   local RUN_MODEL=""
   local RUN_TEMP=""
   local PYTHON_PATH=""
+  local TRAVEL_DML=""
+  local SHOPPING_DML=""
   local ENV_FILE=""
   local VERBOSE=""
   local EXTRA_ARGS=()
@@ -294,6 +301,16 @@ main() {
         shift
         [[ $# -gt 0 ]] || die "missing value for --python-path"
         PYTHON_PATH="$1"
+        ;;
+      --travel-dml)
+        shift
+        [[ $# -gt 0 ]] || die "missing value for --travel-dml"
+        TRAVEL_DML="$1"
+        ;;
+      --shopping-dml)
+        shift
+        [[ $# -gt 0 ]] || die "missing value for --shopping-dml"
+        SHOPPING_DML="$1"
         ;;
       --env-file)
         shift

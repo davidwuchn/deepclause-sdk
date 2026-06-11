@@ -95,6 +95,7 @@ async function main() {
         instanceDir,
         benchDir,
         config,
+        dmlFiles: config.dmlFiles,
       });
 
       const state = result.success ? 'ok' : 'error';
@@ -212,6 +213,7 @@ async function runWorkerTask({ task, instanceDir, benchDir, config }) {
     agentTimeoutSeconds: config.execution.agentTimeoutSeconds,
     benchDir,
     pythonPath: config.pythonPath,
+    dmlFiles: opts.dmlFiles ?? {},
   };
   await writeJson(inputPath, workerInput);
 
@@ -271,6 +273,7 @@ function buildConfig(args) {
   config.instanceIds = args.instanceIds ?? [];
   config.offset = args.offset ?? 0;
   config.limit = args.limit;
+  config.dmlFiles = args.dmlFiles ?? {};
   return config;
 }
 
@@ -279,6 +282,7 @@ function parseArgs(argv) {
     instanceIds: [],
     levels: [],
     domains: [],
+    dmlFiles: {},
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -310,6 +314,8 @@ function parseArgs(argv) {
     if (arg === '--run-temp') { args.runTemp = Number(readValue()); continue; }
     if (arg === '--compile-temp') { args.compileTemp = Number(readValue()); continue; }
     if (arg === '--python-path') { args.pythonPath = readValue(); continue; }
+    if (arg === '--travel-dml') { (args.dmlFiles ??= {}).travel = readValue(); continue; }
+    if (arg === '--shopping-dml') { (args.dmlFiles ??= {}).shopping = readValue(); continue; }
     if (arg === '--verbose' || arg === '-v') { args.verbose = true; continue; }
 
     throw new Error(`Unknown argument: ${arg}`);
@@ -340,6 +346,8 @@ Options:
   --gateway-temp <n>           Gateway temperature (default: 0.7)
   --run-temp <n>               Run temperature (default: 0.7)
   --compile-temp <n>           Compile temperature (default: 0.4)
+  --travel-dml <path>          Custom DML file for travel domain (default: travel.dml)
+  --shopping-dml <path>        Custom DML file for shopping domain (default: shopping.dml)
   --verbose, -v                Stream worker output
   --help                       Show this help
 
@@ -348,7 +356,8 @@ Examples:
   node benchmarks/run-deepplanning.mjs --domain shopping --level 1 --limit 2
   node benchmarks/run-deepplanning.mjs --domain travel --language en --limit 3
   node benchmarks/run-deepplanning.mjs --domain shopping --domain travel --limit 5
-`);
+  node benchmarks/run-deepplanning.mjs --domain travel --travel-dml benchmarks/deepplanning/travel-v2.dml --limit 2
+ `);
 }
 
 function buildRunId() {
