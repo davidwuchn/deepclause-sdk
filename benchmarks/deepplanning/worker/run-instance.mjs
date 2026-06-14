@@ -55,8 +55,8 @@ async function main() {
 
       const planDmlFile = resolvePlanDmlFile(spec.domain, spec.dmlFiles);
 
-      logProgress(`Plan phase: generating execution plan (model: ${planModel ?? 'default'})`);
       const planModel = spec.models?.plan ?? spec.models?.run;
+      logProgress(`Plan phase: generating execution plan (model: ${planModel ?? 'default'})`);
       const planArgs = [
         'deepclause', 'run', '--verbose', '--stream',
       ];
@@ -73,9 +73,8 @@ async function main() {
 
       const generatedPlan = await findGeneratedPlan(plansDir);
       result.generatedPlan = path.relative(agentHome, generatedPlan);
-      logProgress(`Execute phase: running generated plan ${result.generatedPlan} (model: ${executeModel ?? 'default'})`);
-
       const executeModel = spec.models?.execute ?? spec.models?.run;
+      logProgress(`Execute phase: running generated plan ${result.generatedPlan} (model: ${executeModel ?? 'default'})`);
       const executeArgs = [
         'deepclause', 'run', '--verbose', '--stream',
         ...bridgeParams,
