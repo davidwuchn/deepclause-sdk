@@ -184,7 +184,7 @@ def main():
                 if isinstance(parsed, (list, dict)):
                     tool_args[key] = parsed
                 elif isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
-                    if key.endswith('_id') or key.endswith('_name') or key.endswith('_ids'):
+                    if key.endswith('_id') or key.endswith('_name') or key.endswith('_ids') or key in ('latitude', 'longitude'):
                         pass
                     else:
                         tool_args[key] = parsed

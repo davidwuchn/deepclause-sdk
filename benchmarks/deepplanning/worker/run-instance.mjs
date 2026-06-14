@@ -19,50 +19,99 @@ async function main() {
   const logsDir = path.join(outputDir, 'logs');
   await fs.mkdir(logsDir, { recursive: true });
 
+  const mode = spec.mode ?? 'direct';
   const result = {
     success: false,
     taskId: spec.taskId,
     domain: spec.domain,
     level: spec.level,
     dbPath: spec.dbPath,
+    mode,
     agentOutput: '',
     commands: [],
     warnings: [],
   };
 
   const agentHome = path.join(outputDir, 'agent-home');
+  const plansDir = path.join(agentHome, 'plans');
   const startedAt = Date.now();
 
   try {
     await fs.mkdir(agentHome, { recursive: true });
     await setupDeepClauseWorkspace(agentHome, spec);
 
-    const dmlFile = resolveDmlFile(spec.domain, spec.dmlFiles);
-
     const request = buildRequest(spec);
     const env = buildCommandEnv(spec);
     const bridgeDir = BENCHMARKS_ROOT;
-
-    logProgress(`Running ${spec.domain} task ${spec.taskId}`);
-    const runArgs = [
-      'deepclause', 'run', '--verbose', '--stream',
+    const bridgeParams = [
       '--param', `db_path=${spec.dbPath}`,
       '--param', `bridge_dir=${bridgeDir}`,
       '--param', `bench_dir=${spec.benchDir}`,
       '--param', `python_path=${spec.pythonPath ?? 'python3'}`,
     ];
-    const runModel = spec.models?.run;
-    if (runModel) {
-      runArgs.push('--model', runModel);
-    }
-    runArgs.push(dmlFile, request);
-    const runResult = await runStep(result, logsDir, 'deepclause_run', runArgs, {
-      cwd: agentHome,
-      timeoutSeconds: spec.agentTimeoutSeconds ?? 600,
-      env,
-    });
 
-    result.agentOutput = extractAgentOutput(runResult.stdout, runResult.stderr);
+    if (mode === 'plan-execute') {
+      logProgress(`Running ${spec.domain} task ${spec.taskId} in plan-execute mode`);
+
+      const planDmlFile = resolvePlanDmlFile(spec.domain, spec.dmlFiles);
+
+      logProgress(`Plan phase: generating execution plan (model: ${planModel ?? 'default'})`);
+      const planModel = spec.models?.plan ?? spec.models?.run;
+      const planArgs = [
+        'deepclause', 'run', '--verbose', '--stream',
+      ];
+      if (planModel) {
+        planArgs.push('--model', planModel);
+      }
+      planArgs.push(planDmlFile, request);
+      const planResult = await runStep(result, logsDir, 'plan_generate', planArgs, {
+        cwd: agentHome,
+        timeoutSeconds: spec.agentTimeoutSeconds ?? 600,
+        env,
+      });
+      result.planOutput = planResult.stdout?.slice(-2000) ?? '';
+
+      const generatedPlan = await findGeneratedPlan(plansDir);
+      result.generatedPlan = path.relative(agentHome, generatedPlan);
+      logProgress(`Execute phase: running generated plan ${result.generatedPlan} (model: ${executeModel ?? 'default'})`);
+
+      const executeModel = spec.models?.execute ?? spec.models?.run;
+      const executeArgs = [
+        'deepclause', 'run', '--verbose', '--stream',
+        ...bridgeParams,
+      ];
+      if (executeModel) {
+        executeArgs.push('--model', executeModel);
+      }
+      executeArgs.push(result.generatedPlan, request);
+      const executeResult = await runStep(result, logsDir, 'plan_execute', executeArgs, {
+        cwd: agentHome,
+        timeoutSeconds: spec.agentTimeoutSeconds ?? 600,
+        env,
+      });
+
+      result.agentOutput = extractAgentOutput(executeResult.stdout, executeResult.stderr);
+    } else {
+      logProgress(`Running ${spec.domain} task ${spec.taskId} in direct mode`);
+      const dmlFile = resolveDmlFile(spec.domain, spec.dmlFiles);
+      const runArgs = [
+        'deepclause', 'run', '--verbose', '--stream',
+        ...bridgeParams,
+      ];
+      const runModel = spec.models?.run;
+      if (runModel) {
+        runArgs.push('--model', runModel);
+      }
+      runArgs.push(dmlFile, request);
+      const runResult = await runStep(result, logsDir, 'deepclause_run', runArgs, {
+        cwd: agentHome,
+        timeoutSeconds: spec.agentTimeoutSeconds ?? 600,
+        env,
+      });
+
+      result.agentOutput = extractAgentOutput(runResult.stdout, runResult.stderr);
+    }
+
     result.success = true;
     logProgress(`Worker completed successfully in ${Date.now() - startedAt}ms`);
   } catch (error) {
@@ -114,6 +163,8 @@ async function setupDeepClauseWorkspace(agentHome, spec) {
     gateway: spec.models?.gateway ?? config.models?.gateway ?? 'openai:gpt-4o',
     run: spec.models?.run ?? config.models?.run ?? 'openai:gpt-4o',
     compile: spec.models?.compile ?? config.models?.compile ?? 'openai:gpt-4o',
+    plan: spec.models?.plan ?? spec.models?.run ?? config.models?.plan,
+    execute: spec.models?.execute ?? spec.models?.run ?? config.models?.execute,
   };
   config.temperatures = {
     gateway: spec.temperatures?.gateway ?? config.temperatures?.gateway ?? 0.7,
@@ -172,12 +223,37 @@ function buildAdditionalToolsConfig(spec) {
 
 function resolveDmlFile(domain, dmlFiles) {
   const custom = dmlFiles?.[domain];
-  if (custom) {
-    return path.isAbsolute(custom) ? custom : path.resolve(BENCHMARKS_ROOT, custom);
-  }
+  if (custom) return custom;
   return domain === 'travel'
     ? path.join(BENCHMARKS_ROOT, 'travel.dml')
     : path.join(BENCHMARKS_ROOT, 'shopping.dml');
+}
+
+function resolvePlanDmlFile(domain, dmlFiles) {
+  const custom = dmlFiles?.[domain];
+  if (custom) return custom;
+  return domain === 'travel'
+    ? path.join(BENCHMARKS_ROOT, 'travel-plan.dml')
+    : path.join(BENCHMARKS_ROOT, 'shopping-plan.dml');
+}
+
+async function findGeneratedPlan(plansDir) {
+  try {
+    const entries = await fs.readdir(plansDir, { withFileTypes: true });
+    const planFiles = entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.dml'))
+      .map((entry) => path.join(plansDir, entry.name))
+      .sort();
+    if (planFiles.length === 0) {
+      throw new Error('Plan phase did not generate a plan file.');
+    }
+    return planFiles[planFiles.length - 1];
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw new Error('Plan phase did not generate a plans/ directory.');
+    }
+    throw error;
+  }
 }
 
 function buildRequest(spec) {

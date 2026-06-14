@@ -30,7 +30,10 @@ Run options:
   --run-id <name>          Run identifier
   --max-workers <n>        Concurrent workers (default: 1)
   --agent-timeout <secs>   Per-task timeout in seconds (default: 600)
+  --mode <direct|plan-execute>  Execution mode (default: direct)
   --run-model <id>         Run model (default: openai:gpt-4o)
+  --plan-model <id>        Plan phase model (plan-execute mode)
+  --execute-model <id>     Execute phase model (plan-execute mode)
   --run-temp <n>           Run temperature (default: 0.7)
   --python-path <path>     Python interpreter path (default: python3)
   --travel-dml <path>      Custom DML file for travel domain (default: travel.dml)
@@ -159,6 +162,9 @@ cmd_run() {
   [[ -n "${AGENT_TIMEOUT:-}" ]] && run_args+=(--agent-timeout "$AGENT_TIMEOUT")
   [[ -n "${RUN_MODEL:-}" ]] && run_args+=(--run-model "$RUN_MODEL")
   [[ -n "${RUN_TEMP:-}" ]] && run_args+=(--run-temp "$RUN_TEMP")
+  [[ -n "${MODE:-}" ]] && run_args+=(--mode "$MODE")
+  [[ -n "${PLAN_MODEL:-}" ]] && run_args+=(--plan-model "$PLAN_MODEL")
+  [[ -n "${EXECUTE_MODEL:-}" ]] && run_args+=(--execute-model "$EXECUTE_MODEL")
   [[ -n "${PYTHON_PATH:-}" ]] && run_args+=(--python-path "$PYTHON_PATH")
   [[ -n "${TRAVEL_DML:-}" ]] && run_args+=(--travel-dml "$TRAVEL_DML")
   [[ -n "${SHOPPING_DML:-}" ]] && run_args+=(--shopping-dml "$SHOPPING_DML")
@@ -229,6 +235,9 @@ main() {
   local AGENT_TIMEOUT=""
   local RUN_MODEL=""
   local RUN_TEMP=""
+  local MODE=""
+  local PLAN_MODEL=""
+  local EXECUTE_MODEL=""
   local PYTHON_PATH=""
   local TRAVEL_DML=""
   local SHOPPING_DML=""
@@ -296,6 +305,21 @@ main() {
         shift
         [[ $# -gt 0 ]] || die "missing value for --run-temp"
         RUN_TEMP="$1"
+        ;;
+      --mode)
+        shift
+        [[ $# -gt 0 ]] || die "missing value for --mode"
+        MODE="$1"
+        ;;
+      --plan-model)
+        shift
+        [[ $# -gt 0 ]] || die "missing value for --plan-model"
+        PLAN_MODEL="$1"
+        ;;
+      --execute-model)
+        shift
+        [[ $# -gt 0 ]] || die "missing value for --execute-model"
+        EXECUTE_MODEL="$1"
         ;;
       --python-path)
         shift

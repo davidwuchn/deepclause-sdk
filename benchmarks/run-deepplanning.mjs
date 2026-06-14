@@ -2,11 +2,21 @@
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const BENCHMARKS_ROOT = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(BENCHMARKS_ROOT, '..', '..');
+const REPO_ROOT = path.resolve(BENCHMARKS_ROOT, '..');
+
+function resolveVenvPython() {
+  const venvPython = path.join(REPO_ROOT, 'venv', 'bin', 'python3');
+  try {
+    fsSync.accessSync(venvPython, fsSync.constants.X_OK);
+    return venvPython;
+  } catch {}
+  return 'python3';
+}
 
 const DEFAULT_CONFIG = {
   domains: ['shopping', 'travel'],
@@ -63,6 +73,7 @@ async function main() {
   await writeJson(path.join(runRoot, 'manifest.json'), manifest);
 
   console.log(`Run ID: ${runId}`);
+  console.log(`Mode: ${config.mode}`);
   console.log(`Domains: ${config.domains.join(', ')}`);
   console.log(`Bench dir: ${benchDir}`);
 
@@ -201,9 +212,14 @@ async function loadTasks(benchDir, config, domain) {
   return tasks;
 }
 
-async function runWorkerTask({ task, instanceDir, benchDir, config }) {
+async function runWorkerTask({ task, instanceDir, benchDir, config, dmlFiles }) {
   const workerScript = path.join(BENCHMARKS_ROOT, 'deepplanning', 'worker', 'run-instance.mjs');
   const inputPath = path.join(instanceDir, 'input.json');
+
+  const resolvedDmlFiles = {};
+  for (const [domain, file] of Object.entries(dmlFiles ?? {})) {
+    resolvedDmlFiles[domain] = path.isAbsolute(file) ? file : path.resolve(REPO_ROOT, file);
+  }
 
   const workerInput = {
     ...task,
@@ -213,15 +229,17 @@ async function runWorkerTask({ task, instanceDir, benchDir, config }) {
     agentTimeoutSeconds: config.execution.agentTimeoutSeconds,
     benchDir,
     pythonPath: config.pythonPath,
-    dmlFiles: opts.dmlFiles ?? {},
+    dmlFiles: resolvedDmlFiles,
+    mode: config.mode,
   };
   await writeJson(inputPath, workerInput);
 
   try {
+    const phaseCount = config.mode === 'plan-execute' ? 2 : 1;
     await runCommand('node', [workerScript, inputPath, instanceDir], {
       cwd: REPO_ROOT,
       streamOutput: config.execution.verbose,
-      timeout: (config.execution.agentTimeoutSeconds + 120) * 1000,
+      timeout: (config.execution.agentTimeoutSeconds * phaseCount + 120) * 1000,
     });
 
     const resultPath = path.join(instanceDir, 'result.json');
@@ -266,14 +284,17 @@ function buildConfig(args) {
   if (args.gatewayModel) config.models.gateway = args.gatewayModel;
   if (args.runModel) config.models.run = args.runModel;
   if (args.compileModel) config.models.compile = args.compileModel;
+  if (args.planModel) config.models.plan = args.planModel;
+  if (args.executeModel) config.models.execute = args.executeModel;
   if (args.gatewayTemp) config.temperatures.gateway = args.gatewayTemp;
   if (args.runTemp) config.temperatures.run = args.runTemp;
   if (args.compileTemp) config.temperatures.compile = args.compileTemp;
-  config.pythonPath = args.pythonPath ?? 'python3';
+  config.pythonPath = args.pythonPath ?? resolveVenvPython();
   config.instanceIds = args.instanceIds ?? [];
   config.offset = args.offset ?? 0;
   config.limit = args.limit;
   config.dmlFiles = args.dmlFiles ?? {};
+  config.mode = args.mode ?? 'direct';
   return config;
 }
 
@@ -316,6 +337,9 @@ function parseArgs(argv) {
     if (arg === '--python-path') { args.pythonPath = readValue(); continue; }
     if (arg === '--travel-dml') { (args.dmlFiles ??= {}).travel = readValue(); continue; }
     if (arg === '--shopping-dml') { (args.dmlFiles ??= {}).shopping = readValue(); continue; }
+    if (arg === '--mode') { args.mode = readValue(); continue; }
+    if (arg === '--plan-model') { args.planModel = readValue(); continue; }
+    if (arg === '--execute-model') { args.executeModel = readValue(); continue; }
     if (arg === '--verbose' || arg === '-v') { args.verbose = true; continue; }
 
     throw new Error(`Unknown argument: ${arg}`);
@@ -340,9 +364,12 @@ Options:
   --deepclause-version <ver>   DeepClause SDK version (default: latest)
   --max-workers <n>            Concurrent workers (default: 1)
   --agent-timeout <seconds>    Per-task timeout (default: 600)
+  --mode <direct|plan-execute> Execution mode (default: direct)
   --gateway-model <id>         Gateway model (default: openai:gpt-4o)
   --run-model <id>             Run model (default: openai:gpt-4o)
   --compile-model <id>         Compile model (default: openai:gpt-4o)
+  --plan-model <id>            Plan phase model (plan-execute mode; default: run-model)
+  --execute-model <id>         Execute phase model (plan-execute mode; default: run-model)
   --gateway-temp <n>           Gateway temperature (default: 0.7)
   --run-temp <n>               Run temperature (default: 0.7)
   --compile-temp <n>           Compile temperature (default: 0.4)
@@ -355,7 +382,7 @@ Examples:
   node benchmarks/run-deepplanning.mjs --limit 2
   node benchmarks/run-deepplanning.mjs --domain shopping --level 1 --limit 2
   node benchmarks/run-deepplanning.mjs --domain travel --language en --limit 3
-  node benchmarks/run-deepplanning.mjs --domain shopping --domain travel --limit 5
+  node benchmarks/run-deepplanning.mjs --domain travel --mode plan-execute --plan-model openai:gpt-4o --execute-model openai:gpt-4o-mini --limit 3
   node benchmarks/run-deepplanning.mjs --domain travel --travel-dml benchmarks/deepplanning/travel-v2.dml --limit 2
  `);
 }

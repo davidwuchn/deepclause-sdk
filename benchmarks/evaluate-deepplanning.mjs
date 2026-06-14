@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const BENCHMARKS_ROOT = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(BENCHMARKS_ROOT, '..', '..');
+const REPO_ROOT = path.resolve(BENCHMARKS_ROOT, '..');
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
