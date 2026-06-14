@@ -102,7 +102,7 @@ parse_bridge_result(_, "Error: tool call failed").
 % No file I/O, no nested DML execution — just Prolog arithmetic.
 
 tool(verify_plan(PlanJson, BudgetLimitIn, TravelersIn, Result),
-     "Verify a travel plan against hard constraints. Pass: PlanJson (JSON string with {total_cost, days:[{activities:[{time_start,time_end,type,name,cost}]}]}), BudgetLimit (integer), Travelers (integer). Returns PASS or specific violation descriptions.") :-
+     "Verify a travel plan against hard constraints. Checks budget, time overlaps/gaps, name diversity, and last-day structure. Returns PASS or specific violation descriptions.\n\nArguments:\n  PlanJson: JSON string. Must include: {total_cost: <number>, days: [{day_number: <int>, activities: [{name: <string>, time_start: \"HH:MM\", time_end: \"HH:MM\", type: <string>, cost: <number>}]}]}\n  BudgetLimitIn: Total budget limit (integer). Total cost = total_cost * Travelers.\n  TravelersIn: Number of travelers (integer).\n\nActivity type values must be strings: \"attraction\", \"meal\", \"travel_intercity_public\", \"buffer\" etc.\nLast-day last activity must be type \"travel_intercity_public\" or \"buffer\".\nTime gaps >60min between adjacent activities are flagged.\nDuplicate attraction/meal names across days are flagged.") :-
     atom_json_dict(PlanJson, PlanData, []),
     coerce_int(BudgetLimitIn, BudgetLimit),
     coerce_int(TravelersIn, Travelers),
@@ -160,7 +160,7 @@ verify_diversity(PlanData, V) :-
         get_dict(activities, Day, Acts),
         member(Act, Acts),
         get_dict(type, Act, T),
-        member(T, [attraction, meal]),
+        member(T, ["attraction", "meal"]),
         get_dict(name, Act, Name)
     ), AllNames),
     sort(AllNames, Unique),
@@ -178,7 +178,7 @@ verify_last_day(PlanData, V) :-
     Acts \= [],
     last(Acts, LastAct),
     get_dict(type, LastAct, LastType),
-    \+ member(LastType, [travel_intercity_public, buffer]),
+    \+ member(LastType, ["travel_intercity_public", "buffer"]),
     format(string(V), 'STRUCTURE: last day ends with ~w, should end at transport hub', [LastType]).
 
 time_to_min(TimeStr, Min) :-
