@@ -128,8 +128,6 @@ verify_budget(PlanData, BudgetLimit, Travelers, V) :-
     Over is TotalCost - BudgetLimit,
     format(string(V), 'BUDGET: ~w total (per-person ~w x ~w travelers) exceeds ~w limit by ~w', [TotalCost, ReportedTotal, Travelers, BudgetLimit, Over]).
 
-verify_budget(_, _, _, _).
-
 verify_time(PlanData, V) :-
     get_dict(days, PlanData, Days),
     member(Day, Days),

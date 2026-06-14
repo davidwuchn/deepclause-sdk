@@ -221,7 +221,6 @@ travel_tool_block(ToolBlock) :-
         '    TotalCost > BudgetLimit,',
         '    Over is TotalCost - BudgetLimit,',
         '    format(string(V), \'BUDGET: ~w total exceeds ~w limit by ~w\', [TotalCost, BudgetLimit, Over]).',
-        'verify_budget(_, _, _, _).',
         '',
         'verify_time(PlanData, V) :-',
         '    get_dict(days, PlanData, Days),',
