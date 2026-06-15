@@ -90,6 +90,31 @@ async function main() {
       });
 
       result.agentOutput = extractAgentOutput(executeResult.stdout, executeResult.stderr);
+    } else if (mode === 'compile') {
+      logProgress(`Running ${spec.domain} task ${spec.taskId} in compile mode`);
+
+      const compiledDml = spec.compiledDmlPath;
+      if (!compiledDml) {
+        throw new Error('compile mode requires compiledDmlPath in spec');
+      }
+
+      const runModel = spec.models?.run;
+      logProgress(`Execute phase: running compiled skill ${compiledDml} (model: ${runModel ?? 'default'})`);
+      const runArgs = [
+        'deepclause', 'run', '--verbose', '--stream',
+        ...bridgeParams,
+      ];
+      if (runModel) {
+        runArgs.push('--model', runModel);
+      }
+      runArgs.push(compiledDml, request);
+      const runResult = await runStep(result, logsDir, 'skill_execute', runArgs, {
+        cwd: agentHome,
+        timeoutSeconds: spec.agentTimeoutSeconds ?? 600,
+        env,
+      });
+
+      result.agentOutput = extractAgentOutput(runResult.stdout, runResult.stderr);
     } else {
       logProgress(`Running ${spec.domain} task ${spec.taskId} in direct mode`);
       const dmlFile = resolveDmlFile(spec.domain, spec.dmlFiles);

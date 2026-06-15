@@ -94,6 +94,11 @@ async function main() {
     const instancesDir = path.join(runRoot, domain, 'instances');
     await fs.mkdir(instancesDir, { recursive: true });
 
+    let compiledDmlPath;
+    if (config.mode === 'compile') {
+      compiledDmlPath = await compileSkill(runRoot, domain, config);
+    }
+
     const results = await mapLimit(tasks, config.execution.maxWorkers, async (task) => {
       const instanceDir = path.join(instancesDir, sanitizeSegment(task.taskId));
       await fs.mkdir(instanceDir, { recursive: true });
@@ -107,6 +112,7 @@ async function main() {
         benchDir,
         config,
         dmlFiles: config.dmlFiles,
+        compiledDmlPath,
       });
 
       const state = result.success ? 'ok' : 'error';
@@ -212,7 +218,7 @@ async function loadTasks(benchDir, config, domain) {
   return tasks;
 }
 
-async function runWorkerTask({ task, instanceDir, benchDir, config, dmlFiles }) {
+async function runWorkerTask({ task, instanceDir, benchDir, config, dmlFiles, compiledDmlPath }) {
   const workerScript = path.join(BENCHMARKS_ROOT, 'deepplanning', 'worker', 'run-instance.mjs');
   const inputPath = path.join(instanceDir, 'input.json');
 
@@ -230,7 +236,9 @@ async function runWorkerTask({ task, instanceDir, benchDir, config, dmlFiles }) 
     benchDir,
     pythonPath: config.pythonPath,
     dmlFiles: resolvedDmlFiles,
+    specFiles: config.specFiles,
     mode: config.mode,
+    compiledDmlPath: compiledDmlPath ?? null,
   };
   await writeJson(inputPath, workerInput);
 
@@ -294,7 +302,9 @@ function buildConfig(args) {
   config.offset = args.offset ?? 0;
   config.limit = args.limit;
   config.dmlFiles = args.dmlFiles ?? {};
+  config.specFiles = args.specFiles ?? {};
   config.mode = args.mode ?? 'direct';
+  config.compileTimeoutSeconds = args.compileTimeout ?? 1800;
   return config;
 }
 
@@ -337,6 +347,9 @@ function parseArgs(argv) {
     if (arg === '--python-path') { args.pythonPath = readValue(); continue; }
     if (arg === '--travel-dml') { (args.dmlFiles ??= {}).travel = readValue(); continue; }
     if (arg === '--shopping-dml') { (args.dmlFiles ??= {}).shopping = readValue(); continue; }
+    if (arg === '--travel-spec') { (args.specFiles ??= {}).travel = readValue(); continue; }
+    if (arg === '--shopping-spec') { (args.specFiles ??= {}).shopping = readValue(); continue; }
+    if (arg === '--compile-timeout') { args.compileTimeout = Number(readValue()); continue; }
     if (arg === '--mode') { args.mode = readValue(); continue; }
     if (arg === '--plan-model') { args.planModel = readValue(); continue; }
     if (arg === '--execute-model') { args.executeModel = readValue(); continue; }
@@ -364,7 +377,7 @@ Options:
   --deepclause-version <ver>   DeepClause SDK version (default: latest)
   --max-workers <n>            Concurrent workers (default: 1)
   --agent-timeout <seconds>    Per-task timeout (default: 600)
-  --mode <direct|plan-execute> Execution mode (default: direct)
+  --mode <direct|plan-execute|compile> Execution mode (default: direct)
   --gateway-model <id>         Gateway model (default: openai:gpt-4o)
   --run-model <id>             Run model (default: openai:gpt-4o)
   --compile-model <id>         Compile model (default: openai:gpt-4o)
@@ -375,6 +388,9 @@ Options:
   --compile-temp <n>           Compile temperature (default: 0.4)
   --travel-dml <path>          Custom DML file for travel domain (default: travel.dml)
   --shopping-dml <path>        Custom DML file for shopping domain (default: shopping.dml)
+  --travel-spec <path>         Custom Markdown spec for travel domain (compile mode; default: travel-planner.md)
+  --shopping-spec <path>       Custom Markdown spec for shopping domain (compile mode; default: shopping-planner.md)
+  --compile-timeout <seconds>  Skill compilation timeout (default: 300)
   --verbose, -v                Stream worker output
   --help                       Show this help
 
@@ -390,6 +406,122 @@ Examples:
 function buildRunId() {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   return `dp-${stamp}`;
+}
+
+async function compileSkill(runRoot, domain, config) {
+  const specFile = config.specFiles?.[domain]
+    ?? (domain === 'travel'
+      ? path.join(BENCHMARKS_ROOT, 'deepplanning', 'travel-planner.md')
+      : path.join(BENCHMARKS_ROOT, 'deepplanning', 'shopping-planner.md'));
+
+  const compileHome = path.join(runRoot, domain, 'compile-home');
+  await fs.mkdir(compileHome, { recursive: true });
+
+  const compileModel = config.models?.compile ?? config.models?.run;
+  console.log(`[${domain}] Compiling skill from ${path.basename(specFile)} (model: ${compileModel ?? 'default'})`);
+
+  const initArgs = ['deepclause', 'init', '--force', '--model', compileModel ?? 'openai:gpt-4o'];
+  await runCommand(initArgs[0], initArgs.slice(1), { cwd: compileHome, streamOutput: config.execution.verbose, timeout: 30000 });
+
+  const compileConfigPath = path.join(compileHome, '.deepclause', 'config.json');
+  let compileConfig;
+  try {
+    compileConfig = JSON.parse(await fs.readFile(compileConfigPath, 'utf8'));
+  } catch { compileConfig = {}; }
+  compileConfig.models = {
+    ...compileConfig.models,
+    compile: compileModel ?? config.models?.compile ?? 'openai:gpt-4o',
+  };
+  compileConfig.shell = { wrapper: 'clean-room', strictIsolation: false };
+  await fs.writeFile(compileConfigPath, JSON.stringify(compileConfig, null, 2), 'utf8');
+
+  const compileRunArgs = ['deepclause', 'compile', '--force', '--verbose', '--stream', '--no-audit', specFile];
+  if (compileModel) compileRunArgs.push('--model', compileModel);
+  const compileTimeout = (config.compileTimeoutSeconds ?? 1800) * 1000;
+  await runCommand(compileRunArgs[0], compileRunArgs.slice(1), { cwd: compileHome, streamOutput: config.execution.verbose, timeout: compileTimeout });
+
+  const toolsDir = path.join(compileHome, '.deepclause', 'tools');
+  const entries = await fs.readdir(toolsDir, { withFileTypes: true });
+  const dmlFiles = entries.filter((e) => e.isFile() && e.name.endsWith('.dml')).map((e) => e.name).sort();
+  if (dmlFiles.length === 0) {
+    throw new Error(`[${domain}] Compile phase did not produce a DML file.`);
+  }
+  const rawDmlPath = path.join(toolsDir, dmlFiles[dmlFiles.length - 1]);
+  console.log(`[${domain}] Compiled skill: ${dmlFiles[dmlFiles.length - 1]}`);
+
+  const finalDmlPath = path.join(runRoot, domain, `${domain}-compiled.dml`);
+  await injectBridgeIntoDml(rawDmlPath, finalDmlPath, domain);
+  console.log(`[${domain}] Final DML: ${finalDmlPath}`);
+
+  return finalDmlPath;
+}
+
+async function injectBridgeIntoDml(sourcePath, targetPath, domain) {
+  const raw = await fs.readFile(sourcePath, 'utf8');
+
+  if (raw.includes('run_tool(')) {
+    await fs.writeFile(targetPath, raw, 'utf8');
+    console.log(`  Bridge already present in compiled DML, using as-is.`);
+    return;
+  }
+
+  const agentMainStart = raw.indexOf('\nagent_main(');
+  if (agentMainStart === -1) {
+    throw new Error('Compiled DML has no agent_main clause');
+  }
+  const agentClauses = raw.slice(agentMainStart + 1);
+
+  const bridgeBlock = buildBridgeBlock(domain);
+  const finalDml = `:- use_module(library(http/json)).\n\n${bridgeBlock}\n\n${agentClauses}\n`;
+  await fs.writeFile(targetPath, finalDml, 'utf8');
+  console.log(`  Injected bridge into compiled DML (replaced exec() tool defs).`);
+}
+
+function buildBridgeBlock(domain) {
+  const toolMap = domain === 'travel' ? {
+    query_train_info: 'origin, destination, depDate',
+    query_train_info_with_class: 'origin, destination, depDate, seatClassName',
+    query_flight_info: 'origin, destination, depDate',
+    query_flight_info_with_class: 'origin, destination, depDate, seatClassName',
+    query_hotel_info: 'destination, checkinDate, checkoutDate',
+    query_hotel_info_with_star: 'destination, checkinDate, checkoutDate, hotelStar',
+    recommend_attractions: 'city',
+    query_attraction_details: 'attraction_name',
+    search_location: 'place_name',
+    query_road_route_info: 'origin, destination',
+    recommend_restaurants: 'latitude, longitude',
+    query_restaurant_details: 'restaurant_name',
+  } : {};
+
+  let bridge = `:- use_module(library(http/json)).\n\n`;
+  bridge += `run_tool(ToolName, ArgsDict, Result) :-\n`;
+  bridge += `    param(db_path, DbPath),\n`;
+  bridge += `    param(bridge_dir, BridgeDir),\n`;
+  bridge += `    param(bench_dir, BenchDir),\n`;
+  bridge += `    param(python_path, PythonPath),\n`;
+  bridge += `    (var(PythonPath) -> PythonPath = 'python3' ; true),\n`;
+  bridge += `    atom_json_dict(ArgsJson, ArgsDict, []),\n`;
+  bridge += `    format(string(ArgsFile), ".dc_bridge_~w.json", [ToolName]),\n`;
+  bridge += `    exec(write_file(path: ArgsFile, content: ArgsJson), _),\n`;
+  bridge += `    format(string(Cmd), "~w '\\~w/python-bridge.py' --domain ${domain} --db-path '\\~w' --bench-dir '\\~w' --tool ~w --args-file '\\~w'", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName, ArgsFile]),\n`;
+  bridge += `    exec(bash(command: Cmd), Raw),\n`;
+  bridge += `    parse_bridge_result(Raw, Result).\n\n`;
+
+  for (const [toolName, args] of Object.entries(toolMap)) {
+    const argList = args.split(', ').map((a) => a.charAt(0).toUpperCase() + a.slice(1).replace(/_([a-z])/g, (_, c) => c.toUpperCase()));
+    const paramList = args.split(', ').map((a) => `${a}: ${a.charAt(0).toUpperCase() + a.slice(1).replace(/_([a-z])/g, (_, c) => c.toUpperCase())}`);
+    bridge += `tool(${toolName}(${argList.join(', ')}, Result),\n`;
+    bridge += `     "See skill spec for details.") :-\n`;
+    bridge += `    run_tool(${toolName}, _{${paramList.join(', ')}}, Result).\n\n`;
+  }
+
+  bridge += `parse_bridge_result(Raw, Result) :-\n`;
+  bridge += `    get_dict(stdout, Raw, Stdout),\n`;
+  bridge += `    !,\n`;
+  bridge += `    Result = Stdout.\n\n`;
+  bridge += `parse_bridge_result(_, "Error: tool call failed").\n`;
+
+  return bridge;
 }
 
 function sanitizeSegment(segment) {
