@@ -30,9 +30,73 @@ DeepClause was evaluated on the [DeepPlanning](https://arxiv.org/abs/2601.18137)
 |-------|-----------|-----------|-----------|----------|----------|
 | Qwen-Agent baseline (paper) | qwen3.6-35b-a3b | qwen3.6-35b-a3b | 22.2% | 0.0% | 82.5% |
 | DeepClause DML (plan-execute) | qwen3.6-plus | qwen3.6-35b-a3b | **42.9%** | 0.0% | 96.7% |
-| DeepClause DML (direct) | qwen3.6-35b-a3b | qwen3.6-35b-a3b | 36.5% | 0.0% | **98.3%** |
+| DeepClause DML (plan-execute) | qwen3.6-35b-a3b | qwen3.6-35b-a3b | 36.5% | 0.0% | **98.3%** |
 
 The DeepClause plan-execute variant achieves a **+93% relative improvement** in composite score over the baseline function-calling agent (42.9% vs 22.2%), using the same model for execution. For reference, the best result in the DeepPlanning paper (GPT-5.2-high) reaches 85.8% composite score, but at roughly 224 tool calls per task.
+
+The plan-execute variant runs in two phases. In the **plan phase**, a stronger model (qwen3.6-plus) analyzes the travel request and generates a self-contained DML file: it derives a system prompt, decomposes the request into 3-6 focused gathering tasks, and assembles DML program that includes all tool definitions and the execution logic. In the **execute phase**, a cheaper model (qwen3.6-35b-a3b) runs the generated DML.
+
+Example for a generated plan:
+
+```
+:- use_module(library(http/json)).
+
+% --- Travel Tool Bridge ---
+
+run_tool(ToolName, ArgsDict, Result) :-
+    param(db_path, DbPath),
+    param(bridge_dir, BridgeDir),
+    param(bench_dir, BenchDir),
+    param(python_path, PythonPath),
+    (var(PythonPath) -> PythonPath = 'python3' ; true),
+    atom_json_dict(ArgsJson, ArgsDict, []),
+    format(string(ArgsFile), ".dc_bridge_~w.json", [ToolName]),
+    exec(write_file(path: ArgsFile, content: ArgsJson), _),
+    format(string(Cmd), "~w '~w/python-bridge.py' --domain travel --db-path '~w' --bench-dir '~w' --tool ~w --args-file '~w'", [PythonPath, BridgeDir, DbPath, BenchDir, ToolName, ArgsFile]),
+    exec(bash(command: Cmd), Raw),
+    parse_bridge_result(Raw, Result).
+
+tool(query_train_info(Origin, Dest, Date, Result),
+     "Search for train tickets between two cities on a given date. Returns train number, times, stations, duration, seat class, remaining seats, price.") :-
+    run_tool(query_train_info, _{origin: Origin, destination: Dest, depDate: Date}, Result).
+
+
+[ ... more tool definitions ...]
+
+agent_main(Request) :-
+    system("You are a travel planning agent creating a detailed itinerary for 4 travelers from Zhengzhou to Quanzhou (Nov 12-15, 2025). Execute the planned gathering steps autonomously without asking for user input.\n\nRULES:\n- All information must come from tool results — never fabricate names, prices, or details\n- Restaurant names must be EXACT matches from recommend_restaurants/query_restaurant_details results\n- Use recommend_restaurants with attraction/hotel coordinates passed as STRINGS, not restaurant coordinates\n- Current City on intercity travel days must use 'from CityA to CityB' format (literal 'from' and 'to')\n- Budget: all prices are per-unit; multiply by number of travelers/rooms in the final summary\n- Schedule times must be continuous with no gaps; do not schedule breakfast; full days require lunch+dinner\n- Last day (Nov 15) must end at the departure airport/station for the return journey\n- Select the shortest-duration direct outbound flight, a 4-star hotel with free parking, the 3 highest-rated attractions, and the cheapest restaurant in Donghai Bay area\n\nProceed through all gathering steps, then compile the complete itinerary with continuous daily schedules, exact venue names, and accurate budget calculations."),
+    user(Request),
+    task("Search for direct flights from Zhengzhou to Quanzhou on November 12, 2025, and return flights from Quanzhou to Zhengzhou on November 15, 2025, for 4 passengers, identif
+ying the shortest-duration direct flight option for the outbound journey."),
+    task("Search for four-star hotels in Quanzhou with free parking available for check-in on November 12, 2025 and check-out on November 15, 2025, accommodating 4 guests."),
+    task("Search for and recommend top-rated attractions in Quanzhou, then retrieve details to identify the three highest-rated attractions."),
+    task("Search for restaurants in the Donghai Bay area of Quanzhou and find the one with the lowest average spending per person."),
+    task('Based on all gathered information, generate the complete travel itinerary inside <plan></plan> tags. Include day-by-day schedule with times, Current City, attractions,
+meals with EXACT restaurant names from tool results, transport details, and a budget summary where per-unit costs are multiplied by number of travelers/rooms.', string(DraftPlan)
+),
+    task('Review this travel plan for errors and fix them. Check ALL of the following:
+1. BUDGET: Is total cost (per-person costs * travelers, per-room costs * rooms) within budget?
+2. TIME CONTINUITY: Are times continuous with no gaps or overlaps? Each activity end time = next start time.
+3. MEAL RULES: Full sightseeing days need lunch AND dinner. No breakfast. Meals 1-2 hours. At least 2 hours between lunch and dinner.
+4. DAILY STRUCTURE: Every day except last ends at hotel. Last day ends at departure airport/station.
+5. GEOSPATIAL: No teleportation — travel_city between different locations.
+6. DIVERSITY: No repeating restaurants or attractions across days.
+7. NAMES: All names EXACTLY match tool results — no abbreviations or renames.
+8. CURRENT CITY: Intercity days must say "from CityA to CityB".
+
+Plan to review:
+{DraftPlan}
+
+If the plan has errors, output the CORRECTED plan inside <plan></plan> tags. If it is already correct, output it unchanged inside <plan></plan> tags. Store the final verified plan in VerifiedPlan.', string(VerifiedPlan)),
+    answer(VerifiedPlan).
+
+agent_main(Request) :-
+    system('You are a travel planning assistant. Create a travel plan using the available tools. Output inside <plan></plan> tags with budget summary.'),
+    user(Request),
+    task('Create a complete travel plan using all available tools. Output inside <plan></plan> tags.', string(Plan)),
+    answer(Plan).
+```
+
 
 
 ## Install and Run
