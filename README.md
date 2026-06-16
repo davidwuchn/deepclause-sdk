@@ -63,9 +63,9 @@ Full comparison with frontier models from the DeepPlanning paper (travel plannin
 | Z.ai/GLM-4.7 (w/ thinking) | 44.0 | 44.6 | 44.3 | 0.4 |
 | OpenAI/o4-mini | 58.0 | 36.6 | 47.2 | 3.0 |
 | Moonshot-AI/Kimi-K2-Thinking | 45.2 | 32.5 | 38.9 | 0.0 |
-| **DeepClause (compiled DML)** | | | | |
-| Qwen-Agent baseline (paper) | 44.5 | 0.0 | 22.2 | 0.0 |
-| DeepClause direct (qwen3.6-35b-a3b) | 32.9 | 40.0 | 36.5 | 0.0 |
+| qwen3.6-35b-a3b baseline  | 44.5 | 0.0 | 22.2 | 0.0 |
+| **DeepClause** | | | | |
+| DeepClause plan-execute (qwen3.6-35b-a3b) | 32.9 | 40.0 | 36.5 | 0.0 |
 | DeepClause plan-execute (plan: qwen3.6-plus, run: qwen3.6-35b-a3b) | 34.1 | 51.7 | **42.9** | 0.0 |
 
 CS = Commonsense Score, PS = Personalized Score, Comp = Composite Score. Results from the DeepPlanning paper (Table 2, travel planning only) are averaged over four runs across Chinese and English variants; DeepClause results are on the English subset. The DeepClause plan-execute variant outperforms the Qwen-Agent baseline by +93% on composite score (42.9% vs 22.2%) using the same execution model, and matches or exceeds several frontier reasoning models (DeepSeek-V3.2 w/ thinking: 41.2%, Gemini-3-Pro-Preview: 41.8%) — without any internal reasoning capability.
