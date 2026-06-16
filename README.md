@@ -29,10 +29,46 @@ DeepClause was evaluated on the [DeepPlanning](https://arxiv.org/abs/2601.18137)
 | Agent | Plan Model | Run Model | Composite | Case Acc | Delivery |
 |-------|-----------|-----------|-----------|----------|----------|
 | Qwen-Agent baseline (paper) | qwen3.6-35b-a3b | qwen3.6-35b-a3b | 22.2% | 0.0% | 82.5% |
+| DeepClause DML (direct) | qwen3.6-35b-a3b | qwen3.6-35b-a3b | 36.5% | 0.0% | **98.3%** |
 | DeepClause DML (plan-execute) | qwen3.6-plus | qwen3.6-35b-a3b | **42.9%** | 0.0% | 96.7% |
-| DeepClause DML (plan-execute) | qwen3.6-35b-a3b | qwen3.6-35b-a3b | 36.5% | 0.0% | **98.3%** |
 
-The DeepClause plan-execute variant achieves a **+93% relative improvement** in composite score over the baseline function-calling agent (42.9% vs 22.2%), using the same model for execution. For reference, the best result in the DeepPlanning paper (GPT-5.2-high) reaches 85.8% composite score, but at roughly 224 tool calls per task.
+Full comparison with frontier models from the DeepPlanning paper (travel planning only):
+
+| Model | CS | PS | Comp | Case Acc |
+|-------|-----|-----|------|----------|
+| **Non-Reasoning Models** | | | | |
+| Anthropic/Claude-4.5-Opus (w/o thinking) | 67.5 | 58.8 | 63.1 | 6.7 |
+| Anthropic/Claude-4.5-Sonnet (w/o thinking) | 53.4 | 42.8 | 48.1 | 1.1 |
+| Alibaba/Qwen3-Max (w/o thinking) | 36.7 | 30.7 | 31.8 | 0.8 |
+| ByteDance/Seed-1.8-minimal | 43.0 | 47.5 | 45.3 | 0.0 |
+| Alibaba/Qwen-Plus (w/o thinking) | 37.3 | 13.0 | 25.1 | 0.0 |
+| Z.ai/GLM-4.7 (w/o thinking) | 38.9 | 22.5 | 30.7 | 0.0 |
+| DeepSeek-AI/DeepSeek-V3.2 (w/o thinking) | 37.4 | 12.1 | 24.7 | 0.0 |
+| OpenAI/GPT-5.2-none | 54.3 | 29.9 | 42.1 | 0.4 |
+| xAI/Grok-4.1-Fast (non-reasoning) | 39.6 | 19.7 | 29.6 | 0.0 |
+| **Reasoning Models** | | | | |
+| OpenAI/GPT-5.2-high | 88.5 | 83.3 | 85.8 | 35.0 |
+| Anthropic/Claude-4.5-Opus (w/ thinking) | 79.3 | 70.9 | 75.1 | 22.7 |
+| OpenAI/GPT-5-high | 78.7 | 65.9 | 72.3 | 18.9 |
+| Google/Gemini-3-Flash-Preview | 67.1 | 57.7 | 62.4 | 5.9 |
+| Alibaba/Qwen3-Max (w/ thinking) | 64.0 | 61.7 | 62.8 | 13.8 |
+| Anthropic/Claude-4.5-Sonnet (w/ thinking) | 65.2 | 58.4 | 61.8 | 7.6 |
+| OpenAI/o3 | 76.5 | 55.6 | 66.1 | 11.3 |
+| Google/Gemini-3-Pro-Preview | 58.4 | 25.1 | 41.8 | 0.7 |
+| Deepseek-AI/DeepSeek-V3.2 (w/ thinking) | 47.4 | 35.0 | 41.2 | 0.7 |
+| ByteDance/Seed-1.8-high | 43.6 | 56.7 | 50.1 | 0.0 |
+| xAI/Grok-4.1-Fast (reasoning) | 57.1 | 37.7 | 47.4 | 2.7 |
+| Alibaba/Qwen-Plus (w/ thinking) | 35.4 | 22.4 | 28.9 | 0.0 |
+| Google/Gemini-2.5-Pro | 62.3 | 42.0 | 52.2 | 3.2 |
+| Z.ai/GLM-4.7 (w/ thinking) | 44.0 | 44.6 | 44.3 | 0.4 |
+| OpenAI/o4-mini | 58.0 | 36.6 | 47.2 | 3.0 |
+| Moonshot-AI/Kimi-K2-Thinking | 45.2 | 32.5 | 38.9 | 0.0 |
+| **DeepClause (compiled DML)** | | | | |
+| Qwen-Agent baseline (paper) | 44.5 | 0.0 | 22.2 | 0.0 |
+| DeepClause direct (qwen3.6-35b-a3b) | 32.9 | 40.0 | 36.5 | 0.0 |
+| DeepClause plan-execute (plan: qwen3.6-plus, run: qwen3.6-35b-a3b) | 34.1 | 51.7 | **42.9** | 0.0 |
+
+CS = Commonsense Score, PS = Personalized Score, Comp = Composite Score. Results from the DeepPlanning paper (Table 2, travel planning only) are averaged over four runs across Chinese and English variants; DeepClause results are on the English subset. The DeepClause plan-execute variant outperforms the Qwen-Agent baseline by +93% on composite score (42.9% vs 22.2%) using the same execution model, and matches or exceeds several frontier reasoning models (DeepSeek-V3.2 w/ thinking: 41.2%, Gemini-3-Pro-Preview: 41.8%) — without any internal reasoning capability.
 
 The plan-execute variant runs in two phases. In the **plan phase**, a stronger model (qwen3.6-plus) analyzes the travel request and generates a self-contained DML file: it derives a system prompt, decomposes the request into 3-6 focused gathering tasks, and assembles DML program that includes all tool definitions and the execution logic. In the **execute phase**, a cheaper model (qwen3.6-35b-a3b) runs the generated DML.
 
