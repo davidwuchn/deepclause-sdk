@@ -22,6 +22,19 @@ The three main ways to use DeepClause are:
     - Explore how constrained logic, tool calls, and model output interact in a reproducible runtime
 
 
+## Benchmark: DeepPlanning Travel Planning
+
+DeepClause was evaluated on the [DeepPlanning](https://arxiv.org/abs/2601.18137) travel planning benchmark, which tests long-horizon agentic planning with verifiable constraints (time, budget, geography). The benchmark requires agents to gather information via tool calls, reason about local constraints, and produce globally coherent multi-day itineraries evaluated across 8 commonsense dimensions and personalized hard constraints.
+
+| Agent | Plan Model | Run Model | Composite | Case Acc | Delivery |
+|-------|-----------|-----------|-----------|----------|----------|
+| Qwen-Agent baseline (paper) | qwen3.6-35b-a3b | qwen3.6-35b-a3b | 22.2% | 0.0% | 82.5% |
+| DeepClause DML (plan-execute) | qwen3.6-plus | qwen3.6-35b-a3b | **42.9%** | 0.0% | 96.7% |
+| DeepClause DML (direct) | qwen3.6-35b-a3b | qwen3.6-35b-a3b | 36.5% | 0.0% | **98.3%** |
+
+The DeepClause plan-execute variant achieves a **+93% relative improvement** in composite score over the baseline function-calling agent (42.9% vs 22.2%), using the same model for execution. For reference, the best result in the DeepPlanning paper (GPT-5.2-high) reaches 85.8% composite score, but at roughly 224 tool calls per task.
+
+
 ## Install and Run
 
 DeepClause requires Node.js 18+.
