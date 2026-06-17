@@ -37,7 +37,9 @@
     "benchmark:swebench:prefetch": "node benchmarks/prefetch-swebench-lite.mjs",
     "benchmark:swebench:evaluate": "node benchmarks/evaluate-predictions.mjs",
     "benchmark:deepplanning": "node benchmarks/run-deepplanning.mjs",
-    "benchmark:deepplanning:evaluate": "node benchmarks/evaluate-deepplanning.mjs"
+    "benchmark:deepplanning:evaluate": "node benchmarks/evaluate-deepplanning.mjs",
+    "benchmark:nl2repo": "node benchmarks/run-nl2repo.mjs",
+    "benchmark:nl2repo:evaluate": "node benchmarks/evaluate-nl2repo.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.35",
