@@ -173,11 +173,11 @@ async function writeDeepClauseConfig({ agentHome, taskDir, deepclause }) {
 }
 
 async function installBenchmarkPlan(agentHome) {
-  const benchmarkPlanSource = '/benchmarks-src/worker/plan.dml';
+  const benchmarkPlanSource = '/benchmarks-src/nl2repo/worker/plan.dml';
   const planTarget = path.join(agentHome, '.deepclause', 'system', 'plan.dml');
   if (await pathExists(benchmarkPlanSource)) {
     await fs.copyFile(benchmarkPlanSource, planTarget);
-    logProgress('Installed benchmark plan.dml (no ask_user)');
+    logProgress('Installed NL2Repo benchmark plan.dml');
   }
 }
 

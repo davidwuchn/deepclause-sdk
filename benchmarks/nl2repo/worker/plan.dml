@@ -1,0 +1,90 @@
+% Plan skill for NL2Repo benchmark.
+% Generates a plan for building a complete repository from a specification.
+% Benchmark variant: web_search, news_search, url_fetch, create_skill, ask_user removed.
+
+tool(run_bash(Command, Output), "Run a shell command in the workspace.") :-
+    exec(bash(command: Command), Output).
+
+tool(read_file_content(Path, Content), "Read the full text content of a file in the workspace.") :-
+    exec(read_file(path: Path), Content).
+
+tool(write_file_content(Path, Content), "Write text content to a file in the workspace, creating parent directories as needed.") :-
+    exec(write_file(path: Path, content: Content), _).
+
+tool(list_directory(Path, Entries), "List files and directories at the given path.") :-
+    exec(list_directory(path: Path), Entries).
+
+agent_main(Request) :-
+    task("Break this repository generation request into 5 to 10 concrete implementation steps: '{Request}'.
+
+Context: You are generating a complete Python repository from a specification document (start.md).
+
+Requirements for the plan:
+- First step: read start.md to understand the full specification.
+- Second step: analyze the specification and identify all modules, classes, functions, and tests needed.
+- Middle steps: implement each module, class, and function according to the specification, in dependency order.
+- Late steps: create the package structure (setup.py or pyproject.toml), add __init__.py files, and ensure the project is installable.
+- Final step: run a quick validation (pip install -e . and basic import check) to verify the implementation works.
+- Each step should be a plain natural-language description of one concrete action.
+- Do not include code, shell commands, JSON, XML, Markdown fences, or numbering.
+- Focus on creating files that match the API specified in start.md exactly.
+- The plan should produce a complete, runnable project.
+
+Store only the ordered list of task descriptions in PlanTasks.", list(string(PlanTasks))),
+
+    task("Create a short file-safe slug for this request: '{Request}'.
+Requirements:
+- lowercase letters, digits, and underscores only
+- 2 to 6 words when possible
+- no file extension
+Store only the slug in PlanSlug.", PlanSlug),
+
+    make_directory_path('plans'),
+    format(string(FilePath), "plans/~w.dml", [PlanSlug]),
+
+    build_task_lines(PlanTasks, TaskLines),
+    assemble_plan_dml(TaskLines, PlanDml),
+    exec(write_file(path: FilePath, content: PlanDml), _),
+
+    output("Plan created. Steps:"),
+    output_plan_steps(PlanTasks),
+    output(""),
+    format(string(Msg), "Plan written to ~w. Run it to implement the repository.", [FilePath]),
+    answer(Msg).
+
+agent_main(Request) :-
+    format(string(Msg), "Could not create a plan for: ~w", [Request]),
+    answer(Msg).
+
+assemble_plan_dml(TaskLines, PlanDml) :-
+    allowed_tool_definitions(ToolBlock),
+    format(string(PlanDml), "% Generated NL2Repo plan.~n% Implements a repository from a start.md specification.~n~n~s~n~nagent_main :-~n    system(\"You are implementing a complete Python repository from a specification. Read start.md first, then implement all modules, classes, and functions exactly as specified. Create a complete, installable, runnable project. Work autonomously without asking for user input.\"),~n    output(\"Starting repository implementation plan.\"),~n~s    answer(\"Repository implementation completed.\").~n~nagent_main :-~n    answer(\"Repository implementation failed. Please try again.\").~n", [ToolBlock, TaskLines]).
+
+build_task_lines([], "").
+build_task_lines([Task|Rest], TaskLines) :-
+    format(string(Line), "    task(~q),~n", [Task]),
+    build_task_lines(Rest, RestLines),
+    string_concat(Line, RestLines, TaskLines).
+
+output_plan_steps([]).
+output_plan_steps([Task|Rest]) :-
+    format(string(Line), "  - ~w", [Task]),
+    output(Line),
+    output_plan_steps(Rest).
+
+allowed_tool_definitions(ToolBlock) :-
+    atomics_to_string([
+        '% --- Tool predicates (benchmark-safe subset) ---',
+        '',
+        'tool(run_bash(Command, Output), "Run a shell command in the workspace.") :-',
+        '    exec(bash(command: Command), Output).',
+        '',
+        'tool(read_file_content(Path, Content), "Read the full text content of a file in the workspace.") :-',
+        '    exec(read_file(path: Path), Content).',
+        '',
+        'tool(write_file_content(Path, Content), "Write text content to a file, creating parent directories as needed.") :-',
+        '    exec(write_file(path: Path, content: Content), _).',
+        '',
+        'tool(list_directory(Path, Entries), "List files and directories at the given path.") :-',
+        '    exec(list_directory(path: Path), Entries).'
+    ], "\n", ToolBlock).
