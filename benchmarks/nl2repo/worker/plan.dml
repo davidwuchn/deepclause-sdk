@@ -84,9 +84,26 @@ assemble_plan_dml(TaskLines, PlanDml) :-
 
 build_task_lines([], "").
 build_task_lines([Task|Rest], TaskLines) :-
-    format(string(Line), "    task(~q),~n", [Task]),
+    escape_task_string(Task, SafeTask),
+    format(string(Line), "    task(\"~s\"),~n", [SafeTask]),
     build_task_lines(Rest, RestLines),
     string_concat(Line, RestLines, TaskLines).
+
+escape_task_string(Raw, Safe) :-
+    string_replace(Raw, "\\", "\\\\", T1),
+    string_replace(T1, "\"", "\\\"", T2),
+    string_replace(T2, "\n", "\\n", Safe).
+
+string_replace(String, From, To, Result) :-
+    sub_string(String, Before, _, After, From),
+    !,
+    sub_string(String, 0, Before, _, Prefix),
+    sub_string(String, _, After, 0, Suffix),
+    string_replace(Suffix, From, To, ReplacedSuffix),
+    string_concat(Prefix, To, Temp),
+    string_concat(Temp, ReplacedSuffix, Result).
+
+string_replace(String, _, _, String).
 
 output_plan_steps([]).
 output_plan_steps([Task|Rest]) :-
