@@ -6,7 +6,7 @@
 tool(run_bash(Command, Output), "Run a shell command in the workspace.") :-
     exec(bash(command: Command), Output).
 
-tool(read_file_content(Path, Content), "Read the full text content of a file in the workspace. Use this to read start.md and understand the specification before planning.") :-
+tool(read_file_content(Path, Content), "Read the full text content of a file in the workspace.") :-
     exec(read_file(path: Path), Content).
 
 tool(write_file_content(Path, Content), "Write text content to a file, creating parent directories as needed.") :-
@@ -27,7 +27,7 @@ CRITICAL RULES:
 - Do NOT include code, shell commands, JSON, XML, or Markdown in task descriptions.
 - When you have the task list, STOP and write the plan file. Do NOT start implementing."),
 
-    exec(read_file(path: 'start.md'), SpecContent),
+    load_spec_content(SpecContent),
 
     format(string(PlanPrompt), "Based on the specification below, break this into 6 to 12 concrete implementation steps that a separate executor will carry out.
 
@@ -78,6 +78,14 @@ Store only the slug in PlanSlug.", PlanSlug),
 agent_main(Request) :-
     format(string(Msg), "Could not create a plan for: ~w", [Request]),
     answer(Msg).
+
+load_spec_content(SpecContent) :-
+    exists_file('/work/task/start.md'),
+    read_file('/work/task/start.md', SpecContent),
+    !.
+
+load_spec_content(SpecContent) :-
+    SpecContent = "(Specification file not found. Plan based on the request description only.)".
 
 assemble_plan_dml(TaskLines, PlanDml) :-
     executor_tool_definitions(ToolBlock),
