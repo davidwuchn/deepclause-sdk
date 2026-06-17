@@ -3,17 +3,8 @@
 % This planner reads the spec to understand it, then creates a plan — never implements.
 % Benchmark variant: web_search, news_search, url_fetch, create_skill, ask_user removed.
 
-tool(run_bash(Command, Output), "Run a shell command in the workspace.") :-
+tool(run_bash(Command, Output), "Run a shell command in the workspace. Use this to inspect files and directories before planning.") :-
     exec(bash(command: Command), Output).
-
-tool(read_file_content(Path, Content), "Read the full text content of a file in the workspace.") :-
-    exec(read_file(path: Path), Content).
-
-tool(write_file_content(Path, Content), "Write text content to a file, creating parent directories as needed.") :-
-    exec(write_file(path: Path, content: Content), _).
-
-tool(list_directory(Path, Entries), "List files and directories at the given path.") :-
-    exec(list_directory(path: Path), Entries).
 
 agent_main(Request) :-
     system("You are a PLANNER, not an implementer. Your ONLY job is to produce an ordered task list.
