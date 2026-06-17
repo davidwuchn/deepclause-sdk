@@ -18,7 +18,6 @@ tool(list_directory(Path, Entries), "List files and directories at the given pat
 agent_main(Request) :-
     system("You are a PLANNER, not an implementer. Your ONLY job is to produce an ordered task list.
 CRITICAL RULES:
-- You MUST read start.md to understand the full specification before planning.
 - You MUST NOT write any source code, create any files, or install any packages yourself.
 - You MUST NOT implement anything — only describe what needs to be done.
 - Use tools only for READING and INSPECTING the specification, never for creating or modifying files.
@@ -30,12 +29,12 @@ CRITICAL RULES:
 
     exec(read_file(path: 'start.md'), SpecContent),
 
-    task("Based on the specification you just read, break this into 6 to 12 concrete implementation steps that a separate executor will carry out.
+    format(string(PlanPrompt), "Based on the specification below, break this into 6 to 12 concrete implementation steps that a separate executor will carry out.
 
 Context: A separate executor agent will implement a complete Python repository from the specification in start.md. You are only creating the plan.
 
 Requirements for the plan:
-- Step 1: Read and analyze the full specification in start.md to identify every module, class, method, constant, and test needed.
+- Step 1: Analyze the full specification to identify every module, class, method, constant, and test needed.
 - Step 2: Set up the project directory structure with all necessary __init__.py files and the package configuration.
 - Steps 3-N: Implement each module in dependency order. Each major module or component should get its own step. Be specific about which classes and functions to create.
 - Second-to-last step: Create pyproject.toml or setup.py so the project is installable with pip install -e.
@@ -48,10 +47,13 @@ Format rules:
 - Be specific about which files to create and which classes/functions to implement.
 - The executor works autonomously with no user interaction.
 
-Here is the specification content for reference:
-{SpecContent}
+--- BEGIN SPECIFICATION ---
+~w
+--- END SPECIFICATION ---
 
-Store only the ordered list of task descriptions in PlanTasks.", list(string(PlanTasks))),
+Store only the ordered list of task descriptions in PlanTasks.", [SpecContent]),
+
+    task(PlanPrompt, list(string(PlanTasks))),
 
     task("Create a short file-safe slug for this request: '{Request}'.
 Requirements:
