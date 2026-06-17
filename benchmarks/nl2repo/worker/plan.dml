@@ -1,6 +1,5 @@
 % Plan skill for NL2Repo benchmark.
 % Generates ONLY a task list for building a repository from a specification.
-% This planner reads the spec to understand it, then creates a plan — never implements.
 % Benchmark variant: web_search, news_search, url_fetch, create_skill, ask_user removed.
 
 tool(run_bash(Command, Output), "Run a shell command in the workspace. Use this to inspect files and directories before planning.") :-
@@ -56,9 +55,7 @@ Store only the slug in PlanSlug.", PlanSlug),
     make_directory_path('plans'),
     format(string(FilePath), "plans/~w.dml", [PlanSlug]),
 
-    build_task_lines(PlanTasks, TaskLines),
-    assemble_plan_dml(TaskLines, PlanDml),
-    exec(write_file(path: FilePath, content: PlanDml), _),
+    write_plan_dml(FilePath, PlanTasks),
 
     output("Plan created. Steps:"),
     output_plan_steps(PlanTasks),
@@ -71,59 +68,39 @@ agent_main(Request) :-
     answer(Msg).
 
 load_spec_content(SpecContent) :-
+    exists_file('../task/start.md'),
+    read_file('../task/start.md', SpecContent),
+    !.
+
+load_spec_content(SpecContent) :-
     exists_file('/work/task/start.md'),
     read_file('/work/task/start.md', SpecContent),
     !.
 
-load_spec_content(SpecContent) :-
-    SpecContent = "(Specification file not found. Plan based on the request description only.)".
+load_spec_content("(Specification file not found. Plan based on the request description only.)").
 
-assemble_plan_dml(TaskLines, PlanDml) :-
-    executor_tool_definitions(ToolBlock),
-    format(string(PlanDml), "% Generated NL2Repo plan.~n% Implements a repository from a start.md specification.~n~n~s~n~nagent_main :-~n    system(\"You are implementing a complete Python repository from a specification. Read start.md first, then implement all modules, classes, and functions exactly as specified. Create a complete, installable, runnable project. Work autonomously without asking for user input.\"),~n    output(\"Starting repository implementation.\"),~n~s    answer(\"Repository implementation completed.\"),~n~nagent_main :-~n    answer(\"Repository implementation failed.\").~n", [ToolBlock, TaskLines]).
+write_plan_dml(FilePath, PlanTasks) :-
+    exec(bash(command: 'mkdir -p plans'), _),
+    write_plan_header(FilePath),
+    write_plan_tasks(FilePath, PlanTasks),
+    write_plan_footer(FilePath).
 
-build_task_lines([], "").
-build_task_lines([Task|Rest], TaskLines) :-
-    escape_task_string(Task, SafeTask),
-    format(string(Line), "    task(\"~s\"),~n", [SafeTask]),
-    build_task_lines(Rest, RestLines),
-    string_concat(Line, RestLines, TaskLines).
+write_plan_header(FilePath) :-
+    format(string(Cmd), "cat > ~w << 'PLANEOF'\ntool(run_bash(Command, Output), \"Run a shell command in the workspace.\") :-\n    exec(bash(command: Command), Output).\n\ntool(read_file_content(Path, Content), \"Read the full text content of a file in the workspace.\") :-\n    exec(read_file(path: Path), Content).\n\ntool(write_file_content(Path, Content), \"Write text content to a file, creating parent directories as needed.\") :-\n    exec(write_file(path: Path, content: Content), _).\n\ntool(list_directory(Path, Entries), \"List files and directories at the given path.\") :-\n    exec(list_directory(path: Path), Entries).\n\nagent_main :-\n    task(\"Read start.md and understand the full specification.\"),\nPLANEOF", [FilePath]),
+    exec(bash(command: Cmd), _).
 
-escape_task_string(Raw, Safe) :-
-    string_replace(Raw, "\\", "\\\\", T1),
-    string_replace(T1, "\"", "\\\"", T2),
-    string_replace(T2, "\n", "\\n", Safe).
+write_plan_tasks(FilePath, []).
+write_plan_tasks(FilePath, [Task|Rest]) :-
+    format(string(Cmd), "echo '    task(\"~s\"),' >> ~w", [Task, FilePath]),
+    exec(bash(command: Cmd), _),
+    write_plan_tasks(FilePath, Rest).
 
-string_replace(String, From, To, Result) :-
-    sub_string(String, Before, _, After, From),
-    !,
-    sub_string(String, 0, Before, _, Prefix),
-    sub_string(String, _, After, 0, Suffix),
-    string_replace(Suffix, From, To, ReplacedSuffix),
-    string_concat(Prefix, To, Temp),
-    string_concat(Temp, ReplacedSuffix, Result).
-
-string_replace(String, _, _, String).
+write_plan_footer(FilePath) :-
+    format(string(Cmd), "cat >> ~w << 'PLANEOF'\n    task(\"Create pyproject.toml or setup.py so the project is installable.\"),\n    task(\"Validate by installing the package and running a basic import check.\"),\n    answer(\"Done.\").\n\nagent_main :-\n    answer(\"Failed.\").\nPLANEOF", [FilePath]),
+    exec(bash(command: Cmd), _).
 
 output_plan_steps([]).
 output_plan_steps([Task|Rest]) :-
     format(string(Line), "  - ~w", [Task]),
     output(Line),
     output_plan_steps(Rest).
-
-executor_tool_definitions(ToolBlock) :-
-    atomics_to_string([
-        '% --- Tool predicates (benchmark-safe subset for executor) ---',
-        '',
-        'tool(run_bash(Command, Output), "Run a shell command in the workspace.") :-',
-        '    exec(bash(command: Command), Output).',
-        '',
-        'tool(read_file_content(Path, Content), "Read the full text content of a file in the workspace.") :-',
-        '    exec(read_file(path: Path), Content).',
-        '',
-        'tool(write_file_content(Path, Content), "Write text content to a file, creating parent directories as needed.") :-',
-        '    exec(write_file(path: Path, content: Content), _).',
-        '',
-        'tool(list_directory(Path, Entries), "List files and directories at the given path.") :-',
-        '    exec(list_directory(path: Path), Entries).'
-    ], "\n", ToolBlock).
