@@ -1,34 +1,55 @@
 % Plan skill for NL2Repo benchmark.
-% Generates a plan for building a complete repository from a specification.
+% Generates ONLY a task list for building a repository from a specification.
+% This planner reads the spec to understand it, then creates a plan — never implements.
 % Benchmark variant: web_search, news_search, url_fetch, create_skill, ask_user removed.
 
 tool(run_bash(Command, Output), "Run a shell command in the workspace.") :-
     exec(bash(command: Command), Output).
 
-tool(read_file_content(Path, Content), "Read the full text content of a file in the workspace.") :-
+tool(read_file_content(Path, Content), "Read the full text content of a file in the workspace. Use this to read start.md and understand the specification before planning.") :-
     exec(read_file(path: Path), Content).
 
-tool(write_file_content(Path, Content), "Write text content to a file in the workspace, creating parent directories as needed.") :-
+tool(write_file_content(Path, Content), "Write text content to a file, creating parent directories as needed.") :-
     exec(write_file(path: Path, content: Content), _).
 
 tool(list_directory(Path, Entries), "List files and directories at the given path.") :-
     exec(list_directory(path: Path), Entries).
 
 agent_main(Request) :-
-    task("Break this repository generation request into 5 to 10 concrete implementation steps: '{Request}'.
+    system("You are a PLANNER, not an implementer. Your ONLY job is to produce an ordered task list.
+CRITICAL RULES:
+- You MUST read start.md to understand the full specification before planning.
+- You MUST NOT write any source code, create any files, or install any packages yourself.
+- You MUST NOT implement anything — only describe what needs to be done.
+- Use tools only for READING and INSPECTING the specification, never for creating or modifying files.
+- A completely separate executor agent will carry out your plan later.
+- Return ONLY an ordered list of plain natural-language task descriptions.
+- Each task must be one concrete step that the executor can perform.
+- Do NOT include code, shell commands, JSON, XML, or Markdown in task descriptions.
+- When you have the task list, STOP and write the plan file. Do NOT start implementing."),
 
-Context: You are generating a complete Python repository from a specification document (start.md).
+    read_file_content('start.md', SpecContent),
+
+    task("Based on the specification you just read, break this into 6 to 12 concrete implementation steps that a separate executor will carry out.
+
+Context: A separate executor agent will implement a complete Python repository from the specification in start.md. You are only creating the plan.
 
 Requirements for the plan:
-- First step: read start.md to understand the full specification.
-- Second step: analyze the specification and identify all modules, classes, functions, and tests needed.
-- Middle steps: implement each module, class, and function according to the specification, in dependency order.
-- Late steps: create the package structure (setup.py or pyproject.toml), add __init__.py files, and ensure the project is installable.
-- Final step: run a quick validation (pip install -e . and basic import check) to verify the implementation works.
-- Each step should be a plain natural-language description of one concrete action.
-- Do not include code, shell commands, JSON, XML, Markdown fences, or numbering.
-- Focus on creating files that match the API specified in start.md exactly.
-- The plan should produce a complete, runnable project.
+- Step 1: Read and analyze the full specification in start.md to identify every module, class, method, constant, and test needed.
+- Step 2: Set up the project directory structure with all necessary __init__.py files and the package configuration.
+- Steps 3-N: Implement each module in dependency order. Each major module or component should get its own step. Be specific about which classes and functions to create.
+- Second-to-last step: Create pyproject.toml or setup.py so the project is installable with pip install -e.
+- Last step: Validate by installing the package and running a basic import check or the test suite.
+
+Format rules:
+- Each step must be a single plain natural-language sentence.
+- Do NOT include code, shell commands, JSON, XML, Markdown fences, or numbering.
+- Do NOT combine multiple unrelated actions into one step.
+- Be specific about which files to create and which classes/functions to implement.
+- The executor works autonomously with no user interaction.
+
+Here is the specification content for reference:
+{SpecContent}
 
 Store only the ordered list of task descriptions in PlanTasks.", list(string(PlanTasks))),
 
@@ -57,8 +78,8 @@ agent_main(Request) :-
     answer(Msg).
 
 assemble_plan_dml(TaskLines, PlanDml) :-
-    allowed_tool_definitions(ToolBlock),
-    format(string(PlanDml), "% Generated NL2Repo plan.~n% Implements a repository from a start.md specification.~n~n~s~n~nagent_main :-~n    system(\"You are implementing a complete Python repository from a specification. Read start.md first, then implement all modules, classes, and functions exactly as specified. Create a complete, installable, runnable project. Work autonomously without asking for user input.\"),~n    output(\"Starting repository implementation plan.\"),~n~s    answer(\"Repository implementation completed.\").~n~nagent_main :-~n    answer(\"Repository implementation failed. Please try again.\").~n", [ToolBlock, TaskLines]).
+    executor_tool_definitions(ToolBlock),
+    format(string(PlanDml), "% Generated NL2Repo plan.~n% Implements a repository from a start.md specification.~n~n~s~n~nagent_main :-~n    system(\"You are implementing a complete Python repository from a specification. Read start.md first, then implement all modules, classes, and functions exactly as specified. Create a complete, installable, runnable project. Work autonomously without asking for user input.\"),~n    output(\"Starting repository implementation.\"),~n~s    answer(\"Repository implementation completed.\"),~n~nagent_main :-~n    answer(\"Repository implementation failed.\").~n", [ToolBlock, TaskLines]).
 
 build_task_lines([], "").
 build_task_lines([Task|Rest], TaskLines) :-
@@ -72,9 +93,9 @@ output_plan_steps([Task|Rest]) :-
     output(Line),
     output_plan_steps(Rest).
 
-allowed_tool_definitions(ToolBlock) :-
+executor_tool_definitions(ToolBlock) :-
     atomics_to_string([
-        '% --- Tool predicates (benchmark-safe subset) ---',
+        '% --- Tool predicates (benchmark-safe subset for executor) ---',
         '',
         'tool(run_bash(Command, Output), "Run a shell command in the workspace.") :-',
         '    exec(bash(command: Command), Output).',
