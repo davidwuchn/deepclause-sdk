@@ -197,6 +197,16 @@ async function main() {
 
   console.log(`Artifacts written to ${runRoot}`);
 
+  console.log('');
+  console.log('=== NL2Repo Benchmark Summary ===');
+  for (const evalResult of evalResults.sort((a, b) => (b.score ?? 0) - (a.score ?? 0))) {
+    console.log(`  [${evalResult.mode}] ${evalResult.taskName}: score=${evalResult.score}/${evalResult.totalTests} (${((evalResult.successRate ?? 0) * 100).toFixed(1)}%) status=${evalResult.status}`);
+  }
+  const totalPassed = evalResults.reduce((sum, r) => sum + (r.passedTests ?? 0), 0);
+  const totalTests = evalResults.reduce((sum, r) => sum + (r.totalTests ?? 0), 0);
+  console.log(`  TOTAL: ${totalPassed}/${totalTests} (${totalTests > 0 ? ((totalPassed / totalTests) * 100).toFixed(1) : '0.0'}%)`);
+  console.log('');
+
   await dockerPrune();
 }
 
@@ -504,11 +514,14 @@ async function evaluateTask({ mode, taskName, workspaceDir, instanceRoot, config
 
   if (config.evaluation.pullBaseImages) {
     console.log(`[eval] ${taskName}: pulling base image ${baseImage}`);
-    await runCommand('docker', ['pull', '--platform', config.docker.platform, baseImage], {
-      cwd: REPO_ROOT,
-    }).catch((error) => {
-      console.log(`[eval] ${taskName}: base image pull failed: ${error.message}`);
-    });
+    try {
+      await runCommand('docker', ['pull', '--platform', config.docker.platform, baseImage], {
+        cwd: REPO_ROOT,
+        streamOutput: true,
+      });
+    } catch (error) {
+      throw new Error(`Base image pull failed for ${baseImage}: ${error.message}`);
+    }
   }
 
   const dockerfilePath = path.join(instanceRoot, 'Dockerfile.eval');
@@ -521,37 +534,54 @@ async function evaluateTask({ mode, taskName, workspaceDir, instanceRoot, config
   ].join('\n'), 'utf8');
 
   console.log(`[eval] ${taskName}: building test image ${testImageTag}`);
-  await runCommand('docker', [
-    'build',
-    '--platform', config.docker.platform,
-    '-t', testImageTag,
-    '-f', dockerfilePath,
-    instanceRoot,
-  ], {
-    cwd: REPO_ROOT,
-    streamOutput: true,
-  }).catch((error) => {
+  try {
+    await runCommand('docker', [
+      'build',
+      '--platform', config.docker.platform,
+      '-t', testImageTag,
+      '-f', dockerfilePath,
+      instanceRoot,
+    ], {
+      cwd: REPO_ROOT,
+      streamOutput: true,
+    });
+  } catch (error) {
     throw new Error(`Test image build failed: ${error.message}`);
-  });
+  }
 
-  const evalContainerName = `nl2repo-eval-${sanitizeSegment(taskName)}`;
+  const evalContainerName = `nl2repo-eval-${sanitizeSegment(taskName)}-${Date.now()}`;
   let totalPassed = 0;
   let totalFailed = 0;
   let totalErrors = 0;
   const commandResults = [];
 
-  console.log(`[eval] ${taskName}: running test commands in container`);
-  const container = await runCommand('docker', [
-    'run', '-d',
-    '--name', evalContainerName,
-    '--platform', config.docker.platform,
-    testImageTag,
-  ], { cwd: REPO_ROOT });
+  console.log(`[eval] ${taskName}: starting test container`);
+  try {
+    await runCommand('docker', [
+      'run', '-d',
+      '--name', evalContainerName,
+      '--platform', config.docker.platform,
+      testImageTag,
+    ], { cwd: REPO_ROOT });
+  } catch (error) {
+    throw new Error(`Failed to start test container: ${error.message}`);
+  }
 
   try {
+    console.log(`[eval] ${taskName}: waiting for container to be ready...`);
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      try {
+        await runCommand('docker', ['exec', evalContainerName, 'true'], { cwd: REPO_ROOT, timeoutSeconds: 10 });
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+
     for (const command of testCommands) {
       console.log(`[eval] ${taskName}: running: ${command}`);
       let cmdStdout = '';
+      let cmdStderr = '';
       let cmdExitCode = 0;
       try {
         const cmdResult = await runCommand('docker', [
@@ -559,10 +589,18 @@ async function evaluateTask({ mode, taskName, workspaceDir, instanceRoot, config
           'bash', '-lc', command,
         ], { cwd: REPO_ROOT, timeoutSeconds: 600 });
         cmdStdout = cmdResult.stdout;
+        cmdStderr = cmdResult.stderr ?? '';
         cmdExitCode = 0;
       } catch (error) {
         cmdStdout = error.stdout ?? '';
+        cmdStderr = error.stderr ?? '';
         cmdExitCode = error.exitCode ?? 1;
+        console.log(`[eval] ${taskName}: command exited with code ${cmdExitCode}`);
+      }
+
+      if (cmdExitCode !== 0 && cmdStderr) {
+        const lastLines = cmdStderr.trim().split('\n').slice(-5).join('\n');
+        console.log(`[eval] ${taskName}: stderr tail:\n${lastLines}`);
       }
 
       commandResults.push({
@@ -576,6 +614,7 @@ async function evaluateTask({ mode, taskName, workspaceDir, instanceRoot, config
         totalPassed += parsed.passed;
         totalFailed += parsed.failed;
         totalErrors += parsed.errors;
+        console.log(`[eval] ${taskName}: pytest results -> passed=${parsed.passed} failed=${parsed.failed} errors=${parsed.errors}`);
       }
     }
   } finally {
@@ -585,6 +624,8 @@ async function evaluateTask({ mode, taskName, workspaceDir, instanceRoot, config
 
   const total = testCaseCount || (totalPassed + totalFailed + totalErrors);
   const successRate = total > 0 ? Math.min(totalPassed / total, 1.0) : 0;
+
+  console.log(`[eval] ${taskName}: FINAL score=${totalPassed}/${total} successRate=${(successRate * 100).toFixed(1)}%`);
 
   const evalResult = {
     mode,

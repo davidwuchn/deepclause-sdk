@@ -127,7 +127,7 @@ async function setupEnvironment({ result, logsDir, taskDir, agentHome, spec }) {
   await runBestEffortStep(result, logsDir, 'git_config_email', ['git', 'config', 'user.email', 'benchmark@deepclause.local'], { cwd: taskDir });
 
   if (spec.task.startMd) {
-    const startMdContent = Buffer.from(spec.task.startMd, 'base64utf8');
+    const startMdContent = Buffer.from(spec.task.startMd, 'base64');
     const startMdPath = path.join(taskDir, 'start.md');
     await fs.writeFile(startMdPath, startMdContent, 'utf8');
     await runStep(result, logsDir, 'git_add_start_md', ['git', 'add', 'start.md'], { cwd: taskDir });
@@ -384,9 +384,13 @@ async function copyWorkspace(taskDir, outputDir) {
   const workspaceTarget = path.join(outputDir, 'workspace');
   await fs.rm(workspaceTarget, { recursive: true, force: true });
   if (await pathExists(taskDir)) {
-    await fs.cp(taskDir, workspaceTarget, { recursive: true, filter: (src) => {
-      return !src.includes(path.join(taskDir, '.git'));
-    }});
+    await fs.cp(taskDir, workspaceTarget, {
+      recursive: true,
+      filter: (src) => {
+        const relative = path.relative(taskDir, src);
+        return !relative.startsWith('.git');
+      },
+    });
   }
 }
 
