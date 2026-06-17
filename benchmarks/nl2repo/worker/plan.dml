@@ -17,7 +17,7 @@ CRITICAL RULES:
 - Do NOT include code, shell commands, JSON, XML, or Markdown in task descriptions.
 - When you have the task list, STOP and write the plan file. Do NOT start implementing."),
 
-    load_spec_content(SpecContent),
+    exec(bash(command: 'cat /work/task/start.md'), SpecContent),
 
     format(string(PlanPrompt), "Based on the specification below, break this into 6 to 12 concrete implementation steps that a separate executor will carry out.
 
@@ -66,18 +66,6 @@ Store only the slug in PlanSlug.", PlanSlug),
 agent_main(Request) :-
     format(string(Msg), "Could not create a plan for: ~w", [Request]),
     answer(Msg).
-
-load_spec_content(SpecContent) :-
-    exists_file('../task/start.md'),
-    read_file('../task/start.md', SpecContent),
-    !.
-
-load_spec_content(SpecContent) :-
-    exists_file('/work/task/start.md'),
-    read_file('/work/task/start.md', SpecContent),
-    !.
-
-load_spec_content("(Specification file not found.)").
 
 build_plan_file(FilePath, PlanTasks) :-
     exec(bash(command: 'mkdir -p plans'), _),
