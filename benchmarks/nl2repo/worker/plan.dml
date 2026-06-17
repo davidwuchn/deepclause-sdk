@@ -55,7 +55,7 @@ Store only the slug in PlanSlug.", PlanSlug),
     make_directory_path('plans'),
     format(string(FilePath), "plans/~w.dml", [PlanSlug]),
 
-    write_plan_dml(FilePath, PlanTasks),
+    build_plan_file(FilePath, PlanTasks),
 
     output("Plan created. Steps:"),
     output_plan_steps(PlanTasks),
@@ -77,27 +77,23 @@ load_spec_content(SpecContent) :-
     read_file('/work/task/start.md', SpecContent),
     !.
 
-load_spec_content("(Specification file not found. Plan based on the request description only.)").
+load_spec_content("(Specification file not found.)").
 
-write_plan_dml(FilePath, PlanTasks) :-
+build_plan_file(FilePath, PlanTasks) :-
     exec(bash(command: 'mkdir -p plans'), _),
-    write_plan_header(FilePath),
-    write_plan_tasks(FilePath, PlanTasks),
-    write_plan_footer(FilePath).
+    build_task_lines(PlanTasks, TaskLines),
+    assemble_plan_dml(TaskLines, PlanDml),
+    exec(write_file(path: FilePath, content: PlanDml), _).
 
-write_plan_header(FilePath) :-
-    format(string(Cmd), "cat > ~w << 'PLANEOF'\ntool(run_bash(Command, Output), \"Run a shell command in the workspace.\") :-\n    exec(bash(command: Command), Output).\n\ntool(read_file_content(Path, Content), \"Read the full text content of a file in the workspace.\") :-\n    exec(read_file(path: Path), Content).\n\ntool(write_file_content(Path, Content), \"Write text content to a file, creating parent directories as needed.\") :-\n    exec(write_file(path: Path, content: Content), _).\n\ntool(list_directory(Path, Entries), \"List files and directories at the given path.\") :-\n    exec(list_directory(path: Path), Entries).\n\nagent_main :-\n    task(\"Read start.md and understand the full specification.\"),\nPLANEOF", [FilePath]),
-    exec(bash(command: Cmd), _).
+assemble_plan_dml(TaskLines, PlanDml) :-
+    ToolBlock = 'tool(run_bash(Command, Output), "Run a shell command in the workspace.") :-\n    exec(bash(command: Command), Output).\n\ntool(read_file_content(Path, Content), "Read the full text content of a file in the workspace.") :-\n    exec(read_file(path: Path), Content).\n\ntool(write_file_content(Path, Content), "Write text content to a file, creating parent directories as needed.") :-\n    exec(write_file(path: Path, content: Content), _).\n\ntool(list_directory(Path, Entries), "List files and directories at the given path.") :-\n    exec(list_directory(path: Path), Entries).',
+    format(string(PlanDml), "~s\n\nagent_main :-\n    system(\"You are an expert Python developer implementing a complete library from a specification. Follow these rules:\\n- Read start.md first and implement everything it specifies exactly.\\n- Create all files, classes, functions, and constants described in the specification.\\n- Use write_file_content to create source files.\\n- Use run_bash only for installing dependencies and running validation commands.\\n- Work autonomously without asking for user input.\\n- Do not use web_search, news_search, url_fetch, or create_skill.\"),\n    task(\"Read start.md and understand the full specification.\"),\n~s    task(\"Create pyproject.toml or setup.py so the project is installable with pip install -e.\"),\n    task(\"Validate by installing the package and running a basic import check.\"),\n    answer(\"Done.\").\n\nagent_main :-\n    answer(\"Failed.\").\n", [ToolBlock, TaskLines]).
 
-write_plan_tasks(FilePath, []).
-write_plan_tasks(FilePath, [Task|Rest]) :-
-    format(string(Cmd), "echo '    task(\"~s\"),' >> ~w", [Task, FilePath]),
-    exec(bash(command: Cmd), _),
-    write_plan_tasks(FilePath, Rest).
-
-write_plan_footer(FilePath) :-
-    format(string(Cmd), "cat >> ~w << 'PLANEOF'\n    task(\"Create pyproject.toml or setup.py so the project is installable.\"),\n    task(\"Validate by installing the package and running a basic import check.\"),\n    answer(\"Done.\").\n\nagent_main :-\n    answer(\"Failed.\").\nPLANEOF", [FilePath]),
-    exec(bash(command: Cmd), _).
+build_task_lines([], "").
+build_task_lines([Task|Rest], TaskLines) :-
+    format(string(Line), "    task(~q),\n", [Task]),
+    build_task_lines(Rest, RestLines),
+    string_concat(Line, RestLines, TaskLines).
 
 output_plan_steps([]).
 output_plan_steps([Task|Rest]) :-
