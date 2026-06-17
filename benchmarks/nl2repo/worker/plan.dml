@@ -28,7 +28,7 @@ CRITICAL RULES:
 - Do NOT include code, shell commands, JSON, XML, or Markdown in task descriptions.
 - When you have the task list, STOP and write the plan file. Do NOT start implementing."),
 
-    read_file_content('start.md', SpecContent),
+    exec(read_file(path: 'start.md'), SpecContent),
 
     task("Based on the specification you just read, break this into 6 to 12 concrete implementation steps that a separate executor will carry out.
 
