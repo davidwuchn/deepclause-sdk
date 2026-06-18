@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
@@ -14,6 +14,10 @@ function resolveVenvPython() {
   try {
     fsSync.accessSync(venvPython, fsSync.constants.X_OK);
     return venvPython;
+  } catch {}
+  try {
+    const sysPython = execSync('which python3 2>/dev/null', { encoding: 'utf8' }).trim();
+    if (sysPython) return sysPython;
   } catch {}
   return 'python3';
 }

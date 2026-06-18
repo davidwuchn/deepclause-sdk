@@ -38,6 +38,9 @@ async function main() {
 
   try {
     await fs.mkdir(agentHome, { recursive: true });
+    await ensurePythonDeps(spec);
+    const venvPython = path.join(BENCHMARKS_ROOT, '..', '.deepplanning-venv', 'bin', 'python3');
+    try { await fs.access(venvPython, fs.constants.X_OK); spec.pythonPath = venvPython; } catch {}
     await setupDeepClauseWorkspace(agentHome, spec);
 
     const request = buildRequest(spec);
@@ -153,6 +156,35 @@ async function main() {
   } finally {
     await fs.writeFile(path.join(outputDir, 'result.json'), `${JSON.stringify(result, null, 2)}\n`, 'utf8');
   }
+}
+
+async function ensurePythonDeps(spec) {
+  const requirementsPath = path.join(BENCHMARKS_ROOT, 'vendor', 'Qwen-Agent', 'benchmark', 'deepplanning', 'requirements.txt');
+  const venvDir = path.join(BENCHMARKS_ROOT, '..', '.deepplanning-venv');
+  const venvPython = path.join(venvDir, 'bin', 'python3');
+  const currentPythonPath = spec.pythonPath ?? 'python3';
+
+  try {
+    await fs.access(venvPython, fs.constants.X_OK);
+    logProgress('DeepPlanning venv already exists');
+  } catch {
+    logProgress('Creating DeepPlanning venv');
+    await runStep(null, null, 'venv_create', [
+      currentPythonPath, '-m', 'venv', venvDir,
+    ], { timeoutSeconds: 30 });
+  }
+
+  try {
+    await fs.access(requirementsPath);
+  } catch {
+    logProgress('No deepplanning requirements.txt found, skipping pip install');
+    return;
+  }
+
+  logProgress('Installing deepplanning Python dependencies into venv');
+  await runStep(null, null, 'pip_install_deps', [
+    venvPython, '-m', 'pip', 'install', '-q', '-r', requirementsPath,
+  ], { timeoutSeconds: 120 });
 }
 
 async function setupDeepClauseWorkspace(agentHome, spec) {
