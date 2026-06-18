@@ -296,6 +296,9 @@ function buildCommandEnv(spec) {
     env.DEEPPLANNING_DB_PATH = spec.dbPath;
   }
   env.DEEPPLANNING_BRIDGE_DIR = BENCHMARKS_ROOT;
+  if (spec.maxIterations) {
+    env.DC_MAX_ITERATIONS = String(spec.maxIterations);
+  }
   return env;
 }
 

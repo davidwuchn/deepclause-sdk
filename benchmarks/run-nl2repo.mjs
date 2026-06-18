@@ -38,8 +38,9 @@ const DEFAULT_CONFIG = {
   },
   execution: {
     maxWorkers: 1,
-    agentTimeoutSeconds: 3600,
+    agentTimeoutSeconds: 7200,
     setupTimeoutSeconds: 1800,
+    maxIterations: 100,
     verbose: false,
   },
   docker: {
@@ -306,7 +307,7 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
   };
   await writeJson(inputPath, workerInput);
 
-  const env = collectWorkerEnv();
+  const env = collectWorkerEnv(config);
   const containerName = buildContainerName(runId, task.mode, task.task.name);
   const taskLabel = `[${task.mode}] ${task.task.name}`;
   const mountedPaths = [];
@@ -748,6 +749,10 @@ function parseArgs(argv) {
       args.maxWorkers = Number(readValue());
       continue;
     }
+    if (arg === '--max-iterations') {
+      args.maxIterations = Number(readValue());
+      continue;
+    }
     if (arg === '--test-data-dir') {
       args.testDataDir = readValue();
       continue;
@@ -798,6 +803,7 @@ Options:
   --run-temp <n>               Run slot temperature
   --compile-temp <n>           Compile slot temperature
   --max-workers <n>            Maximum concurrent worker containers
+  --max-iterations <n>         Max agent loop iterations (default: 100)
   --test-data-dir <path>       Path to test data directory
   --platform <name>            Docker platform, e.g. linux/amd64
   --rebuild-images             Rebuild worker image
@@ -877,6 +883,9 @@ function applyCliOverrides(config, args) {
   if (Number.isFinite(args.maxWorkers)) {
     next.execution.maxWorkers = args.maxWorkers;
   }
+  if (Number.isFinite(args.maxIterations)) {
+    next.execution.maxIterations = args.maxIterations;
+  }
   if (args.testDataDir) {
     next.dataset.testDataDir = args.testDataDir;
   }
@@ -905,6 +914,7 @@ function normalizeConfig(config) {
   next.dataset.offset = next.dataset.offset ?? 0;
   next.modes = [...new Set((next.modes ?? []).map(normalizeMode))];
   next.execution.maxWorkers = Math.max(1, Number(next.execution.maxWorkers ?? 1));
+  next.execution.maxIterations = Math.max(1, Number(next.execution.maxIterations ?? 100));
   next.execution.verbose = Boolean(next.execution.verbose);
   next.deepclause.packageTarball = next.deepclause.packageTarball == null
     ? undefined
@@ -972,7 +982,7 @@ async function dockerPrune() {
   await runCommand('docker', ['builder', 'prune', '-f'], { cwd: REPO_ROOT }).catch(() => {});
 }
 
-function collectWorkerEnv() {
+function collectWorkerEnv(config) {
   const env = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (!value) {
@@ -987,10 +997,12 @@ function collectWorkerEnv() {
       || key === 'HTTPS_PROXY'
       || key === 'NO_PROXY'
       || key.startsWith('LLM_PROVIDER_')
+      || key.startsWith('DC_PROXY_')
     ) {
       env[key] = value;
     }
   }
+  env.DC_MAX_ITERATIONS = String(config.execution.maxIterations ?? 100);
   return env;
 }
 

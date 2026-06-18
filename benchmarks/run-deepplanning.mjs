@@ -35,6 +35,7 @@ const DEFAULT_CONFIG = {
   execution: {
     maxWorkers: 1,
     agentTimeoutSeconds: 600,
+    maxIterations: 100,
     verbose: false,
   },
   artifacts: {
@@ -233,6 +234,7 @@ async function runWorkerTask({ task, instanceDir, benchDir, config, dmlFiles, co
     models: config.models,
     temperatures: config.temperatures,
     agentTimeoutSeconds: config.execution.agentTimeoutSeconds,
+    maxIterations: config.execution.maxIterations,
     benchDir,
     pythonPath: config.pythonPath,
     dmlFiles: resolvedDmlFiles,
@@ -288,6 +290,7 @@ function buildConfig(args) {
   if (args.deepclauseVersion) config.deepclauseVersion = args.deepclauseVersion;
   if (args.maxWorkers) config.execution.maxWorkers = args.maxWorkers;
   if (args.agentTimeout) config.execution.agentTimeoutSeconds = args.agentTimeout;
+  if (args.maxIterations) config.execution.maxIterations = Number(args.maxIterations);
   if (args.verbose) config.execution.verbose = true;
   if (args.gatewayModel) config.models.gateway = args.gatewayModel;
   if (args.runModel) config.models.run = args.runModel;
@@ -338,6 +341,7 @@ function parseArgs(argv) {
     if (arg === '--deepclause-version') { args.deepclauseVersion = readValue(); continue; }
     if (arg === '--max-workers') { args.maxWorkers = Number(readValue()); continue; }
     if (arg === '--agent-timeout') { args.agentTimeout = Number(readValue()); continue; }
+    if (arg === '--max-iterations') { args.maxIterations = Number(readValue()); continue; }
     if (arg === '--gateway-model') { args.gatewayModel = readValue(); continue; }
     if (arg === '--run-model') { args.runModel = readValue(); continue; }
     if (arg === '--compile-model') { args.compileModel = readValue(); continue; }
@@ -377,6 +381,7 @@ Options:
   --deepclause-version <ver>   DeepClause SDK version (default: latest)
   --max-workers <n>            Concurrent workers (default: 1)
   --agent-timeout <seconds>    Per-task timeout (default: 600)
+  --max-iterations <n>         Max agent loop iterations (default: 100)
   --mode <direct|plan-execute|compile> Execution mode (default: direct)
   --gateway-model <id>         Gateway model (default: openai:gpt-4o)
   --run-model <id>             Run model (default: openai:gpt-4o)

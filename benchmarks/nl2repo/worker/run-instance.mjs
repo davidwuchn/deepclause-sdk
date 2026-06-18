@@ -168,8 +168,7 @@ async function writeDeepClauseConfig({ agentHome, taskDir, deepclause }) {
     shell: deepclause.shell,
     dmlBase: '.deepclause/tools',
     workspace: taskDir,
-    timeoutMs: 300000,
-    maxRetries: 3,
+
   };
   await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }

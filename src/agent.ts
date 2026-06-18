@@ -673,7 +673,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   );
 
   // Agent loop
-  const maxIterations = 50;
+  const maxIterations = Math.max(1, Number(process.env.DC_MAX_ITERATIONS) || 50);
   let iteration = 0;
 
   // Helper to allow event loop to breathe

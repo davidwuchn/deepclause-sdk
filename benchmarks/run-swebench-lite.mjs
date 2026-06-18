@@ -43,6 +43,7 @@ const DEFAULT_CONFIG = {
     maxWorkers: 1,
     agentTimeoutSeconds: 2700,
     setupTimeoutSeconds: 1800,
+    maxIterations: 100,
     verbose: false,
     repoCacheDir: undefined,
     repoSetup: {
@@ -303,6 +304,10 @@ function parseArgs(argv) {
       args.maxWorkers = Number(readValue());
       continue;
     }
+    if (arg === '--max-iterations') {
+      args.maxIterations = Number(readValue());
+      continue;
+    }
     if (arg === '--repo-setup') {
       args.repoSetupMode = readValue();
       continue;
@@ -351,6 +356,7 @@ Options:
   --run-temp <n>               Run slot temperature
   --compile-temp <n>           Compile slot temperature
   --max-workers <n>            Maximum concurrent worker containers
+  --max-iterations <n>         Max agent loop iterations (default: 100)
   --repo-setup <mode>          none, best-effort, commands, or swebench-image
   --platform <name>            Docker platform, e.g. linux/amd64
   --rebuild-images             Rebuild worker image
@@ -435,6 +441,9 @@ function applyCliOverrides(config, args) {
   if (Number.isFinite(args.maxWorkers)) {
     next.execution.maxWorkers = args.maxWorkers;
   }
+  if (Number.isFinite(args.maxIterations)) {
+    next.execution.maxIterations = args.maxIterations;
+  }
   if (args.repoSetupMode) {
     next.execution.repoSetup.mode = args.repoSetupMode;
   }
@@ -460,6 +469,7 @@ function normalizeConfig(config) {
   next.dataset.offset = next.dataset.offset ?? 0;
   next.modes = [...new Set((next.modes ?? []).map(normalizeMode))];
   next.execution.maxWorkers = Math.max(1, Number(next.execution.maxWorkers ?? 1));
+  next.execution.maxIterations = Math.max(1, Number(next.execution.maxIterations ?? 100));
   next.execution.verbose = Boolean(next.execution.verbose);
   next.execution.repoCacheDir = next.execution.repoCacheDir == null
     ? undefined
@@ -703,7 +713,7 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
   };
   await writeJson(inputPath, workerInput);
 
-  const env = collectWorkerEnv();
+  const env = collectWorkerEnv(config);
   const containerName = buildContainerName(runId, task.mode, task.instance.instance_id);
   const taskLabel = `[${task.mode}] ${task.instance.instance_id}`;
   const mountedPaths = [];
@@ -868,7 +878,7 @@ async function runWorkerTask({ task, runRoot, resolvedDeepClauseVersion, config,
   return result;
 }
 
-function collectWorkerEnv() {
+function collectWorkerEnv(config) {
   const env = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (!value) {
@@ -883,10 +893,12 @@ function collectWorkerEnv() {
       || key === 'HTTPS_PROXY'
       || key === 'NO_PROXY'
       || key.startsWith('LLM_PROVIDER_')
+      || key.startsWith('DC_PROXY_')
     ) {
       env[key] = value;
     }
   }
+  env.DC_MAX_ITERATIONS = String(config.execution.maxIterations ?? 100);
   return env;
 }
 

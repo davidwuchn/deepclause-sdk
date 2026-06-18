@@ -13,7 +13,7 @@
     "plan-execute"
   ],
   "deepclause": {
-    "version": "latest",
+    "version": "0.0.77",
     "packageTarball": null,
     "models": {
       "gateway": "openai:gpt-4o",
@@ -37,6 +37,7 @@
     "maxWorkers": 1,
     "agentTimeoutSeconds": 2700,
     "setupTimeoutSeconds": 1800,
+    "maxIterations": 100,
     "repoCacheDir": null,
     "repoSetup": {
       "mode": "best-effort",
