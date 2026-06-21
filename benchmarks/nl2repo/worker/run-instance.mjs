@@ -27,61 +27,57 @@ async function main() {
     warnings: [],
   };
 
-  const workRoot = '/work';
-  const taskDir = path.join(workRoot, 'task');
-  const agentHome = path.join(workRoot, 'agent-home');
-  const plansDir = path.join(agentHome, 'plans');
+  const workspace = '/work/workspace';
   const startedAt = Date.now();
 
   try {
     logProgress(`Starting worker for ${spec.task.name} in mode ${spec.mode}`);
-    await resetDirectory(taskDir);
-    await resetDirectory(agentHome);
+    await resetDirectory(workspace);
 
-    await setupEnvironment({ result, logsDir, taskDir, agentHome, spec });
+    await setupEnvironment({ result, logsDir, workspace, spec });
 
     const benchmarkRequest = buildBenchmarkRequest(spec.task);
     if (spec.mode === 'prompt') {
       logProgress('Running prompt mode');
       const promptStep = await runStep(result, logsDir, 'deepclause_prompt', ['deepclause', '-p', benchmarkRequest], {
-        cwd: agentHome,
+        cwd: workspace,
         timeoutSeconds: spec.execution.agentTimeoutSeconds,
         env: buildCommandEnv(),
       });
       result.sessionIds = extractSessionIds(promptStep.stdout);
-      result.toolCalls = await collectPromptToolCalls(agentHome, result.sessionIds);
+      result.toolCalls = await collectPromptToolCalls(workspace, result.sessionIds);
       result.bannedToolCalls = result.toolCalls.filter((toolName) => BANNED_TOOL_NAMES.includes(toolName));
     } else if (spec.mode === 'plan-execute') {
       logProgress('Running plan generation');
-      await resetDirectory(plansDir);
       await runStep(result, logsDir, 'plan_generate', ['deepclause', 'run', '--verbose', '--stream', '.deepclause/system/plan.dml', benchmarkRequest], {
-        cwd: agentHome,
+        cwd: workspace,
         timeoutSeconds: spec.execution.agentTimeoutSeconds,
         env: buildCommandEnv(),
       });
+      const plansDir = path.join(workspace, 'plans');
       const generatedPlan = await findGeneratedPlan(plansDir);
-      result.generatedPlan = path.relative(agentHome, generatedPlan);
+      result.generatedPlan = path.relative(workspace, generatedPlan);
       logProgress(`Executing generated plan ${result.generatedPlan}`);
       await runStep(result, logsDir, 'plan_execute', ['deepclause', 'run', '--verbose', '--stream', result.generatedPlan], {
-        cwd: agentHome,
+        cwd: workspace,
         timeoutSeconds: spec.execution.agentTimeoutSeconds,
         env: buildCommandEnv(),
       });
     } else if (spec.mode === 'compile') {
       logProgress('Running compile mode');
-      const startMdPath = path.join(taskDir, 'start.md');
+      const startMdPath = path.join(workspace, 'start.md');
       await runStep(result, logsDir, 'deepclause_compile', ['deepclause', 'compile', startMdPath], {
-        cwd: agentHome,
+        cwd: workspace,
         timeoutSeconds: spec.execution.setupTimeoutSeconds,
         env: buildCommandEnv(),
       });
-      const compiledDml = path.join(agentHome, '.deepclause', 'tools', 'start.dml');
+      const compiledDml = path.join(workspace, '.deepclause', 'tools', 'start.dml');
       if (!(await pathExists(compiledDml))) {
         throw new Error('Compile mode did not generate .deepclause/tools/start.dml');
       }
       logProgress('Running compiled DML');
       await runStep(result, logsDir, 'deepclause_run_compiled', ['deepclause', 'run', '--verbose', '--stream', '.deepclause/tools/start.dml', benchmarkRequest], {
-        cwd: agentHome,
+        cwd: workspace,
         timeoutSeconds: spec.execution.agentTimeoutSeconds,
         env: buildCommandEnv(),
       });
@@ -89,30 +85,26 @@ async function main() {
       throw new Error(`Unsupported benchmark mode: ${spec.mode}`);
     }
 
-    result.modifiedFiles = await getModifiedFiles(taskDir);
-    result.patch = await getGitDiff(taskDir);
+    result.modifiedFiles = await getModifiedFiles(workspace);
+    result.patch = await getGitDiff(workspace);
     result.patchBytes = Buffer.byteLength(result.patch, 'utf8');
-    await fs.rm(path.join(taskDir, '_plan_tmp.dml'), { force: true });
     result.success = true;
     logProgress(`Worker completed successfully in ${Date.now() - startedAt}ms`);
     logProgress(`Modified files in workspace: ${result.modifiedFiles.join(', ') || '(none)'}`);
     try {
-      const { stdout: taskLs } = await runCommand('find', [taskDir, '-maxdepth', '3', '-not', '-path', '*/.git/*', '-not', '-path', '*/__pycache__/*'], { cwd: '/work' });
-      logProgress(`Workspace contents:\n${taskLs}`);
-    } catch {}
-    try {
-      const { stdout: homeLs } = await runCommand('find', [agentHome, '-maxdepth', '3', '-not', '-path', '*/.git/*', '-not', '-path', '*/__pycache__/*', '-not', '-path', '*/node_modules/*'], { cwd: '/work' });
-      logProgress(`Agent-home contents:\n${homeLs}`);
+      const { stdout: wsLs } = await runCommand('find', [workspace, '-maxdepth', '3', '-not', '-path', '*/.git/*', '-not', '-path', '*/__pycache__/*', '-not', '-path', '*/node_modules/*', '-not', '-path', '*/.deepclause/*'], { cwd: '/work' });
+      logProgress(`Workspace contents:\n${wsLs}`);
     } catch {}
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
-    result.modifiedFiles = await getModifiedFiles(taskDir).catch(() => []);
-    result.patch = await getGitDiff(taskDir).catch(() => '');
+    result.modifiedFiles = await getModifiedFiles(workspace).catch(() => []);
+    result.patch = await getGitDiff(workspace).catch(() => '');
     result.patchBytes = Buffer.byteLength(result.patch ?? '', 'utf8');
     logProgress(`Worker failed after ${Date.now() - startedAt}ms: ${result.error}`);
   } finally {
-    await copyArtifacts(agentHome, outputDir);
-    await copyWorkspace(taskDir, outputDir);
+    await copyWorkspace(workspace, outputDir);
+    await copyDotDeepclause(workspace, outputDir);
+    await copyPlans(workspace, outputDir);
     await fs.writeFile(path.join(outputDir, 'result.json'), `${JSON.stringify(result, null, 2)}\n`, 'utf8');
   }
 }
@@ -131,17 +123,17 @@ function buildCommandEnv() {
   };
 }
 
-async function setupEnvironment({ result, logsDir, taskDir, agentHome, spec }) {
-  await runStep(result, logsDir, 'git_init', ['git', 'init', taskDir], { cwd: '/work' });
-  await runBestEffortStep(result, logsDir, 'git_config_name', ['git', 'config', 'user.name', 'DeepClause Benchmark'], { cwd: taskDir });
-  await runBestEffortStep(result, logsDir, 'git_config_email', ['git', 'config', 'user.email', 'benchmark@deepclause.local'], { cwd: taskDir });
+async function setupEnvironment({ result, logsDir, workspace, spec }) {
+  await runStep(result, logsDir, 'git_init', ['git', 'init', workspace], { cwd: '/work' });
+  await runBestEffortStep(result, logsDir, 'git_config_name', ['git', 'config', 'user.name', 'DeepClause Benchmark'], { cwd: workspace });
+  await runBestEffortStep(result, logsDir, 'git_config_email', ['git', 'config', 'user.email', 'benchmark@deepclause.local'], { cwd: workspace });
 
   if (spec.task.startMd) {
     const startMdContent = Buffer.from(spec.task.startMd, 'base64');
-    const startMdPath = path.join(taskDir, 'start.md');
+    const startMdPath = path.join(workspace, 'start.md');
     await fs.writeFile(startMdPath, startMdContent, 'utf8');
-    await runStep(result, logsDir, 'git_add_start_md', ['git', 'add', 'start.md'], { cwd: taskDir });
-    await runBestEffortStep(result, logsDir, 'git_commit_start_md', ['git', 'commit', '-m', 'Add start.md specification'], { cwd: taskDir });
+    await runStep(result, logsDir, 'git_add_start_md', ['git', 'add', 'start.md'], { cwd: workspace });
+    await runBestEffortStep(result, logsDir, 'git_commit_start_md', ['git', 'commit', '-m', 'Add start.md specification'], { cwd: workspace });
   }
 
   const deepclauseInstallTarget = spec.deepclausePackageTarball ?? `deepclause-sdk@${spec.deepclauseVersion}`;
@@ -153,22 +145,22 @@ async function setupEnvironment({ result, logsDir, taskDir, agentHome, spec }) {
   });
 
   await runStep(result, logsDir, 'deepclause_init', ['deepclause', 'init', '--model', spec.deepclause.models.run], {
-    cwd: agentHome,
+    cwd: workspace,
     timeoutSeconds: spec.execution.setupTimeoutSeconds,
     env: buildCommandEnv(),
   });
 
-  await writeDeepClauseConfig({ agentHome, taskDir, deepclause: spec.deepclause });
-  await installBenchmarkPlan(agentHome);
+  await writeDeepClauseConfig({ workspace, deepclause: spec.deepclause });
+  await installBenchmarkPlan(workspace);
   await runStep(result, logsDir, 'deepclause_show_model', ['deepclause', 'show-model', '--json'], {
-    cwd: agentHome,
+    cwd: workspace,
     timeoutSeconds: 60,
     env: buildCommandEnv(),
   });
 }
 
-async function writeDeepClauseConfig({ agentHome, taskDir, deepclause }) {
-  const configPath = path.join(agentHome, '.deepclause', 'config.json');
+async function writeDeepClauseConfig({ workspace, deepclause }) {
+  const configPath = path.join(workspace, '.deepclause', 'config.json');
   const config = {
     models: deepclause.models,
     temperatures: deepclause.temperatures,
@@ -177,15 +169,14 @@ async function writeDeepClauseConfig({ agentHome, taskDir, deepclause }) {
     agentvm: deepclause.agentvm,
     shell: deepclause.shell,
     dmlBase: '.deepclause/tools',
-    workspace: taskDir,
-
+    workspace: '.',
   };
   await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 }
 
-async function installBenchmarkPlan(agentHome) {
+async function installBenchmarkPlan(workspace) {
   const benchmarkPlanSource = '/benchmarks-src/nl2repo/worker/plan.dml';
-  const planTarget = path.join(agentHome, '.deepclause', 'system', 'plan.dml');
+  const planTarget = path.join(workspace, '.deepclause', 'system', 'plan.dml');
   if (await pathExists(benchmarkPlanSource)) {
     await fs.copyFile(benchmarkPlanSource, planTarget);
     logProgress('Installed NL2Repo benchmark plan.dml');
@@ -200,7 +191,7 @@ function buildBenchmarkRequest(task) {
     'The project must be directly runnable in the current directory.',
     'Running requirements should comply with the API Usage Guide section of the document.',
     'Do not use web_search, news_search, url_fetch, or create_skill for this task.',
-    'Do not write results into .deepclause or any directory outside the workspace.',
+    'Do not write results into .deepclause or plans or any directory outside the workspace.',
     '',
     `Task name: ${task.name}`,
     '',
@@ -325,10 +316,10 @@ function extractSessionIds(stdout) {
   return [...stdout.matchAll(/^Session:\s+([0-9a-fA-F-]+)$/gm)].map((match) => match[1]);
 }
 
-async function collectPromptToolCalls(agentHome, sessionIds) {
+async function collectPromptToolCalls(workspace, sessionIds) {
   const toolCalls = new Set();
   for (const sessionId of sessionIds) {
-    const executionLogPath = path.join(agentHome, '.deepclause', 'sessions', sessionId, 'execution-log.jsonl');
+    const executionLogPath = path.join(workspace, '.deepclause', 'sessions', sessionId, 'execution-log.jsonl');
     if (!await pathExists(executionLogPath)) {
       continue;
     }
@@ -376,32 +367,37 @@ async function getGitDiff(dir) {
   return stdout;
 }
 
-async function copyArtifacts(agentHome, outputDir) {
-  const deepclauseSource = path.join(agentHome, '.deepclause');
-  const plansSource = path.join(agentHome, 'plans');
-  const deepclauseTarget = path.join(outputDir, 'agent-home');
-  const plansTarget = path.join(outputDir, 'plans');
-  if (await pathExists(deepclauseSource)) {
-    await fs.rm(deepclauseTarget, { recursive: true, force: true });
-    await fs.cp(deepclauseSource, deepclauseTarget, { recursive: true });
-  }
-  if (await pathExists(plansSource)) {
-    await fs.rm(plansTarget, { recursive: true, force: true });
-    await fs.cp(plansSource, plansTarget, { recursive: true });
+async function copyWorkspace(workspace, outputDir) {
+  const workspaceTarget = path.join(outputDir, 'workspace');
+  await fs.rm(workspaceTarget, { recursive: true, force: true });
+  if (await pathExists(workspace)) {
+    await fs.cp(workspace, workspaceTarget, {
+      recursive: true,
+      filter: (src) => {
+        const relative = path.relative(workspace, src);
+        return !relative.startsWith('.git')
+          && !relative.startsWith('.deepclause')
+          && !relative.startsWith('plans');
+      },
+    });
   }
 }
 
-async function copyWorkspace(taskDir, outputDir) {
-  const workspaceTarget = path.join(outputDir, 'workspace');
-  await fs.rm(workspaceTarget, { recursive: true, force: true });
-  if (await pathExists(taskDir)) {
-    await fs.cp(taskDir, workspaceTarget, {
-      recursive: true,
-      filter: (src) => {
-        const relative = path.relative(taskDir, src);
-        return !relative.startsWith('.git');
-      },
-    });
+async function copyDotDeepclause(workspace, outputDir) {
+  const source = path.join(workspace, '.deepclause');
+  const target = path.join(outputDir, 'agent-home');
+  if (await pathExists(source)) {
+    await fs.rm(target, { recursive: true, force: true });
+    await fs.cp(source, target, { recursive: true });
+  }
+}
+
+async function copyPlans(workspace, outputDir) {
+  const source = path.join(workspace, 'plans');
+  const target = path.join(outputDir, 'plans');
+  if (await pathExists(source)) {
+    await fs.rm(target, { recursive: true, force: true });
+    await fs.cp(source, target, { recursive: true });
   }
 }
 

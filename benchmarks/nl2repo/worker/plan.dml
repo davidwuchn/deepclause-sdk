@@ -1,12 +1,14 @@
 % Plan skill for NL2Repo benchmark.
 % Generates ONLY a task list for building a repository from a specification.
 % Benchmark variant: web_search, news_search, url_fetch, create_skill, ask_user removed.
+% Single-workspace layout: .deepclause, plans/, start.md, and source code all in one directory.
 
 tool(run_bash(Command, Output), "Run a shell command in the workspace. Use this to inspect files and directories before planning.") :-
     exec(bash(command: Command), Output).
 
 agent_main(Request) :-
-    exec(bash(command: 'cat /work/task/start.md'), SpecResult),
+    output("PLAN: reading specification"),
+    exec(bash(command: 'cat start.md'), SpecResult),
     get_dict(stdout, SpecResult, SpecContent),
     (SpecContent = "" ->
         answer("FATAL: start.md is empty or could not be read")
@@ -50,8 +52,10 @@ Format rules:
 
 Store only the ordered list of task descriptions in PlanTasks.", [SpecContent]),
 
+    output("PLAN: generating task list"),
     task(PlanPrompt, list(string(PlanTasks))),
 
+    output("PLAN: generating slug"),
     task("Create a short file-safe slug for this request: '{Request}'.
 Requirements:
 - lowercase letters, digits, and underscores only
@@ -61,6 +65,7 @@ Store only the slug in PlanSlug.", PlanSlug),
 
     format(string(FilePath), "plans/~w.dml", [PlanSlug]),
 
+    output("PLAN: building executor DML"),
     build_plan_file(FilePath, PlanTasks),
 
     output("Plan created. Steps:"),
@@ -76,14 +81,24 @@ agent_main(Request) :-
 build_plan_file(FilePath, PlanTasks) :-
     build_task_lines(PlanTasks, 1, TaskLines),
     assemble_plan_dml(TaskLines, PlanDml),
-    format(string(AbsPath), "/work/agent-home/~w", [FilePath]),
-    exec(write_file(path: '_plan_tmp.dml', content: PlanDml), _WriteResult),
-    format(string(MoveCmd), "mkdir -p /work/agent-home/plans && cp /work/task/_plan_tmp.dml ~w && rm -f /work/task/_plan_tmp.dml", [AbsPath]),
-    exec(bash(command: MoveCmd), _).
+    output("PLAN: writing plan file"),
+    exec(write_file(path: FilePath, content: PlanDml), WriteResult),
+    (get_dict(success, WriteResult, true) ->
+        output("PLAN: write_file succeeded")
+    ;   get_dict(error, WriteResult, Err),
+        format(string(Diag), "PLAN: write_file FAILED: ~w", [Err]),
+        output(Diag)
+    ).
 
 assemble_plan_dml(TaskLines, PlanDml) :-
-    ToolBlock = 'tool(run_bash(Command, Output), "Run a shell command in the workspace. Use cat to read files, use heredocs to write files: cat > path/to/file.py << \'ENDOFFILE\'\\ncode here\\nENDOFFILE\\nUse mkdir -p before writing to new directories. Use ls to list directories.") :-\n    exec(bash(command: Command), Output).',
-    format(string(PlanDml), "~s\n\nagent_main :-\n    exec(bash(command: 'cat /work/task/start.md'), SpecResult),\n    get_dict(stdout, SpecResult, SpecContent),\n    format(string(SysPrompt), \"You are an expert Python developer. You MUST implement a complete library from the specification below.\\n\\nCRITICAL RULES:\\n1. Start coding IMMEDIATELY. The full specification is below — do NOT re-read start.md.\\n2. Use run_bash for EVERYTHING: write files with heredocs, run commands.\\n3. To write a file: run_bash with: mkdir -p dirname && cat > filepath << 'ENDOFFILE'\\n... file content ...\\nENDOFFILE\\n4. NEVER call write_file_content or read_file_content — they do not exist.\\n5. After writing each file, verify it with cat or python -c 'import module'.\\n6. Work autonomously. No user interaction. No web_search, news_search, url_fetch, or create_skill.\\n7. If a task seems unclear, make reasonable assumptions and implement anyway.\\n8. DO NOT spend more than 2 iterations reading. By iteration 3 you MUST be writing code.\\n9. At the end of each task, briefly summarize what you did and what is left to do. This summary carries forward to the next task.\\n\\n--- BEGIN SPECIFICATION ---\\n~~w\\n--- END SPECIFICATION ---\", [SpecContent]),\n    system(SysPrompt),\n~s    task(\"Create pyproject.toml or setup.py so the project is installable with pip install -e. Store a summary in the output variable.\", string(SumPyproj)),\n    task(\"Install the package with pip install -e . and verify basic imports work. Store a summary in the output variable.\", string(SumInstall)),\n    task(\"Run the full test suite and fix any failures until all tests pass. Store a summary in the output variable.\", string(SumTests)),\n    answer(\"Done.\").\n\nagent_main :-\n    answer(\"Failed.\").\n", [ToolBlock, TaskLines]).
+    Header = "tool(run_bash(Command, Output), \"Run a shell command in the workspace. Use cat to read files, use heredocs to write files: cat > path/to/file.py << 'ENDOFFILE'\\ncode here\\nENDOFFILE\\nUse mkdir -p before writing to new directories. Use ls to list directories.\") :-\n    exec(bash(command: Command), Output).",
+    string_concat(Header, "\n\nagent_main :-\n    exec(bash(command: 'cat start.md'), SpecResult),\n    get_dict(stdout, SpecResult, SpecContent),\n", P0),
+    SysPromptLine = "    format(string(SysPrompt), \"You are an expert Python developer. You MUST implement a complete library from the specification below.\\n\\nCRITICAL RULES:\\n1. Start coding IMMEDIATELY. The full specification is below — do NOT re-read start.md.\\n2. Use run_bash for EVERYTHING: write files with heredocs, run commands.\\n3. To write a file: run_bash with: mkdir -p dirname && cat > filepath << 'ENDOFFILE'\\n... file content ...\\nENDOFFILE\\n4. NEVER call write_file_content or read_file_content — they do not exist.\\n5. After writing each file, verify it with cat or python -c 'import module'.\\n6. Work autonomously. No user interaction. No web_search, news_search, url_fetch, or create_skill.\\n7. If a task seems unclear, make reasonable assumptions and implement anyway.\\n8. DO NOT spend more than 2 iterations reading. By iteration 3 you MUST be writing code.\\n9. At the end of each task, briefly summarize what you did and what is left to do. This summary carries forward to the next task.\\n\\n--- BEGIN SPECIFICATION ---\\n~w\\n--- END SPECIFICATION ---\", [SpecContent]),\n",
+    string_concat(P0, SysPromptLine, P1),
+    string_concat(P1, "    system(SysPrompt),\n", P2),
+    string_concat(P2, TaskLines, P3),
+    FixedTasks = "    task(\"Create pyproject.toml or setup.py so the project is installable with pip install -e. Store a summary in the output variable.\", string(SumPyproj)),\n    task(\"Install the package with pip install -e . and verify basic imports work. Store a summary in the output variable.\", string(SumInstall)),\n    task(\"Run the full test suite and fix any failures until all tests pass. Store a summary in the output variable.\", string(SumTests)),\n    answer(\"Done.\").\n\nagent_main :-\n    answer(\"Failed.\").\n",
+    string_concat(P3, FixedTasks, PlanDml).
 
 build_task_lines([], _, "").
 build_task_lines([Task|Rest], N, TaskLines) :-
