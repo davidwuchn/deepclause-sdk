@@ -94,6 +94,15 @@ async function main() {
     result.patchBytes = Buffer.byteLength(result.patch, 'utf8');
     result.success = true;
     logProgress(`Worker completed successfully in ${Date.now() - startedAt}ms`);
+    logProgress(`Modified files in workspace: ${result.modifiedFiles.join(', ') || '(none)'}`);
+    try {
+      const { stdout: taskLs } = await runCommand('find', [taskDir, '-maxdepth', '3', '-not', '-path', '*/.git/*', '-not', '-path', '*/__pycache__/*'], { cwd: '/work' });
+      logProgress(`Workspace contents:\n${taskLs}`);
+    } catch {}
+    try {
+      const { stdout: homeLs } = await runCommand('find', [agentHome, '-maxdepth', '3', '-not', '-path', '*/.git/*', '-not', '-path', '*/__pycache__/*', '-not', '-path', '*/node_modules/*'], { cwd: '/work' });
+      logProgress(`Agent-home contents:\n${homeLs}`);
+    } catch {}
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
     result.modifiedFiles = await getModifiedFiles(taskDir).catch(() => []);
