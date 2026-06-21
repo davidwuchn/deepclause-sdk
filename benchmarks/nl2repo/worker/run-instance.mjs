@@ -92,6 +92,7 @@ async function main() {
     result.modifiedFiles = await getModifiedFiles(taskDir);
     result.patch = await getGitDiff(taskDir);
     result.patchBytes = Buffer.byteLength(result.patch, 'utf8');
+    await fs.rm(path.join(taskDir, '_plan_tmp.dml'), { force: true });
     result.success = true;
     logProgress(`Worker completed successfully in ${Date.now() - startedAt}ms`);
     logProgress(`Modified files in workspace: ${result.modifiedFiles.join(', ') || '(none)'}`);

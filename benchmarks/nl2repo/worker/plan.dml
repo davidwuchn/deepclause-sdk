@@ -77,8 +77,8 @@ build_plan_file(FilePath, PlanTasks) :-
     build_task_lines(PlanTasks, 1, TaskLines),
     assemble_plan_dml(TaskLines, PlanDml),
     format(string(AbsPath), "/work/agent-home/~w", [FilePath]),
-    exec(write_file(path: '_plan_tmp.dml', content: PlanDml), _),
-    format(string(MoveCmd), "mkdir -p /work/agent-home/plans && mv /work/task/_plan_tmp.dml ~w", [AbsPath]),
+    exec(write_file(path: '_plan_tmp.dml', content: PlanDml), _WriteResult),
+    format(string(MoveCmd), "mkdir -p /work/agent-home/plans && cp /work/task/_plan_tmp.dml ~w && rm -f /work/task/_plan_tmp.dml", [AbsPath]),
     exec(bash(command: MoveCmd), _).
 
 assemble_plan_dml(TaskLines, PlanDml) :-
@@ -87,7 +87,8 @@ assemble_plan_dml(TaskLines, PlanDml) :-
 
 build_task_lines([], _, "").
 build_task_lines([Task|Rest], N, TaskLines) :-
-    format(string(Line), "    task(\"~w. Store a brief summary of what you implemented and what remains in the output variable.\", string(Sum~w)),\n", [Task, N]),
+    format(string(ExtendedTask), "~w. Store a brief summary of what you implemented and what remains in the output variable.", [Task]),
+    format(string(Line), "    task(~q, string(Sum~w)),\n", [ExtendedTask, N]),
     Next is N + 1,
     build_task_lines(Rest, Next, RestLines),
     string_concat(Line, RestLines, TaskLines).
