@@ -185,7 +185,9 @@ async function evaluateTask({ taskName, workspaceDir, instanceRoot, testDataDir,
   const dockerfilePath = path.join(instanceRoot, 'Dockerfile.eval');
   await fs.writeFile(dockerfilePath, [
     `FROM --platform=${platform} ${baseImage}`,
-    'COPY workspace /workspace',
+    'COPY workspace /workspace-agent/',
+    'RUN cp -r /workspace-agent/* /workspace/ 2>/dev/null; true',
+    'RUN rm -rf /workspace-agent',
     'WORKDIR /workspace',
     'ENV PYTHONPATH=/workspace:$PYTHONPATH',
     'CMD ["tail", "-f", "/dev/null"]',
