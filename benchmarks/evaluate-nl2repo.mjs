@@ -236,6 +236,17 @@ async function evaluateTask({ taskName, workspaceDir, instanceRoot, testDataDir,
       }
     }
 
+    console.log(`  Listing workspace contents:`);
+    try {
+      const lsResult = await runCommand('docker', [
+        'exec', evalContainerName,
+        'bash', '-lc', 'find /workspace -maxdepth 3 -not -path "*/\\.*" -not -path "*/__pycache__/*" | head -80',
+      ], { cwd: REPO_ROOT, timeoutSeconds: 10 });
+      console.log(lsResult.stdout);
+    } catch (e) {
+      console.log(`  ls failed: ${e.message}`);
+    }
+
     for (const command of testCommands) {
       console.log(`  Running: ${command}`);
       let cmdStdout = '';
@@ -257,8 +268,13 @@ async function evaluateTask({ taskName, workspaceDir, instanceRoot, testDataDir,
       }
 
       if (cmdExitCode !== 0 && cmdStderr) {
-        const lastLines = cmdStderr.trim().split('\n').slice(-5).join('\n');
+        const lastLines = cmdStderr.trim().split('\n').slice(-15).join('\n');
         console.log(`  stderr tail:\n${lastLines}`);
+      }
+
+      if (cmdExitCode !== 0 && cmdStdout) {
+        const lastLines = cmdStdout.trim().split('\n').slice(-15).join('\n');
+        console.log(`  stdout tail:\n${lastLines}`);
       }
 
       commandResults.push({
