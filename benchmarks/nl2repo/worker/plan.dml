@@ -6,7 +6,8 @@ tool(run_bash(Command, Output), "Run a shell command in the workspace. Use this 
     exec(bash(command: Command), Output).
 
 agent_main(Request) :-
-    exec(bash(command: 'cat /work/task/start.md'), SpecContent),
+    exec(bash(command: 'cat /work/task/start.md'), SpecResult),
+    get_dict(stdout, SpecResult, SpecContent),
     (SpecContent = "" ->
         answer("FATAL: start.md is empty or could not be read")
     ; true),
@@ -61,7 +62,7 @@ Store only the slug in PlanSlug.", PlanSlug),
     make_directory_path('plans'),
     format(string(FilePath), "plans/~w.dml", [PlanSlug]),
 
-    build_plan_file(FilePath, PlanTasks, SpecContent),
+    build_plan_file(FilePath, PlanTasks),
 
     output("Plan created. Steps:"),
     output_plan_steps(PlanTasks),
@@ -73,16 +74,15 @@ agent_main(Request) :-
     format(string(Msg), "Could not create a plan for: ~w", [Request]),
     answer(Msg).
 
-build_plan_file(FilePath, PlanTasks, SpecContent) :-
+build_plan_file(FilePath, PlanTasks) :-
     exec(bash(command: 'mkdir -p plans'), _),
     build_task_lines(PlanTasks, 1, TaskLines),
-    assemble_plan_dml(TaskLines, SpecContent, PlanDml),
+    assemble_plan_dml(TaskLines, PlanDml),
     exec(write_file(path: FilePath, content: PlanDml), _).
 
-assemble_plan_dml(TaskLines, SpecContent, PlanDml) :-
+assemble_plan_dml(TaskLines, PlanDml) :-
     ToolBlock = 'tool(run_bash(Command, Output), "Run a shell command in the workspace. Use cat to read files, use heredocs to write files: cat > path/to/file.py << \'ENDOFFILE\'\\ncode here\\nENDOFFILE\\nUse mkdir -p before writing to new directories.") :-\n    exec(bash(command: Command), Output).\n\ntool(list_directory(Path, Entries), "List files and directories at the given path.") :-\n    exec(list_directory(path: Path), Entries).',
-    format(string(SystemPrompt), "You are an expert Python developer. You MUST implement a complete library from the specification below.\\n\\nCRITICAL RULES:\\n1. Start coding IMMEDIATELY. Do NOT re-read start.md — the full specification is already provided below.\\n2. Use run_bash for EVERYTHING: read files with cat, write files with heredocs, run commands.\\n3. To write a file: run_bash with: mkdir -p dirname && cat > filepath << 'ENDOFFILE'\\n... file content ...\\nENDOFFILE\\n4. NEVER call write_file_content or read_file_content — they do not exist.\\n5. After writing each file, verify it with cat or python -c 'import module'.\\n6. Work autonomously. No user interaction. No web_search, news_search, url_fetch, or create_skill.\\n7. If a task seems unclear, make reasonable assumptions and implement anyway.\\n8. DO NOT spend more than 2 iterations reading. By iteration 3 you MUST be writing code.\\n9. At the end of each task, briefly summarize what you did and what is left to do. This summary carries forward to the next task.\\n\\n--- BEGIN SPECIFICATION ---\\n~w\\n--- END SPECIFICATION ---", [SpecContent]),
-    format(string(PlanDml), "~s\n\nagent_main :-\n    system(~q),\n~s    task(\"Create pyproject.toml or setup.py so the project is installable with pip install -e.\", string(SumPyproj)),\n    task(\"Install the package with pip install -e . and verify basic imports work.\", string(SumInstall)),\n    task(\"Run the full test suite and fix any failures until all tests pass.\", string(SumTests)),\n    answer(\"Done.\").\n\nagent_main :-\n    answer(\"Failed.\").\n", [ToolBlock, SystemPrompt, TaskLines]).
+    format(string(PlanDml), "~s\n\nagent_main :-\n    exec(bash(command: 'cat /work/task/start.md'), SpecResult),\n    get_dict(stdout, SpecResult, SpecContent),\n    format(string(SysPrompt), \"You are an expert Python developer. You MUST implement a complete library from the specification below.\\n\\nCRITICAL RULES:\\n1. Start coding IMMEDIATELY. The full specification is below — do NOT re-read start.md.\\n2. Use run_bash for EVERYTHING: write files with heredocs, run commands.\\n3. To write a file: run_bash with: mkdir -p dirname && cat > filepath << 'ENDOFFILE'\\n... file content ...\\nENDOFFILE\\n4. NEVER call write_file_content or read_file_content — they do not exist.\\n5. After writing each file, verify it with cat or python -c 'import module'.\\n6. Work autonomously. No user interaction. No web_search, news_search, url_fetch, or create_skill.\\n7. If a task seems unclear, make reasonable assumptions and implement anyway.\\n8. DO NOT spend more than 2 iterations reading. By iteration 3 you MUST be writing code.\\n9. At the end of each task, briefly summarize what you did and what is left to do. This summary carries forward to the next task.\\n\\n--- BEGIN SPECIFICATION ---\\n~w\\n--- END SPECIFICATION ---\", [SpecContent]),\n    system(SysPrompt),\n~s    task(\"Create pyproject.toml or setup.py so the project is installable with pip install -e.\", string(SumPyproj)),\n    task(\"Install the package with pip install -e . and verify basic imports work.\", string(SumInstall)),\n    task(\"Run the full test suite and fix any failures until all tests pass.\", string(SumTests)),\n    answer(\"Done.\").\n\nagent_main :-\n    answer(\"Failed.\").\n", [ToolBlock, TaskLines]).
 
 build_task_lines([], _, "").
 build_task_lines([Task|Rest], N, TaskLines) :-
