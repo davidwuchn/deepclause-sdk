@@ -6,6 +6,11 @@ tool(run_bash(Command, Output), "Run a shell command in the workspace. Use this 
     exec(bash(command: Command), Output).
 
 agent_main(Request) :-
+    exec(bash(command: 'cat /work/task/start.md'), SpecContent),
+    (SpecContent = "" ->
+        answer("FATAL: start.md is empty or could not be read")
+    ; true),
+
     system("You are a PLANNER, not an implementer. Your ONLY job is to produce an ordered task list.
 CRITICAL RULES:
 - You MUST NOT write any source code, create any files, or install any packages yourself.
@@ -13,28 +18,29 @@ CRITICAL RULES:
 - Use tools only for READING and INSPECTING the specification, never for creating or modifying files.
 - A completely separate executor agent will carry out your plan later.
 - Return ONLY an ordered list of plain natural-language task descriptions.
-- Each task must be one concrete step that the executor can perform.
+- Each task must be ONE small, focused, concrete step. Prefer MORE smaller steps over fewer large ones.
 - Do NOT include code, shell commands, JSON, XML, or Markdown in task descriptions.
 - When you have the task list, STOP and write the plan file. Do NOT start implementing."),
 
-    exec(bash(command: 'cat /work/task/start.md'), SpecContent),
-
-    format(string(PlanPrompt), "Based on the specification below, break this into 6 to 12 concrete implementation steps that a separate executor will carry out.
+    format(string(PlanPrompt), "Based on the specification below, break this into 10 to 20 small, focused implementation steps that a separate executor will carry out.
 
 Context: A separate executor agent will implement a complete Python repository from the specification in start.md. You are only creating the plan.
 
 Requirements for the plan:
-- Step 1: Analyze the full specification to identify every module, class, method, constant, and test needed.
-- Step 2: Set up the project directory structure with all necessary __init__.py files and the package configuration.
-- Steps 3-N: Implement each module in dependency order. Each major module or component should get its own step. Be specific about which classes and functions to create.
-- Second-to-last step: Create pyproject.toml or setup.py so the project is installable with pip install -e.
-- Last step: Validate by installing the package and running a basic import check or the test suite.
+- Step 1: Set up the project directory structure with all necessary __init__.py files.
+- Steps 2-N: Implement ONE module, class, or small component per step. Break large modules into multiple steps (e.g., one step for the class skeleton, another for complex methods).
+- One step: Create pyproject.toml or setup.py so the project is installable.
+- One step: Install the package and verify basic imports work.
+- If the specification includes tests: create a step for implementing the test suite and a final step to run all tests and fix any failures.
+- If the specification does NOT include tests: create a step to write basic tests covering the main functionality, and a final step to run all tests and fix any failures.
+- The LAST step must always be: run the full test suite and fix any failures until all tests pass.
 
 Format rules:
 - Each step must be a single plain natural-language sentence.
 - Do NOT include code, shell commands, JSON, XML, Markdown fences, or numbering.
 - Do NOT combine multiple unrelated actions into one step.
 - Be specific about which files to create and which classes/functions to implement.
+- Prefer MORE smaller steps over fewer large steps.
 - The executor works autonomously with no user interaction.
 
 --- BEGIN SPECIFICATION ---
@@ -55,7 +61,7 @@ Store only the slug in PlanSlug.", PlanSlug),
     make_directory_path('plans'),
     format(string(FilePath), "plans/~w.dml", [PlanSlug]),
 
-    build_plan_file(FilePath, PlanTasks),
+    build_plan_file(FilePath, PlanTasks, SpecContent),
 
     output("Plan created. Steps:"),
     output_plan_steps(PlanTasks),
@@ -67,20 +73,22 @@ agent_main(Request) :-
     format(string(Msg), "Could not create a plan for: ~w", [Request]),
     answer(Msg).
 
-build_plan_file(FilePath, PlanTasks) :-
+build_plan_file(FilePath, PlanTasks, SpecContent) :-
     exec(bash(command: 'mkdir -p plans'), _),
-    build_task_lines(PlanTasks, TaskLines),
-    assemble_plan_dml(TaskLines, PlanDml),
+    build_task_lines(PlanTasks, 1, TaskLines),
+    assemble_plan_dml(TaskLines, SpecContent, PlanDml),
     exec(write_file(path: FilePath, content: PlanDml), _).
 
-assemble_plan_dml(TaskLines, PlanDml) :-
+assemble_plan_dml(TaskLines, SpecContent, PlanDml) :-
     ToolBlock = 'tool(run_bash(Command, Output), "Run a shell command in the workspace. Use cat to read files, use heredocs to write files: cat > path/to/file.py << \'ENDOFFILE\'\\ncode here\\nENDOFFILE\\nUse mkdir -p before writing to new directories.") :-\n    exec(bash(command: Command), Output).\n\ntool(list_directory(Path, Entries), "List files and directories at the given path.") :-\n    exec(list_directory(path: Path), Entries).',
-    format(string(PlanDml), "~s\n\nagent_main :-\n    system(\"You are an expert Python developer. You MUST implement a complete library from the specification in start.md.\\n\\nCRITICAL RULES:\\n1. Start coding IMMEDIATELY. Do NOT re-read start.md more than once.\\n2. Use run_bash for EVERYTHING: read files with cat, write files with heredocs, run commands.\\n3. To write a file: run_bash with: mkdir -p dirname && cat > filepath << 'ENDOFFILE'\\n... file content ...\\nENDOFFILE\\n4. NEVER call write_file_content or read_file_content — they do not exist.\\n5. After writing each file, verify it with cat or python -c 'import module'.\\n6. Work autonomously. No user interaction. No web_search, news_search, url_fetch, or create_skill.\\n7. If a task seems unclear, make reasonable assumptions and implement anyway.\\n8. DO NOT spend more than 2 iterations reading. By iteration 3 you MUST be writing code.\"),\n    task(\"Read start.md ONCE with: cat start.md\"),\n~s    task(\"Create pyproject.toml or setup.py so the project is installable with pip install -e.\"),\n    task(\"Validate by installing the package and running a basic import check.\"),\n    answer(\"Done.\").\n\nagent_main :-\n    answer(\"Failed.\").\n", [ToolBlock, TaskLines]).
+    format(string(SystemPrompt), "You are an expert Python developer. You MUST implement a complete library from the specification below.\\n\\nCRITICAL RULES:\\n1. Start coding IMMEDIATELY. Do NOT re-read start.md — the full specification is already provided below.\\n2. Use run_bash for EVERYTHING: read files with cat, write files with heredocs, run commands.\\n3. To write a file: run_bash with: mkdir -p dirname && cat > filepath << 'ENDOFFILE'\\n... file content ...\\nENDOFFILE\\n4. NEVER call write_file_content or read_file_content — they do not exist.\\n5. After writing each file, verify it with cat or python -c 'import module'.\\n6. Work autonomously. No user interaction. No web_search, news_search, url_fetch, or create_skill.\\n7. If a task seems unclear, make reasonable assumptions and implement anyway.\\n8. DO NOT spend more than 2 iterations reading. By iteration 3 you MUST be writing code.\\n9. At the end of each task, briefly summarize what you did and what is left to do. This summary carries forward to the next task.\\n\\n--- BEGIN SPECIFICATION ---\\n~w\\n--- END SPECIFICATION ---", [SpecContent]),
+    format(string(PlanDml), "~s\n\nagent_main :-\n    system(~q),\n~s    task(\"Create pyproject.toml or setup.py so the project is installable with pip install -e.\", string(SumPyproj)),\n    task(\"Install the package with pip install -e . and verify basic imports work.\", string(SumInstall)),\n    task(\"Run the full test suite and fix any failures until all tests pass.\", string(SumTests)),\n    answer(\"Done.\").\n\nagent_main :-\n    answer(\"Failed.\").\n", [ToolBlock, SystemPrompt, TaskLines]).
 
-build_task_lines([], "").
-build_task_lines([Task|Rest], TaskLines) :-
-    format(string(Line), "    task(~q),\n", [Task]),
-    build_task_lines(Rest, RestLines),
+build_task_lines([], _, "").
+build_task_lines([Task|Rest], N, TaskLines) :-
+    format(string(Line), "    task(~q, string(Sum~w)),\n", [Task, N]),
+    Next is N + 1,
+    build_task_lines(Rest, Next, RestLines),
     string_concat(Line, RestLines, TaskLines).
 
 output_plan_steps([]).
