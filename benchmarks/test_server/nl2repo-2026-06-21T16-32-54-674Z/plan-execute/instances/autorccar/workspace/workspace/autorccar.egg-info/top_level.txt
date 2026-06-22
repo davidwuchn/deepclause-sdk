@@ -1,4 +1,0 @@
-Traffic_signal
-arduino
-computer
-raspberryPi

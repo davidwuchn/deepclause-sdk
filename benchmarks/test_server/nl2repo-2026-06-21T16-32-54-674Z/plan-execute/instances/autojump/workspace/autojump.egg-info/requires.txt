@@ -1,7 +1,0 @@
-
-[dev]
-pytest>=3.0
-pytest-cov>=2.0
-
-[ipython]
-ipython>=5.0
