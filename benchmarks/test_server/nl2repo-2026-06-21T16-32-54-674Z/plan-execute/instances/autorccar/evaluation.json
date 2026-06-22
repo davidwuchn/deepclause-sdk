@@ -1,0 +1,22 @@
+{
+  "taskName": "autorccar",
+  "score": 6,
+  "totalTests": 13,
+  "passedTests": 6,
+  "failedTests": 0,
+  "errors": 4,
+  "successRate": 0.46153846153846156,
+  "status": "completed",
+  "commandResults": [
+    {
+      "command": "pip install -e .",
+      "exitCode": 1,
+      "output": "Obtaining file:///workspace\n"
+    },
+    {
+      "command": "pytest --continue-on-collection-errors test",
+      "exitCode": 1,
+      "output": "============================= test session starts ==============================\nplatform linux -- Python 3.11.7, pytest-8.4.1, pluggy-1.6.0\nrootdir: /workspace\nplugins: anyio-4.10.0\ncollected 6 items / 2 errors\n\ntest/stream_server_test.py ...                                           [ 50%]\ntest/ultrasonic_server_test.py ...                                       [100%]\n\n==================================== ERRORS ====================================\n___________________ ERROR collecting test/rc_control_test.py ___________________\nImportError while importing test module '/workspace/test/rc_control_test.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/usr/local/lib/python3.11/importlib/__init__.py:126: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nD:\\IdeaProjects\\Wmirro\\xm39\\AutoRCCar-master\\test\\rc_control_test.py:6: in <module>\n    ???\nE   ModuleNotFoundError: No module named 'computer'\n___________________ ERROR collecting test/test_rc_driver.py ____________________\nImportError while importing test module '/workspace/test/test_rc_driver.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/usr/local/lib/python3.11/importlib/__init__.py:126: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nD:\\IdeaProjects\\Wmirro\\xm39\\AutoRCCar-master\\test\\test_rc_driver.py:8: in <module>\n    ???\nE   ModuleNotFoundError: No module named 'computer'\n=========================== short test summary info ============================\nERROR test/rc_control_test.py\nERROR test/test_rc_driver.py\n========================= 6 passed, 2 errors in 1.13s ==========================\n"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+# DeepClause generated files
+*.meta.json
+
+# Keep tools directory but ignore compiled files by default
+# Uncomment to track compiled DML:
+# !tools/*.dml

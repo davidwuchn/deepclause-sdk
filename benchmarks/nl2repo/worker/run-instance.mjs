@@ -85,6 +85,8 @@ async function main() {
       throw new Error(`Unsupported benchmark mode: ${spec.mode}`);
     }
 
+    await unwrapNestedWorkspace(workspace);
+
     result.modifiedFiles = await getModifiedFiles(workspace);
     result.patch = await getGitDiff(workspace);
     result.patchBytes = Buffer.byteLength(result.patch, 'utf8');
@@ -350,6 +352,28 @@ async function findGeneratedPlan(plansDir) {
   return planFiles[planFiles.length - 1];
 }
 
+async function unwrapNestedWorkspace(workspace) {
+  const nestedDir = path.join(workspace, 'workspace');
+  if (!(await pathExists(nestedDir)) || !(await fs.stat(nestedDir)).isDirectory()) {
+    return;
+  }
+  const entries = await fs.readdir(nestedDir);
+  if (entries.length === 0) {
+    return;
+  }
+  logProgress(`Detected nested workspace/ directory — unwrapping ${entries.length} entries`);
+  for (const entry of entries) {
+    const src = path.join(nestedDir, entry);
+    const dest = path.join(workspace, entry);
+    if (await pathExists(dest)) {
+      await fs.rm(dest, { recursive: true, force: true });
+    }
+    await fs.rename(src, dest);
+  }
+  await fs.rm(nestedDir, { recursive: true, force: true });
+  logProgress('Nested workspace unwrapped successfully');
+}
+
 async function getModifiedFiles(dir) {
   const { stdout } = await runCommand('git', ['status', '--porcelain'], { cwd: dir });
   return stdout
@@ -375,9 +399,13 @@ async function copyWorkspace(workspace, outputDir) {
       recursive: true,
       filter: (src) => {
         const relative = path.relative(workspace, src);
+        const base = path.basename(src);
         return !relative.startsWith('.git')
           && !relative.startsWith('.deepclause')
-          && !relative.startsWith('plans');
+          && !relative.startsWith('plans')
+          && !base.startsWith('agent_messages_iteration_')
+          && !base.startsWith('__pycache__')
+          && !base.endsWith('.egg-info');
       },
     });
   }

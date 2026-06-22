@@ -1,0 +1,22 @@
+{
+  "taskName": "arguably",
+  "score": 0,
+  "totalTests": 70,
+  "passedTests": 0,
+  "failedTests": 0,
+  "errors": 0,
+  "successRate": 0,
+  "status": "completed",
+  "commandResults": [
+    {
+      "command": "pip install -e .",
+      "exitCode": 1,
+      "output": "Obtaining file:///workspace\n  Installing build dependencies: started\n  Installing build dependencies: finished with status 'done'\n  Checking if build backend supports build_editable: started\n  Checking if build backend supports build_editable: finished with status 'done'\n  Getting requirements to build editable: started\n  Getting requirements to build editable: finished with status 'done'\n  Preparing editable metadata (pyproject.toml): started\n  Preparing editable metadata (pyproject.toml): finished with status 'done'\nRequirement already satisfied: docstring-parser<0.17,>=0.16 in /usr/local/lib/python3.10/site-packages (from arguably==1.3.0) (0.16)\nBuilding wheels for collected packages: arguably\n  Building editable for arguably (pyproject.toml): started\n  Building editable for arguably (pyproject.toml): finished with status 'error'\nFailed to build arguably\n"
+    },
+    {
+      "command": "pytest --continue-on-collection-errors test",
+      "exitCode": 4,
+      "output": ""
+    }
+  ]
+}

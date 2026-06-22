@@ -1,0 +1,35 @@
+tool(run_bash(Command, Output), "Run a shell command in the workspace. Use cat to read files, use heredocs to write files: cat > path/to/file.py << 'ENDOFFILE'\ncode here\nENDOFFILE\nUse mkdir -p before writing to new directories. Use ls to list directories.") :-
+    exec(bash(command: Command), Output).
+
+agent_main :-
+    exec(bash(command: 'cat start.md'), SpecResult),
+    get_dict(stdout, SpecResult, SpecContent),
+    format(string(SysPrompt), "You are an expert Python developer. You MUST implement a complete library from the specification below.\n\nCRITICAL RULES:\n1. Start coding IMMEDIATELY. The full specification is below — do NOT re-read start.md.\n2. Use run_bash for EVERYTHING: write files with heredocs, run commands.\n3. To write a file: run_bash with: mkdir -p dirname && cat > filepath << 'ENDOFFILE'\n... file content ...\nENDOFFILE\n4. NEVER call write_file_content or read_file_content — they do not exist.\n5. After writing each file, verify it with cat or python -c 'import module'.\n6. Work autonomously. No user interaction. No web_search, news_search, url_fetch, or create_skill.\n7. If a task seems unclear, make reasonable assumptions and implement anyway.\n8. DO NOT spend more than 2 iterations reading. By iteration 3 you MUST be writing code.\n9. At the end of each task, briefly summarize what you did and what is left to do. This summary carries forward to the next task.\n\n--- BEGIN SPECIFICATION ---\n~w\n--- END SPECIFICATION ---", [SpecContent]),
+    system(SysPrompt),
+    task("Set up the AutoRCCar project directory structure with all necessary __init__.py files including workspace, arduino, computer, computer/cascade_xml, computer/chess_board, and raspberryPi directories.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum1)),
+    task("Create the environment.yml file with all required dependencies including opencv-python==4.12.0.88, numpy==2.2.6, scikit-learn==1.7.1, pygame==2.6.1, pyserial==3.5, and other specified packages.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum2)),
+    task("Create pyproject.toml to make the project installable via pip with proper package metadata and dependencies.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum3)),
+    task("Implement the load_data function in computer/model.py that loads training data from npz files and splits into training and validation sets.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum4)),
+    task("Implement the NeuralNetwork class skeleton with __init__ method and create method in computer/model.py using OpenCV's ml module for MLP architecture.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum5)),
+    task("Implement the train method in the NeuralNetwork class that performs back-propagation training using OpenCV's MLP trainer.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum6)),
+    task("Implement the evaluate method in the NeuralNetwork class that computes model accuracy on test data.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum7)),
+    task("Implement the predict method in the NeuralNetwork class that returns class labels for driving decisions.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum8)),
+    task("Implement the save_model and load_model methods in the NeuralNetwork class for model persistence using OpenCV format.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum9)),
+    task("Implement the RCControl class in computer/rc_driver_helper.py with __init__, steer, and stop methods for serial port car control.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum10)),
+    task("Implement the DistanceToCamera class in computer/rc_driver_helper.py with __init__ and calculate methods using camera intrinsic parameters.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum11)),
+    task("Implement the ObjectDetection class in computer/rc_driver_helper.py with __init__ and detect methods using cascade classifier for stop sign and traffic light detection.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum12)),
+    task("Implement the Server class in computer/rc_driver.py that handles multi-threaded network server setup for video and sensor data ports.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum13)),
+    task("Implement the SensorDataHandler class in computer/rc_driver.py for receiving ultrasonic sensor data via network socket.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum14)),
+    task("Implement the VideoStreamHandler class in computer/rc_driver.py with the handle method for JPEG stream decoding, object detection, distance calculation, and autonomous driving decision logic.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum15)),
+    task("Implement the main entry point in computer/rc_driver.py with __main__ block that initializes the Server and starts the autonomous driving system.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum16)),
+    task("Implement the CollectTrainingData class in computer/collect_training_data.py with network socket setup, pygame keyboard input handling, and data collection logic.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum17)),
+    task("Install the package in development mode and verify that all basic module imports work correctly.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum18)),
+    task("Write comprehensive test cases covering NeuralNetwork operations, RCControl, DistanceToCamera calculations, ObjectDetection, and data loading functionality.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum19)),
+    task("Run the full test suite and fix any failures until all tests pass successfully.. Store a brief summary of what you implemented and what remains in the output variable.", string(Sum20)),
+    task("Create pyproject.toml or setup.py so the project is installable with pip install -e. Store a summary in the output variable.", string(SumPyproj)),
+    task("Install the package with pip install -e . and verify basic imports work. Store a summary in the output variable.", string(SumInstall)),
+    task("Run the full test suite and fix any failures until all tests pass. Store a summary in the output variable.", string(SumTests)),
+    answer("Done.").
+
+agent_main :-
+    answer("Failed.").

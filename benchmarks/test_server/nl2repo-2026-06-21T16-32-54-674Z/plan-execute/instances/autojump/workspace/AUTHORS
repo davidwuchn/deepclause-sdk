@@ -1,0 +1,28 @@
+autojump authors and contributors
+=================================
+
+Main Author
+-----------
+William Ting <wbting1@gmail.com>
+
+Core Contributors
+-----------------
+- William Ting <wbting1@gmail.com> (original author)
+- The autojump community
+
+Notable Contributors
+--------------------
+- Developers who contributed patches, bug fixes, and improvements
+- Shell script maintainers for bash, zsh, fish, tcsh support
+- Platform compatibility contributors (Linux, macOS, Windows)
+- Documentation writers and translators
+
+How to Contribute
+-----------------
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Write or update tests
+5. Submit a pull request
+
+For more information, see the project README and contributing guidelines.

@@ -1,0 +1,7 @@
+docstring_parser>=0.16
+typing_extensions>=4.14.1
+
+[test]
+pytest>=8.4.1
+coverage>=7.10.2
+pytest-cov>=6.2.1

@@ -1,0 +1,9 @@
+[autojump]
+bash = bin.autojump_bash
+fish = bin.autojump_fish
+tcsh = bin.autojump_tcsh
+zsh = bin.autojump_zsh
+
+[console_scripts]
+_j = bin._j:main
+autojump = bin.autojump:main

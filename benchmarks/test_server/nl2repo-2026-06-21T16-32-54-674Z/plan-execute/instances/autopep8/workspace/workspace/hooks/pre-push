@@ -1,0 +1,13 @@
+#!/bin/bash
+# Pre-push hook to run autopep8 before pushing
+
+echo "Running autopep8 checks..."
+git diff --cached --name-only --diff-filter=ACM | grep '\.py$' | while read file; do
+    echo "Checking $file..."
+    python -m autopep8 --diff "$file" > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo "Please fix style issues in $file"
+        exit 1
+    fi
+done
+echo "All checks passed!"

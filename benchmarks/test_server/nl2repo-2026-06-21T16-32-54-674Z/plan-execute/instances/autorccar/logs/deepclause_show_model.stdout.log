@@ -1,0 +1,12 @@
+{
+  "models": {
+    "gateway": "custom:aliyun:qwen3.6-27b",
+    "run": "custom:aliyun:qwen3.6-27b",
+    "compile": "custom:aliyun:qwen3.6-27b"
+  },
+  "temperatures": {
+    "gateway": 1,
+    "run": 1,
+    "compile": 1
+  }
+}

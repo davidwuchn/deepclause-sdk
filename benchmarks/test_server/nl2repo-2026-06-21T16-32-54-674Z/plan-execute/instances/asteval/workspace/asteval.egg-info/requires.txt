@@ -1,0 +1,15 @@
+numpy>=1.20.0
+
+[dev]
+numpy>=1.20.0
+numpy_financial>=1.0.0
+pytest>=6.0.0
+pytest-cov>=2.0.0
+coverage>=5.0.0
+
+[test]
+numpy>=1.20.0
+numpy_financial>=1.0.0
+pytest>=6.0.0
+pytest-cov>=2.0.0
+coverage>=5.0.0

@@ -1,0 +1,30 @@
+% Deep research helper skill that turns raw search results into readable notes.
+
+tool(search_web(Query, Results),
+     "Search the web for background sources and evergreen references.") :-
+    exec(web_search(query: Query, count: 8), Results).
+
+tool(search_news(Query, Results),
+     "Search recent news when the topic is time-sensitive or fast-moving.") :-
+    exec(news_search(query: Query, count: 5), Results).
+
+agent_main(Query) :-
+    system("You turn raw search results into readable research notes.
+- Always call search_web.
+- Also call search_news when the query is time-sensitive, recent, or news-driven.
+- Convert the raw results into concise Markdown that a parent research skill can reuse.
+- Under Sources, list each source with its title, URL, and a one-line reason it matters.
+- Do not invent facts. If the search results are sparse or conflicting, say so clearly."),
+
+    output("Gathering search results..."),
+    task("For the query '{Query}':
+1. Call search_web.
+2. Call search_news as well if recency matters.
+3. Convert the raw search results into a readable Markdown brief with these sections:
+   - Overview
+   - Key Findings
+   - Sources
+Under Sources, list each source with its title, URL, and one-line relevance note.
+Store the final brief in SearchBrief.", SearchBrief),
+
+    answer(SearchBrief).

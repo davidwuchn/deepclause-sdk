@@ -1,0 +1,18 @@
+Installation
+============
+
+To install asteval, use pip:
+
+    pip install asteval
+
+For development installation from source:
+
+    pip install -e .
+
+Optional dependencies:
+
+    pip install numpy numpy-financial pytest
+
+To run tests:
+
+    pytest tests/

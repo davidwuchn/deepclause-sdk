@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+src/aiofiles/__init__.py
+src/aiofiles/base.py
+src/aiofiles.egg-info/PKG-INFO
+src/aiofiles.egg-info/SOURCES.txt
+src/aiofiles.egg-info/dependency_links.txt
+src/aiofiles.egg-info/requires.txt
+src/aiofiles.egg-info/top_level.txt
+src/aiofiles/os/__init__.py
+src/aiofiles/os/path.py
+src/aiofiles/tempfile/__init__.py
+src/aiofiles/tempfile/temptypes.py
+src/aiofiles/threadpool/__init__.py
+src/aiofiles/threadpool/binary.py
+src/aiofiles/threadpool/text.py
+src/aiofiles/threadpool/utils.py

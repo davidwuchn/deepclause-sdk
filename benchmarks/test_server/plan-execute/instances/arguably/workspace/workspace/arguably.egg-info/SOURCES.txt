@@ -1,0 +1,16 @@
+pyproject.toml
+arguably/__init__.py
+arguably/__main__.py
+arguably/_argparse_extensions.py
+arguably/_commands.py
+arguably/_context.py
+arguably/_modifiers.py
+arguably/_util.py
+arguably/arg.py
+arguably/py.typed
+arguably.egg-info/PKG-INFO
+arguably.egg-info/SOURCES.txt
+arguably.egg-info/dependency_links.txt
+arguably.egg-info/requires.txt
+arguably.egg-info/top_level.txt
+tests/test_arguably.py
