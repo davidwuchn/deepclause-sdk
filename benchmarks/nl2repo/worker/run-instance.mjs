@@ -39,7 +39,7 @@ async function main() {
     const benchmarkRequest = buildBenchmarkRequest(spec.task);
     if (spec.mode === 'prompt') {
       logProgress('Running prompt mode');
-      const promptStep = await runStep(result, logsDir, 'deepclause_prompt', ['deepclause', '-p', benchmarkRequest], {
+      const promptStep = await runStep(result, logsDir, 'deepclause_prompt', ['deepclause', '-p', '--usage', '/work/usage-prompt.json', benchmarkRequest], {
         cwd: workspace,
         timeoutSeconds: spec.execution.agentTimeoutSeconds,
         env: buildCommandEnv(),
@@ -49,7 +49,7 @@ async function main() {
       result.bannedToolCalls = result.toolCalls.filter((toolName) => BANNED_TOOL_NAMES.includes(toolName));
     } else if (spec.mode === 'plan-execute') {
       logProgress('Running plan generation');
-      await runStep(result, logsDir, 'plan_generate', ['deepclause', 'run', '--verbose', '--stream', '.deepclause/system/plan.dml', benchmarkRequest], {
+      await runStep(result, logsDir, 'plan_generate', ['deepclause', 'run', '--verbose', '--stream', '--usage', '/work/usage-plan-generate.json', '.deepclause/system/plan.dml', benchmarkRequest], {
         cwd: workspace,
         timeoutSeconds: spec.execution.agentTimeoutSeconds,
         env: buildCommandEnv(),
@@ -58,7 +58,7 @@ async function main() {
       const generatedPlan = await findGeneratedPlan(plansDir);
       result.generatedPlan = path.relative(workspace, generatedPlan);
       logProgress(`Executing generated plan ${result.generatedPlan}`);
-      await runStep(result, logsDir, 'plan_execute', ['deepclause', 'run', '--verbose', '--stream', result.generatedPlan], {
+      await runStep(result, logsDir, 'plan_execute', ['deepclause', 'run', '--verbose', '--stream', '--usage', '/work/usage-plan-execute.json', result.generatedPlan], {
         cwd: workspace,
         timeoutSeconds: spec.execution.agentTimeoutSeconds,
         env: buildCommandEnv(),
@@ -76,7 +76,7 @@ async function main() {
         throw new Error('Compile mode did not generate .deepclause/tools/start.dml');
       }
       logProgress('Running compiled DML');
-      await runStep(result, logsDir, 'deepclause_run_compiled', ['deepclause', 'run', '--verbose', '--stream', '.deepclause/tools/start.dml', benchmarkRequest], {
+      await runStep(result, logsDir, 'deepclause_run_compiled', ['deepclause', 'run', '--verbose', '--stream', '--usage', '/work/usage-compiled.json', '.deepclause/tools/start.dml', benchmarkRequest], {
         cwd: workspace,
         timeoutSeconds: spec.execution.agentTimeoutSeconds,
         env: buildCommandEnv(),
@@ -107,6 +107,7 @@ async function main() {
     await copyWorkspace(workspace, outputDir);
     await copyDotDeepclause(workspace, outputDir);
     await copyPlans(workspace, outputDir);
+    await collectUsageFiles(outputDir);
     await fs.writeFile(path.join(outputDir, 'result.json'), `${JSON.stringify(result, null, 2)}\n`, 'utf8');
   }
 }
@@ -350,6 +351,28 @@ async function findGeneratedPlan(plansDir) {
     throw new Error('Plan mode did not generate a plan file.');
   }
   return planFiles[planFiles.length - 1];
+}
+
+async function collectUsageFiles(outputDir) {
+  const usageFiles = [
+    '/work/usage-plan-generate.json',
+    '/work/usage-plan-execute.json',
+    '/work/usage-prompt.json',
+    '/work/usage-compiled.json',
+  ];
+  const usage = {};
+  for (const src of usageFiles) {
+    if (await pathExists(src)) {
+      const label = path.basename(src, '.json');
+      try {
+        usage[label] = JSON.parse(await fs.readFile(src, 'utf8'));
+      } catch {}
+      await fs.rm(src, { force: true });
+    }
+  }
+  if (Object.keys(usage).length > 0) {
+    await fs.writeFile(path.join(outputDir, 'usage.json'), `${JSON.stringify(usage, null, 2)}\n`, 'utf8');
+  }
 }
 
 async function unwrapNestedWorkspace(workspace) {

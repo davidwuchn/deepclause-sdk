@@ -4,6 +4,7 @@ import type { Config } from '../../cli/config.js';
 import { applyResolvedModelConfig, resolveCompactionConfig } from '../../cli/config.js';
 import { formatToolArgs } from '../../cli/tool-args.js';
 import type { DMLEvent, DeepClauseSDK, MemoryMessage } from '../../types.js';
+import { recordTokenUsage, type TokenUsageByModel } from './token-usage.js';
 import {
   createLocalSkillCatalogRuntime,
   type ExecuteNestedSkillRequest,
@@ -56,6 +57,7 @@ export interface ExecuteDmlResult {
   error?: string;
   trace?: object;
   events: DMLEvent[];
+  usageByModel?: TokenUsageByModel;
 }
 
 export async function executeDml(options: ExecuteDmlOptions): Promise<ExecuteDmlResult> {
@@ -100,6 +102,7 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
     output: [],
     events: [],
   };
+  const usageByModel: TokenUsageByModel = {};
   let finished = false;
 
   const handleEvent = (event: DMLEvent) => {
@@ -163,6 +166,9 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
         break;
 
       case 'usage':
+        if (event.usage) {
+          recordTokenUsage(usageByModel, options.selection.id, event.usage);
+        }
         break;
 
       case 'task_activity':
@@ -216,6 +222,10 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
       }
 
       handleEvent(event);
+    }
+
+    if (Object.keys(usageByModel).length > 0) {
+      result.usageByModel = usageByModel;
     }
 
     return result;

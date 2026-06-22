@@ -57,6 +57,7 @@ export interface RunResult {
   wouldExecute?: string;
   trace?: object;
   events?: DMLEvent[];
+  usageByModel?: Record<string, { calls: number; inputTokens: number; outputTokens: number; totalTokens: number; cacheReadTokens: number; cacheWriteTokens: number; reasoningTokens: number }>;
 }
 
 // =============================================================================
@@ -211,7 +212,16 @@ export async function run(
     }
   }
 
-  return result;
+  const runResult: RunResult = {
+    output: result.output,
+    answer: result.answer,
+    error: result.error,
+    trace: result.trace,
+    events: result.events,
+    usageByModel: result.usageByModel,
+  };
+
+  return runResult;
 }
 
 async function resolveDmlPath(file: string, configRoot: string): Promise<string> {

@@ -6,6 +6,8 @@
  */
 
 import { Command } from 'commander';
+import * as path from 'path';
+import * as fs from 'fs/promises';
 import { deepClauseDirExists, initConfig, setModel, showModel } from './config.js';
 import { compile, compileAll } from './compile.js';
 import { run } from './run.js';
@@ -285,6 +287,7 @@ program
   .option('--temperature <number>', 'Override temperature (0.0-2.0)', parseFloat)
   .option('--no-audit', 'Disable the LLM security audit for one-shot prompt compilation')
   .option('--gas-limit <number>', 'Maximum number of execution steps', parseInt)
+  .option('--usage <file>', 'Save token usage summary to file')
   .option('-p, --prompt <text>', 'One-shot prompt: generate and run DML from natural language')
   .option('-P, --param <key=value>', 'Pass named parameter (can be repeated)', collectParams, {})
   .action(async (file, args, options) => {
@@ -343,6 +346,15 @@ program
         // Show trace location if saved
         if (options.trace) {
           console.log(`\n📊 Trace saved to: ${options.trace}`);
+        }
+
+        // Save usage data if requested
+        if (options.usage && result.usageByModel && Object.keys(result.usageByModel).length > 0) {
+          const usagePath = path.resolve(options.usage);
+          await fs.writeFile(usagePath, JSON.stringify(result.usageByModel, null, 2) + '\n', 'utf8');
+          if (options.verbose) {
+            console.log(`📊 Usage saved to: ${usagePath}`);
+          }
         }
       }
     } catch (error) {
