@@ -28,7 +28,7 @@ const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
 const version = packageJson.version;
 
 const program = new Command();
-const CLI_SUBCOMMANDS = new Set(['init', 'set-model', 'show-model', 'compile', 'compile-all', 'run', 'list-tools', 'list-commands', 'help']);
+const CLI_SUBCOMMANDS = new Set(['init', 'set-model', 'show-model', 'list-models', 'compile', 'compile-all', 'run', 'plan', 'list-tools', 'list-commands', 'help']);
 
 program
   .name('deepclause')
@@ -65,8 +65,7 @@ program
     try {
       const slot = options.slot as ModelSlot | undefined;
       const result = await setModel(process.cwd(), model, slot);
-      console.log(`✅ Model set to: ${result.modelId}`);
-      console.log(`   Updated slots: ${result.updatedSlots.join(', ')}`);
+      console.log(result.info);
     } catch (error) {
       console.error('❌ Error:', (error as Error).message);
       process.exit(1);
@@ -84,6 +83,46 @@ program
         console.log(JSON.stringify({ models: result.models, temperatures: result.temperatures }, null, 2));
       } else {
         console.log(result.formatted);
+      }
+    } catch (error) {
+      console.error('❌ Error:', (error as Error).message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('list-models')
+  .description('List all models in the bundled model database')
+  .option('--json', 'Output as JSON')
+  .option('--complexity <level>', 'Filter by complexity (high, medium, low)')
+  .option('--reasoning', 'Show only reasoning models')
+  .action(async (options) => {
+    try {
+      const { getAllModels } = await import('../system/config/model-database.js');
+      const models = getAllModels();
+      const entries = Object.entries(models);
+
+      let filtered = entries;
+      if (options.complexity) {
+        filtered = filtered.filter(([, m]) => m.complexity === options.complexity);
+      }
+      if (options.reasoning) {
+        filtered = filtered.filter(([, m]) => m.reasoning);
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify(Object.fromEntries(filtered), null, 2));
+      } else {
+        console.log(`Model database (${filtered.length} models)\n`);
+        for (const [id, m] of filtered) {
+          const ctx = m.limit.context.toLocaleString();
+          const out = m.limit.output.toLocaleString();
+          const reasoning = m.reasoning ? 'yes' : 'no';
+          const weights = m.open_weights ? 'open' : 'closed';
+          console.log(`${id}`);
+          console.log(`  ${m.name} | ctx=${ctx} out=${out} reasoning=${reasoning} complexity=${m.complexity} ${weights}`);
+          console.log('');
+        }
       }
     } catch (error) {
       console.error('❌ Error:', (error as Error).message);
@@ -355,6 +394,108 @@ program
           if (options.verbose) {
             console.log(`📊 Usage saved to: ${usagePath}`);
           }
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error:', (error as Error).message);
+      if (options.verbose) {
+        console.error((error as Error).stack);
+      }
+      process.exit(1);
+    }
+  });
+
+// =============================================================================
+// Plan Command
+// =============================================================================
+
+program
+  .command('plan [file]')
+  .description('Generate a standalone DML plan from a Markdown specification (same as /plan in the TUI)')
+  .option('--workspace <path>', 'Working directory for file operations', './')
+  .option('--verbose', 'Show debug output including tool calls')
+  .option('--stream', 'Stream LLM responses in real-time')
+  .option('--headless', 'Plain output only, no TUI formatting')
+  .option('--sandbox', 'Run shell tools inside AgentVM instead of the local workspace shell')
+  .option('--model <model>', 'Override configured model (can be provider/model format, e.g., google/gemini-2.5-pro)')
+  .option('--provider <provider>', 'Override configured provider (openai, anthropic, google, openrouter)')
+  .option('--temperature <number>', 'Override temperature (0.0-2.0)', parseFloat)
+  .option('--gas-limit <number>', 'Maximum number of execution steps', parseInt)
+  .option('--usage <file>', 'Save token usage summary to file')
+  .action(async (file, options) => {
+    try {
+      const configRoot = path.resolve(options.workspace ?? './');
+      const { getSystemAssetSourcePaths } = await import('../system/assets/index.js');
+      const planDmlPath = getSystemAssetSourcePaths(configRoot).planDml;
+
+      let requestContent: string;
+      if (file) {
+        const filePath = path.resolve(configRoot, file);
+        try {
+          requestContent = await fs.readFile(filePath, 'utf8');
+        } catch {
+          console.error(`❌ Cannot read file: ${filePath}`);
+          process.exit(1);
+        }
+      } else if (!process.stdin.isTTY) {
+        const chunks: Buffer[] = [];
+        for await (const chunk of process.stdin) {
+          chunks.push(chunk as Buffer);
+        }
+        requestContent = Buffer.concat(chunks).toString('utf8');
+        if (!requestContent.trim()) {
+          console.error('❌ No input provided. Usage: deepclause plan <file>  or  cat spec.md | deepclause plan');
+          process.exit(1);
+        }
+      } else {
+        console.error('❌ No input provided. Usage: deepclause plan <file>  or  cat spec.md | deepclause plan');
+        process.exit(1);
+      }
+
+      let model = options.model;
+      let provider = options.provider;
+      if (model && model.includes('/')) {
+        const [parsedProvider, ...modelParts] = model.split('/');
+        provider = provider || parsedProvider;
+        model = modelParts.join('/');
+      }
+
+      const result = await run(planDmlPath, [requestContent], {
+        configRoot,
+        workspace: options.workspace,
+        verbose: options.verbose,
+        stream: options.stream,
+        headless: options.headless ?? true,
+        sandbox: options.sandbox,
+        model,
+        provider: provider as import('../system/config/model-slots.js').Provider,
+        temperature: options.temperature,
+        gasLimit: options.gasLimit,
+      });
+
+      if (options.headless !== false && result.output.length > 0) {
+        for (const out of result.output) {
+          console.log(out);
+        }
+      }
+
+      if (result.answer) {
+        if (result.output.length > 0) {
+          console.log('');
+        }
+        console.log(result.answer);
+      }
+
+      if (result.error) {
+        console.error('❌ Error:', result.error);
+        process.exit(1);
+      }
+
+      if (options.usage && result.usageByModel && Object.keys(result.usageByModel).length > 0) {
+        const usagePath = path.resolve(options.usage);
+        await fs.writeFile(usagePath, JSON.stringify(result.usageByModel, null, 2) + '\n', 'utf8');
+        if (options.verbose) {
+          console.log(`📊 Usage saved to: ${usagePath}`);
         }
       }
     } catch (error) {

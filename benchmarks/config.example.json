@@ -13,7 +13,7 @@
     "plan-execute"
   ],
   "deepclause": {
-    "version": "0.0.78",
+    "version": "0.0.79",
     "packageTarball": null,
     "models": {
       "gateway": "openai:gpt-4o",

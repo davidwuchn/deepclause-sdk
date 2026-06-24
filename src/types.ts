@@ -31,6 +31,12 @@ export interface CreateOptions {
   providerOptions?: Record<string, Record<string, any>>;
   /** Optional memory compaction settings for task()/prompt() execution */
   compaction?: CompactionOptions;
+  /** Reasoning effort type (auto-resolved from model database) */
+  reasoningType?: import('./system/config/model-database.js').ReasoningType;
+  /** Reasoning budget map for token-based reasoning control */
+  reasoningBudgetMap?: Record<string, number>;
+  /** Model context window in tokens (from model database) */
+  contextWindow?: number;
 }
 
 export type CompactorSourceType = 'inline' | 'file' | 'auto';
@@ -261,6 +267,8 @@ export interface CompileResult {
   errors?: string[];
   /** Static and Semantic Analysis results */
   analysis?: AnalysisResult;
+  /** Token usage from LLM calls during compilation */
+  usageByModel?: import('./system/runtime/token-usage.js').TokenUsageByModel;
 }
 
 /**

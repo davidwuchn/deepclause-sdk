@@ -378,6 +378,7 @@ export async function runConductorTurn(
       }),
     });
   } catch (error) {
+    await mergeSessionUsage(workspaceRoot, session.metadata.id, usageByModel);
     await executionLog.finish({
       status: 'error',
       error: (error as Error).message,
@@ -870,7 +871,7 @@ async function runSessionCompactorBinding(options: {
     baseUrl: resolvedModel.baseUrl,
     temperature: resolvedModel.temperature,
     debug: options.verbose,
-    maxTokens: 65536,
+    maxTokens: resolvedModel.maxOutputTokens ?? 65536,
     compaction: { enabled: false },
   });
 
@@ -887,6 +888,7 @@ async function runSessionCompactorBinding(options: {
     }
     let answer = '';
     let error = '';
+    const usageByModel: TokenUsageByModel = {};
     for await (const event of sdk.runDML(code, {
       workspacePath: options.workspacePath,
       gasLimit: binding.compactor.gasLimit,
@@ -902,12 +904,15 @@ async function runSessionCompactorBinding(options: {
         answer = event.content;
       } else if (event.type === 'error' && event.content) {
         error = event.content;
+      } else if (event.type === 'usage' && event.usage) {
+        recordTokenUsage(usageByModel, resolvedModel.modelId, event.usage);
       }
     }
 
     return {
       answer,
       error: error || undefined,
+      usageByModel: Object.keys(usageByModel).length > 0 ? usageByModel : undefined,
     };
   } finally {
     await sdk.dispose();
@@ -965,6 +970,19 @@ async function maybeCompactSessionMessages(options: {
     }
 
     options.onCompactionEvent?.(result.event);
+
+    if (result.usageByModel) {
+      for (const totals of Object.values(result.usageByModel)) {
+        options.onCompactionEvent?.({ type: 'usage', usage: {
+          inputTokens: totals.inputTokens,
+          outputTokens: totals.outputTokens,
+          totalTokens: totals.totalTokens,
+          cacheReadTokens: totals.cacheReadTokens || undefined,
+          cacheWriteTokens: totals.cacheWriteTokens || undefined,
+          reasoningTokens: totals.reasoningTokens || undefined,
+        } });
+      }
+    }
 
     const beforeSerialized = JSON.stringify(priorMessages);
     const afterSerialized = JSON.stringify(normalized.map(({ role, content }) => ({ role, content })));

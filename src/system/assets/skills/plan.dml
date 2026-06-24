@@ -38,6 +38,8 @@ agent_main(Request) :-
     load_dml_reference(DmlReference),
     load_dml_compiler_prompt(CompilerPrompt),
     load_coding_workflow_recipe(CodingWorkflowRecipe),
+    resolve_model_info(ModelId, Complexity, Reasoning, TaskCount),
+    output("DEBUG: model info resolved"),
     format(string(SystemPrompt), "You create ordered execution plans for DeepClause.
 
 Current user request:
@@ -52,7 +54,7 @@ Current user request:
 - For mixed tasks, combine both modes deliberately and keep the task list ordered so research informs the later implementation or delivery steps.
 - Use list_skills/run_skill only when an existing local skill is clearly relevant to the request or can improve the resulting plan.
 - Choose tools conservatively and intentionally; do not use web or child-skill tools unless they improve the plan quality.
-- Return only an ordered list of 3 to 8 plain natural-language task strings.
+- Return only an ordered list of ~w plain natural-language task strings.
 - Each task string should describe one concrete execution step for fulfilling the user's request.
 - Each task must be actionable, concise, and free of code, shell commands, JSON, XML, HTML, CSS, JavaScript, TypeScript, Python, DML, and Markdown fences.
 - Plans should generally create or modify normal project files outside '.deepclause/'.
@@ -66,7 +68,7 @@ DML language reference loaded from .deepclause/docs/DML_REFERENCE.md:
 
 DML compiler guidance loaded from .deepclause/system/DML_COMPILER_PROMPT.md:
 
-~s", [Request, DmlReference, CompilerPrompt]),
+~s", [Request, TaskCount, DmlReference, CompilerPrompt]),
     system(SystemPrompt),
 
     task("Create a short file-safe slug for this request: '{Request}'.
@@ -74,7 +76,7 @@ Requirements:
 - lowercase letters, digits, and underscores only
 - 2 to 6 words when possible
 - no file extension
-Store only the slug in PlanSlug.", PlanSlug),
+Store only the slug in PlanSlug.", string(PlanSlug)),
 
     task("Classify this request for plan execution: '{Request}'.
 Requirements:
@@ -82,15 +84,15 @@ Requirements:
 - Use coding when the request mainly requires editing code, configuration, tests, scripts, or other project files.
 - Use non_coding when the request is mainly research, analysis, writing, planning, or information gathering without meaningful code changes.
 - Use mixed when the request needs both substantial research or analysis and meaningful implementation or file changes.
-Store only the label in PlanMode.", PlanModeRaw),
+Store only the label in PlanMode.", string(PlanModeRaw)),
 
     normalize_plan_mode(PlanModeRaw, PlanMode),
 
-    task("Break this request into 3 to 8 smaller execution tasks for a standalone DeepClause plan: '{Request}'.
+    task("Break this request into {TaskCount} smaller execution tasks for a standalone DeepClause plan: '{Request}'.
 
 If this is a coding task:
 - First perform a review and analysis of the current code base relative to the request
-- Use the results fo the analysis as a basis for your plan. The plan should be very specific. 
+- Use the results of the analysis as a basis for your plan. The plan should be very specific.
 
 General Requirements for the plan:
 - Consult relevant recipes before finalizing PlanTasks.
@@ -109,22 +111,143 @@ General Requirements for the plan:
 Store only the ordered list in PlanTasks.", list(string(PlanTasks))),
 
     derive_plan_system_prompt(Request, PlanMode, CodingWorkflowRecipe, PlanTasks, PlanSystemPrompt),
+    derive_tool_and_reasoning_assignments(Request, PlanTasks, ModelId, Complexity, Reasoning, PlanSteps),
 
     make_directory_path('plans'),
     format(string(FilePath), "plans/~w.dml", [PlanSlug]),
 
-    build_plan_review_message(FilePath, PlanMode, PlanTasks, PlanReviewMessage),
+    build_plan_review_message(FilePath, PlanMode, PlanSteps, PlanReviewMessage),
     output(PlanReviewMessage),
 
     output("Assembling the deterministic plan file..."),
-    assemble_plan_dml(PlanSystemPrompt, PlanTasks, PlanDml),
+    assemble_plan_dml(PlanSystemPrompt, PlanSteps, PlanDml),
     exec(write_file(path: FilePath, content: PlanDml), _),
     exec(validate_dml(dml_file: FilePath), ValidationResult),
     finish_plan_creation(FilePath, PlanSlug, ValidationResult, PlanReviewMessage).
 
-assemble_plan_dml(PlanSystemPrompt, PlanTasks, PlanDml) :-
+%% resolve_model_info(-ModelId, -Complexity, -Reasoning, -TaskCount)
+%% Reads model info from params (injected by runtime) and derives task count.
+resolve_model_info(ModelId, Complexity, Reasoning, TaskCount) :-
+    (   catch(
+            (   param(model_info, ModelInfo),
+                is_dict(ModelInfo),
+                get_dict(modelId, ModelInfo, ModelId),
+                (   get_dict(complexity, ModelInfo, C) -> Complexity = C ; Complexity = medium ),
+                (   get_dict(reasoning, ModelInfo, R), R == true -> Reasoning = true ; Reasoning = false )
+            ),
+            _,
+            fail
+        )
+    ->  true
+    ;   ModelId = "unknown",
+        Complexity = medium,
+        Reasoning = false
+    ),
+    task_count_for_complexity(Complexity, TaskCount).
+
+task_count_for_complexity("high", "3 to 5").
+task_count_for_complexity("medium", "4 to 6").
+task_count_for_complexity("low", "6 to 10").
+task_count_for_complexity(high, "3 to 5").
+task_count_for_complexity(medium, "4 to 6").
+task_count_for_complexity(low, "6 to 10").
+
+%% derive_tool_and_reasoning_assignments(+Request, +PlanTasks, +ModelId, +Complexity, +Reasoning, -PlanSteps)
+%% Asks the LLM to assign tools, reasoning effort, and recipe queries per task.
+derive_tool_and_reasoning_assignments(Request, PlanTasks, ModelId, Complexity, Reasoning, PlanSteps) :-
+    (   Reasoning == true
+    ->  ReasoningNote = "The execution model supports reasoning. Assign reasoning effort per task: none, low, medium, or high. Use 'high' for complex analysis/debugging, 'medium' for standard implementation, 'low' for boilerplate, 'none' for trivial tasks."
+    ;   ReasoningNote = "The execution model does not support reasoning. Set reasoning to 'none' for all tasks."
+    ),
+    task("For each task in this plan, decide which tools it needs, a reasoning effort level, and an optional recipe query.
+
+Request: {Request}
+Tasks: {PlanTasks}
+Execution model: {ModelId} ({Complexity} complexity)
+
+Available tools (use ONLY these exact names):
+- run_bash: Run a shell command (use for file I/O, running tests, installing deps, git, etc.)
+- run_skill: Run an existing local skill
+- consult_recipes: Search recipe library for workflow guidance
+- search_web: Search the web for documentation or examples
+- search_news: Search recent news
+- fetch_url: Fetch a web page by URL
+- download_file: Download a file from a URL
+- create_new_skill: Create a new reusable skill
+- ask_user: Ask the user a clarifying question
+- inform_user: Send a status update
+
+Note: There is no separate save_file or read_file tool. File operations go through run_bash (e.g. cat, echo, heredoc).
+
+{ReasoningNote}
+
+Also specify a recipe query for each task if relevant (null otherwise). Use natural language queries like 'testing patterns' or 'codebase analysis'.
+
+Return a JSON array of objects with these fields:
+- \"description\": the task description (copy from the plan above)
+- \"tools\": array of tool name strings from the available tools list above
+- \"reasoning\": one of \"none\", \"low\", \"medium\", \"high\"
+- \"recipe\": a recipe query string or null
+
+Return ONLY the JSON array, no other text.", string(AssignmentsJson)),
+    (   catch(parse_plan_json(AssignmentsJson, PlanSteps), _, fail)
+    ->  true
+    ;   % Fallback: no tool/reasoning/recipe assignments
+        fallback_plan_steps(PlanTasks, PlanSteps)
+    ).
+
+%% Valid tool names that exist in conductor_tool_definitions
+valid_plan_tool(run_bash).
+valid_plan_tool(run_skill).
+valid_plan_tool(consult_recipes).
+valid_plan_tool(search_web).
+valid_plan_tool(search_news).
+valid_plan_tool(fetch_url).
+valid_plan_tool(download_file).
+valid_plan_tool(create_new_skill).
+valid_plan_tool(ask_user).
+valid_plan_tool(inform_user).
+
+%% tool_name_to_atom(+Raw, -Atom)
+%% Converts a JSON string or atom to a Prolog atom
+tool_name_to_atom(Raw, Atom) :-
+    (   atom(Raw) -> Atom = Raw
+    ;   string(Raw) -> atom_string(Atom, Raw)
+    ;   Atom = Raw
+    ).
+
+%% parse_plan_json(+Json, -PlanSteps)
+parse_plan_json(Json, PlanSteps) :-
+    atom_json_dict(Json, JsonArray, []),
+    is_list(JsonArray),
+    maplist(parse_plan_step, JsonArray, PlanSteps).
+
+parse_plan_step(Dict, plan_step{description: Desc, tools: Tools, reasoning: Reasoning, recipe: Recipe}) :-
+    Desc = Dict.get(description),
+    (   Desc = null -> throw(parse_error) ; true ),
+    ToolsRaw = Dict.get(tools),
+    (   is_list(ToolsRaw)
+    ->  % Convert each tool name to atom, filter to valid tools
+        findall(TA, (member(TR, ToolsRaw), tool_name_to_atom(TR, TA), valid_plan_tool(TA)), ValidTools),
+        (   ValidTools = [] -> Tools = all ; Tools = ValidTools )
+    ;   Tools = all ),
+    ReasoningRaw = Dict.get(reasoning),
+    (   atom(ReasoningRaw) -> atom_string(ReasoningRaw, Reasoning) ; Reasoning = "none" ),
+    RecipeRaw = Dict.get(recipe),
+    (   RecipeRaw = null ; var(RecipeRaw) -> Recipe = "none"
+    ;   atom(RecipeRaw) -> atom_string(RecipeRaw, Recipe)
+    ;   Recipe = "none"
+    ).
+
+%% fallback_plan_steps(+PlanTasks, -PlanSteps)
+%% When JSON parsing fails, create steps with all tools and no reasoning/recipe.
+fallback_plan_steps([], []).
+fallback_plan_steps([Desc|Rest], [plan_step{description: Desc, tools: all, reasoning: "none", recipe: "none"}|RestSteps]) :-
+    fallback_plan_steps(Rest, RestSteps).
+
+assemble_plan_dml(PlanSystemPrompt, PlanSteps, PlanDml) :-
     conductor_tool_definitions(ToolBlock),
-    build_task_lines(PlanTasks, TaskLines),
+    build_task_lines(PlanSteps, TaskLines),
     format(string(PlanDml), "% Generated DeepClause plan.~n% This file was assembled deterministically from a task list.~n~n~s~n~nagent_main :-~n    system(~q),~n    output(\"Starting generated plan.\"),~n~s    answer(\"Plan completed.\").~n~nagent_main :-~n    answer(\"Plan failed. Please try again.\").~n", [ToolBlock, PlanSystemPrompt, TaskLines]).
 
 derive_plan_system_prompt(Request, PlanMode, CodingWorkflowRecipe, PlanTasks, PlanSystemPrompt) :-
@@ -159,22 +282,52 @@ load_coding_workflow_recipe(CodingWorkflowRecipe) :-
 
 load_coding_workflow_recipe("DeepClause Coding Workflow recipe unavailable. Follow standard DeepClause coding workflow guidance.").
 
-build_plan_review_message(FilePath, PlanMode, PlanTasks, PlanReviewMessage) :-
-    build_step_review_lines(PlanTasks, 1, StepLines),
+build_plan_review_message(FilePath, PlanMode, PlanSteps, PlanReviewMessage) :-
+    build_step_review_lines(PlanSteps, 1, StepLines),
     format(string(PlanReviewMessage), "Proposed plan overview\n- Output file: ~w\n- Plan mode: ~w\n\nPlanned steps:\n~s", [FilePath, PlanMode, StepLines]).
 
 build_step_review_lines([], _, "").
-build_step_review_lines([Task|RestTasks], StepNumber, StepLines) :-
-    format(string(CurrentStep), "~w. ~w\n", [StepNumber, Task]),
+build_step_review_lines([Step|RestSteps], StepNumber, StepLines) :-
+    Desc = Step.description,
+    Tools = Step.tools,
+    Reasoning = Step.reasoning,
+    (   Tools == all
+    ->  format(string(CurrentStep), "~w. ~w [all tools, ~w]\n", [StepNumber, Desc, Reasoning])
+    ;   format(string(CurrentStep), "~w. ~w [tools: ~w, ~w]\n", [StepNumber, Desc, Tools, Reasoning])
+    ),
     NextStepNumber is StepNumber + 1,
-    build_step_review_lines(RestTasks, NextStepNumber, RestStepLines),
+    build_step_review_lines(RestSteps, NextStepNumber, RestStepLines),
     string_concat(CurrentStep, RestStepLines, StepLines).
 
 build_task_lines([], "").
-build_task_lines([Task|Rest], TaskLines) :-
-    format(string(Line), "    task(~q),~n", [Task]),
+build_task_lines([Step|Rest], TaskLines) :-
+    build_single_task_line(Step, Line),
     build_task_lines(Rest, RestLines),
     string_concat(Line, RestLines, TaskLines).
+
+build_single_task_line(Step, Line) :-
+    Desc = Step.description,
+    Tools = Step.tools,
+    Reasoning = Step.reasoning,
+    Recipe = Step.recipe,
+
+    % Build inner task with tool scoping
+    (   Tools == all
+    ->  format(string(InnerTask), "task(~q)", [Desc])
+    ;   format(string(InnerTask), "with_tools(~w, task(~q))", [Tools, Desc])
+    ),
+
+    % Wrap in with_reasoning if reasoning != none
+    (   Reasoning \= "none"
+    ->  format(string(WithReasoning), "with_reasoning(~n        ~w~n    , ~w)", [InnerTask, Reasoning])
+    ;   WithReasoning = InnerTask
+    ),
+
+    % Wrap in with_recipe if recipe != none
+    (   Recipe \= "none"
+    ->  format(string(Line), "    with_recipe(~n        ~w~n    , '~w'),~n", [WithReasoning, Recipe])
+    ;   format(string(Line), "    ~w,~n", [WithReasoning])
+    ).
 
 normalize_plan_mode(PlanModeRaw, PlanMode) :-
     format(string(PlanModeString), "~w", [PlanModeRaw]),
@@ -213,27 +366,34 @@ conductor_tool_definitions(ToolBlock) :-
         '    exec(consult_recipes(query: Query, max_results: 3), Result).',
         '',
         'tool(search_web(Query, Results), "Search the web for current information. Returns search results.") :-',
+        '',
         '    exec(web_search(query: Query), Results).',
         '',
         'tool(search_news(Query, Results), "Search recent news articles. Returns news results.") :-',
+        '',
         '    exec(news_search(query: Query), Results).',
         '',
         'tool(fetch_url(Url, Content), "Fetch the content of a web page by URL. Returns the page body as text.") :-',
+        '',
         '    exec(url_fetch(url: Url), Result),',
         '    get_dict(body, Result, Content).',
         '',
         'tool(download_file(Url, FilePath, Size), "Download a file from a URL and save it to disk. Returns the file path and size.") :-',
+        '',
         '    exec(url_fetch(url: Url, save_to: FilePath), Result),',
         '    get_dict(file_path, Result, FilePath),',
         '    get_dict(size, Result, Size).',
         '',
         'tool(run_bash(Command, Output), "Run a shell command in the workspace.") :-',
+        '',
         '    exec(bash(command: Command), Output).',
         '',
         'tool(create_new_skill(Spec, Result), "Create and deploy a new reusable skill from a natural language spec.") :-',
+        '',
         '    exec(create_skill(spec: Spec), Result).',
         '',
         'tool(ask_user(Prompt, Response), "Ask the user a clarifying question and get their response.") :-',
+        '',
         '    exec(ask_user(prompt: Prompt), Result),',
         '    get_dict(user_response, Result, Response).',
         '',

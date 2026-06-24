@@ -12,6 +12,7 @@ import { google } from '@ai-sdk/google';
 import { buildCompilationPrompt, buildUserMessage } from './compiler_prompt.js';
 import { loadProlog, type SWIPLModule } from './prolog/loader.js';
 import { CompileOptions, CompileResult, AnalysisResult, AnalysisWarning } from './types.js';
+import { recordTokenUsage, type TokenUsageByModel } from './system/runtime/token-usage.js';
 
 // =============================================================================
 // Internal Types
@@ -505,7 +506,8 @@ export async function runLLMSecurityAudit(
   staticAnalysis: AnalysisResult,
   model: string,
   provider: string,
-  baseUrl?: string
+  baseUrl?: string,
+  usageByModel?: TokenUsageByModel
 ): Promise<string> {
   const llm = getLanguageModel(provider, model, baseUrl);
   
@@ -559,6 +561,14 @@ Each suggestion must be either:
       temperature: 0.1
     });
 
+    if (result.usage && usageByModel) {
+      recordTokenUsage(usageByModel, model, {
+        inputTokens: result.usage.inputTokens ?? 0,
+        outputTokens: result.usage.outputTokens ?? 0,
+        totalTokens: result.usage.totalTokens ?? 0,
+      });
+    }
+
     return result.text;
   } catch (e) {
     return `Audit failed: ${e}`;
@@ -572,6 +582,7 @@ export async function analyzeAndAuditDML(
     model: string;
     provider: string;
     baseUrl?: string;
+    usageByModel?: TokenUsageByModel;
   }
 ): Promise<AnalysisResult> {
   const analysis = await analyzeDML(dml);
@@ -583,6 +594,7 @@ export async function analyzeAndAuditDML(
       options.model,
       options.provider,
       options.baseUrl,
+      options.usageByModel,
     );
   }
 
@@ -614,6 +626,7 @@ export async function compileToDML(
   const attempts: CompilationAttempt[] = [];
   let lastDml = "";
   let lastValidation: ValidationResult = { valid: false, errors: [] };
+  const usageByModel: TokenUsageByModel = {};
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -624,7 +637,8 @@ export async function compileToDML(
         model,
         provider,
         temperature,
-        baseUrl
+        baseUrl,
+        usageByModel
       );
 
       lastDml = dml;
@@ -639,10 +653,11 @@ export async function compileToDML(
           model,
           provider,
           baseUrl,
+          usageByModel,
         });
 
         // Generate explanation
-        const explanation = await generateExplanation(dml, model, provider, baseUrl);
+        const explanation = await generateExplanation(dml, model, provider, baseUrl, usageByModel);
 
         return {
           dml,
@@ -650,7 +665,8 @@ export async function compileToDML(
           explanation,
           attempts: attempt,
           valid: true,
-          analysis
+          analysis,
+          usageByModel: Object.keys(usageByModel).length > 0 ? usageByModel : undefined,
         };
       }
     } catch (error) {
@@ -674,7 +690,8 @@ export async function compileToDML(
     tools: extractToolDependencies(lastDml),
     valid: false,
     errors: Array.from(allErrors),
-    attempts: maxAttempts
+    attempts: maxAttempts,
+    usageByModel: Object.keys(usageByModel).length > 0 ? usageByModel : undefined,
   };
 }
 
@@ -692,7 +709,8 @@ async function generateDML(
   model: string,
   provider: string,
   temperature?: number,
-  baseUrl?: string
+  baseUrl?: string,
+  usageByModel?: TokenUsageByModel
 ): Promise<string> {
   const llm = getLanguageModel(provider, model, baseUrl);
   
@@ -705,6 +723,14 @@ async function generateDML(
     temperature: temperature ?? 0.3,
     maxOutputTokens: 8192
   });
+
+  if (result.usage && usageByModel) {
+    recordTokenUsage(usageByModel, model, {
+      inputTokens: result.usage.inputTokens ?? 0,
+      outputTokens: result.usage.outputTokens ?? 0,
+      totalTokens: result.usage.totalTokens ?? 0,
+    });
+  }
 
   return cleanDMLResponse(result.text);
 }
@@ -752,7 +778,8 @@ async function generateExplanation(
   dml: string,
   model: string,
   provider: string,
-  baseUrl?: string
+  baseUrl?: string,
+  usageByModel?: TokenUsageByModel
 ): Promise<string> {
   const llm = getLanguageModel(provider, model, baseUrl);
 
@@ -764,6 +791,14 @@ async function generateExplanation(
       temperature: 0.3,
       maxOutputTokens: 256
     });
+
+    if (result.usage && usageByModel) {
+      recordTokenUsage(usageByModel, model, {
+        inputTokens: result.usage.inputTokens ?? 0,
+        outputTokens: result.usage.outputTokens ?? 0,
+        totalTokens: result.usage.totalTokens ?? 0,
+      });
+    }
 
     return result.text.trim();
   } catch {

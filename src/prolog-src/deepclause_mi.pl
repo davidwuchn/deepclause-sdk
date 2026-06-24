@@ -558,11 +558,14 @@ process_engine_result(output(Text), output, Text, none) :- !.
 process_engine_result(log(Text), log, Text, none) :- !.
 process_engine_result(answer(Text), answer, Text, none) :- !.
 %% Note: Memory and tool scope are now passed in the payload for the agent loop
+process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext), request_agent_loop, '', 
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext}) :- !.
+%% Legacy 5-arg format (no reasoning/recipe)
 process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope), request_agent_loop, '', 
-    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope}) :- !.
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: none, recipeContext: ""}) :- !.
 %% Legacy 4-arg format (no tool scope)
 process_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), request_agent_loop, '', 
-    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none}) :- !.
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none, reasoningEffort: none, recipeContext: ""}) :- !.
 process_engine_result(request_exec(Tool, Args), request_exec, '',
     payload{toolName: Tool, args: Args}) :- !.
 process_engine_result(request_sample_token(Prompt, Allowed), request_sample_token, '',
@@ -744,6 +747,60 @@ clear_tool_scope(StateIn, StateOut) :-
     (   get_dict(tool_scope, StateIn, _)
     ->  del_dict(tool_scope, StateIn, _, StateOut)
     ;   StateOut = StateIn
+    ).
+
+%% ============================================================
+%% Reasoning Effort Helpers
+%% ============================================================
+
+%% set_reasoning_effort_state(+StateIn, +Effort, -StateOut)
+set_reasoning_effort_state(StateIn, Effort, StateOut) :-
+    StateOut = StateIn.put(reasoning_effort, Effort).
+
+%% clear_reasoning_effort_state(+StateIn, -StateOut)
+clear_reasoning_effort_state(StateIn, StateOut) :-
+    (   get_dict(reasoning_effort, StateIn, _)
+    ->  del_dict(reasoning_effort, StateIn, _, StateOut)
+    ;   StateOut = StateIn
+    ).
+
+%% get_reasoning_effort(+State, -Effort)
+get_reasoning_effort(State, Effort) :-
+    (   get_dict(reasoning_effort, State, Effort)
+    ->  true
+    ;   Effort = none
+    ).
+
+%% ============================================================
+%% Recipe Context Helpers
+%% ============================================================
+
+%% load_recipe_content(+Query, -Content)
+load_recipe_content(Query, RecipeContent) :-
+    exec(consult_recipes(query: Query, max_results: 1), Result),
+    get_dict(matches, Result, Matches),
+    (   Matches = [Match|_]
+    ->  get_dict(content, Match, RecipeContent)
+    ;   RecipeContent = ""
+    ).
+
+%% set_recipe_context(+StateIn, +Content, -StateOut)
+set_recipe_context(StateIn, "", StateIn) :- !.
+set_recipe_context(StateIn, Content, StateOut) :-
+    StateOut = StateIn.put(recipe_context, Content).
+
+%% clear_recipe_context(+StateIn, -StateOut)
+clear_recipe_context(StateIn, StateOut) :-
+    (   get_dict(recipe_context, StateIn, _)
+    ->  del_dict(recipe_context, StateIn, _, StateOut)
+    ;   StateOut = StateIn
+    ).
+
+%% get_recipe_context(+State, -Context)
+get_recipe_context(State, Context) :-
+    (   get_dict(recipe_context, State, Context)
+    ->  true
+    ;   Context = ""
     ).
 
 %% ============================================================
@@ -981,11 +1038,14 @@ process_tool_engine_result(request_sample_token(Prompt, Allowed), request_sample
     payload{prompt: Prompt, allowedTokens: Allowed}) :- !.
 process_tool_engine_result(request_llm(Messages), request_llm, '',
     payload{messages: Messages}) :- !.
+process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope, ReasoningEffort, RecipeContext), request_agent_loop, '',
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: ReasoningEffort, recipeContext: RecipeContext}) :- !.
+%% Legacy 5-arg format (no reasoning/recipe)
 process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory, ToolScope), request_agent_loop, '',
-    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope}) :- !.
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: ToolScope, reasoningEffort: none, recipeContext: ""}) :- !.
 %% Legacy 4-arg format (no tool scope)
 process_tool_engine_result(request_agent_loop(Desc, Vars, Tools, Memory), request_agent_loop, '',
-    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none}) :- !.
+    payload{taskDescription: Desc, outputVars: Vars, userTools: Tools, memory: Memory, toolScope: none, reasoningEffort: none, recipeContext: ""}) :- !.
 process_tool_engine_result(output(Text), output, Text, none) :- !.
 process_tool_engine_result(log(Text), log, Text, none) :- !.
 process_tool_engine_result(Other, error, Msg, none) :-
@@ -1084,8 +1144,10 @@ mi_call(task(Desc), StateIn, StateOut) :-
     collect_user_tools(SessionId, UserTools),
     get_memory(StateIn, Memory),
     get_tool_scope(StateIn, ToolScope),
+    get_reasoning_effort(StateIn, ReasoningEffort),
+    get_recipe_context(StateIn, RecipeContext),
     % Yield request with current memory and tool scope
-    engine_yield(request_agent_loop(InterpDesc, [], UserTools, Memory, ToolScope)),
+    engine_yield(request_agent_loop(InterpDesc, [], UserTools, Memory, ToolScope, ReasoningEffort, RecipeContext)),
     % Handle signals (tool calls) until agent_done
     handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
@@ -1297,7 +1359,9 @@ mi_call_task_n(Desc, Vars, VarNames, StateIn, StateOut) :-
     collect_user_tools(SessionId, UserTools),
     get_memory(StateIn, Memory),
     get_tool_scope(StateIn, ToolScope),
-    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, Memory, ToolScope)),
+    get_reasoning_effort(StateIn, ReasoningEffort),
+    get_recipe_context(StateIn, RecipeContext),
+    engine_yield(request_agent_loop(InterpDesc, VarNames, UserTools, Memory, ToolScope, ReasoningEffort, RecipeContext)),
     % Handle signals (tool calls) until agent_done
     handle_agent_signals(SessionId, StateIn, StateAfterAgent),
     session_agent_result(SessionId, Result),
@@ -1402,6 +1466,24 @@ mi_call(without_tools(ToolList, Goal), StateIn, StateOut) :-
     set_tool_scope(StateIn, blacklist(ToolList), ScopedState),
     mi_call(Goal, ScopedState, StateWithScope),
     clear_tool_scope(StateWithScope, StateOut).
+
+%% mi_call(with_reasoning(Goal, Effort), +StateIn, -StateOut)
+%% Run Goal with a specific reasoning effort level (none/low/medium/high).
+%% The effort is passed to the TypeScript runner via request_agent_loop.
+mi_call(with_reasoning(Goal, Effort), StateIn, StateOut) :-
+    !,
+    set_reasoning_effort_state(StateIn, Effort, ScopedState),
+    mi_call(Goal, ScopedState, StateWithScope),
+    clear_reasoning_effort_state(StateWithScope, StateOut).
+
+%% mi_call(with_recipe(Goal, Query), +StateIn, -StateOut)
+%% Run Goal with a recipe loaded as transient context (not persisted to memory).
+mi_call(with_recipe(Goal, Query), StateIn, StateOut) :-
+    !,
+    load_recipe_content(Query, RecipeContent),
+    set_recipe_context(StateIn, RecipeContent, ScopedState),
+    mi_call(Goal, ScopedState, StateWithRecipe),
+    clear_recipe_context(StateWithRecipe, StateOut).
 
 %% ============================================================
 %% Memory Predicates - NOW BACKTRACKABLE VIA STATE!
@@ -2093,6 +2175,10 @@ is_mi_special_predicate(llm(_,_)).
 %% Tool scoping predicates
 is_mi_special_predicate(with_tools(_,_)).
 is_mi_special_predicate(without_tools(_,_)).
+%% Reasoning effort scoping
+is_mi_special_predicate(with_reasoning(_,_)).
+%% Recipe context scoping
+is_mi_special_predicate(with_recipe(_,_)).
 %% Context stack management
 is_mi_special_predicate(get_memory(_)).
 is_mi_special_predicate(push_context).

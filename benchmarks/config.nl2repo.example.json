@@ -7,7 +7,7 @@
   },
   "modes": ["plan-execute"],
   "deepclause": {
-    "version": "0.0.78",
+    "version": "0.0.79",
     "models": {
       "gateway": "custom:aliyun:qwen3.6-35b-a3b",
       "run": "custom:aliyun:qwen3.6-35b-a3b",

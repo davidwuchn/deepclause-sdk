@@ -68,7 +68,7 @@ export interface AgentLoopOptions {
   onStream?: (chunk: string, done: boolean) => void;
   onToolCall?: (toolName: string, args: Record<string, unknown>) => void;
   onUsage?: (usage: import('./types.js').LLMUsage) => void;
-  onBeforeModelCall?: (messages: MemoryMessage[]) => Promise<MemoryMessage[]>;
+  onBeforeModelCall?: (messages: MemoryMessage[], lastInputTokens?: number) => Promise<MemoryMessage[]>;
   onAskUser: (prompt: string) => Promise<string>;
   signal?: AbortSignal;
   streaming?: boolean;
@@ -675,6 +675,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   // Agent loop
   const maxIterations = Math.max(1, Number(process.env.DC_MAX_ITERATIONS) || 50);
   let iteration = 0;
+  let lastActualInputTokens: number | undefined;
 
   // Helper to allow event loop to breathe
   const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -692,7 +693,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       await tick();
 
       if (options.onBeforeModelCall) {
-        messages = await options.onBeforeModelCall(normalizeMessagesForCompaction(messages));
+        messages = await options.onBeforeModelCall(normalizeMessagesForCompaction(messages), lastActualInputTokens);
       }
       
       if (streaming && onStream) {
@@ -838,6 +839,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             (cacheRead ? ` cacheRead=${cacheRead}` : '') +
             (cacheWrite ? ` cacheWrite=${cacheWrite}` : '') +
             (reasoning ? ` reasoning=${reasoning}` : '');
+          lastActualInputTokens = stepUsage.inputTokens ?? undefined;
           if (onUsage) {
             onUsage({
               inputTokens: stepUsage.inputTokens ?? 0,
@@ -959,6 +961,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
             (cacheRead ? ` cacheRead=${cacheRead}` : '') +
             (cacheWrite ? ` cacheWrite=${cacheWrite}` : '') +
             (reasoning ? ` reasoning=${reasoning}` : '');
+          lastActualInputTokens = u.inputTokens ?? undefined;
           if (onUsage) {
             onUsage({
               inputTokens: u.inputTokens ?? 0,

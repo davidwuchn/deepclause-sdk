@@ -109,9 +109,22 @@ const TemperaturesSchema = z.object({
   compile: z.number().min(0).max(2).default(DEFAULT_TEMPERATURES.compile),
 });
 
+const ModelSlotOverridesSchema = z.object({
+  maxContextTokens: z.number().int().positive().optional(),
+  maxOutputTokens: z.number().int().positive().optional(),
+  reasoningEffort: z.string().optional(),
+});
+
+const ModelOptionsSchema = z.object({
+  gateway: ModelSlotOverridesSchema.optional(),
+  run: ModelSlotOverridesSchema.optional(),
+  compile: ModelSlotOverridesSchema.optional(),
+}).optional().default({});
+
 export const ConfigSchema = z.object({
   models: ModelsSchema.default(DEFAULT_MODEL_IDS),
   temperatures: TemperaturesSchema.default(DEFAULT_TEMPERATURES),
+  modelOptions: ModelOptionsSchema,
   providers: ProvidersSchema,
   mcp: MCPConfigSchema.optional().default({ servers: {} }),
   agentvm: AgentVMConfigSchema,
@@ -133,6 +146,7 @@ export type MCPServer = z.infer<typeof MCPServerSchema>;
 const DEFAULT_CONFIG: Config = {
   models: { ...DEFAULT_MODEL_IDS },
   temperatures: { ...DEFAULT_TEMPERATURES },
+  modelOptions: {},
   providers: {},
   mcp: { servers: {} },
   agentvm: { network: false },
@@ -470,7 +484,7 @@ export async function setModel(
   workspaceRoot: string,
   modelString: string,
   slot?: ModelSlot,
-): Promise<{ modelId: string; updatedSlots: ModelSlot[] }> {
+): Promise<{ modelId: string; updatedSlots: ModelSlot[]; info: string }> {
   const modelId = parseModelString(modelString);
 
   const config = await loadConfig(workspaceRoot);
@@ -481,8 +495,20 @@ export async function setModel(
 
   const configPath = getConfigPath(workspaceRoot);
   await fs.writeFile(configPath, serializeConfig(config));
-  
-  return { modelId, updatedSlots };
+
+  const resolved = resolveModelSlotConfig(config, updatedSlots[0]);
+  const infoLines: string[] = [];
+  infoLines.push(`Model set: ${modelId} (${updatedSlots.join(', ')} slot${updatedSlots.length > 1 ? 's' : ''})`);
+  if (resolved.contextWindow) {
+    infoLines.push(`  Context window: ${resolved.contextWindow.toLocaleString()} tokens`);
+  }
+  if (resolved.maxOutputTokens) {
+    infoLines.push(`  Max output:     ${resolved.maxOutputTokens.toLocaleString()} tokens`);
+  }
+  infoLines.push(`  Reasoning:      ${resolved.reasoning ? 'yes' : 'no'}${resolved.reasoningType && resolved.reasoningType !== 'none' ? ` (${resolved.reasoningType})` : ''}`);
+  infoLines.push(`  Complexity:     ${resolved.complexity ?? 'unknown'}`);
+
+  return { modelId, updatedSlots, info: infoLines.join('\n') };
 }
 
 /**
@@ -497,7 +523,12 @@ export async function showModel(workspaceRoot: string): Promise<{
   const lines = (['gateway', 'run', 'compile'] as ModelSlot[]).map((slotName) => {
     const modelId = formatModelString(config.models[slotName]);
     const temperature = config.temperatures[slotName];
-    return `${slotName}: ${modelId} (temperature=${temperature})`;
+    const resolved = resolveModelSlotConfig(config, slotName);
+    const ctx = resolved.contextWindow ? `${resolved.contextWindow.toLocaleString()}` : 'unknown';
+    const out = resolved.maxOutputTokens ? `${resolved.maxOutputTokens.toLocaleString()}` : 'unknown';
+    const reasoning = resolved.reasoning ? 'yes' : 'no';
+    const complexity = resolved.complexity ?? 'unknown';
+    return `${slotName}: ${modelId} (temp=${temperature}, ctx=${ctx}, out=${out}, reasoning=${reasoning}, complexity=${complexity})`;
   });
 
   return {

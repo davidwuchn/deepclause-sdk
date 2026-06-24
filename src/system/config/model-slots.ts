@@ -1,5 +1,7 @@
 export type Provider = 'openai' | 'anthropic' | 'google' | 'openrouter';
 export type ModelSlot = 'gateway' | 'run' | 'compile';
+export type ModelComplexity = 'high' | 'medium' | 'low';
+export type ReasoningType = 'effort' | 'budget_tokens' | 'thinking_config' | 'none';
 
 export interface ProviderConfig {
   apiKey?: string;
@@ -10,6 +12,13 @@ export interface SlotModelConfig {
   models: Record<ModelSlot, string>;
   temperatures: Record<ModelSlot, number>;
   providers?: Partial<Record<Provider, ProviderConfig>>;
+  modelOptions?: Partial<Record<ModelSlot, ModelSlotOverrides>>;
+}
+
+export interface ModelSlotOverrides {
+  maxContextTokens?: number;
+  maxOutputTokens?: number;
+  reasoningEffort?: string;
 }
 
 export interface ParsedModelId {
@@ -24,6 +33,14 @@ export interface ResolvedModelConfig extends ParsedModelId {
   temperature: number;
   baseUrl?: string;
   apiKey?: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  reasoning?: boolean;
+  complexity?: ModelComplexity;
+  reasoningType?: ReasoningType;
+  reasoningValues?: string[];
+  reasoningBudgetMap?: Record<string, number>;
+  defaultEffort?: string;
 }
 
 export const DEFAULT_MODEL_IDS: Record<ModelSlot, string> = {
@@ -139,6 +156,8 @@ function readCustomProviderEnv(customProviderName: string): ProviderConfig {
   };
 }
 
+import { resolveModelCapabilities } from './model-database.js';
+
 export function resolveModelSlotConfig(
   config: SlotModelConfig,
   slot: ModelSlot,
@@ -150,12 +169,28 @@ export function resolveModelSlotConfig(
     ? readCustomProviderEnv(parsed.customProviderName)
     : {};
 
+  const providerName = parsed.customProviderName ? 'custom' : parsed.provider;
+  const dbModelId = parsed.customProviderName
+    ? parsed.model
+    : (parsed.provider === 'openrouter' ? parsed.model : `${parsed.provider}/${parsed.model}`);
+  const caps = resolveModelCapabilities(dbModelId, providerName);
+
+  const slotOverrides = config.modelOptions?.[slot] ?? {};
+
   return {
     ...parsed,
     slot,
     temperature: overrides.temperature ?? config.temperatures[slot] ?? DEFAULT_TEMPERATURES[slot],
     apiKey: customProviderConfig.apiKey ?? standardProviderConfig.apiKey,
     baseUrl: customProviderConfig.baseUrl ?? standardProviderConfig.baseUrl,
+    contextWindow: slotOverrides.maxContextTokens ?? caps.contextWindow,
+    maxOutputTokens: slotOverrides.maxOutputTokens ?? caps.maxOutputTokens,
+    reasoning: caps.reasoning,
+    complexity: caps.complexity,
+    reasoningType: caps.reasoningType,
+    reasoningValues: caps.reasoningValues,
+    reasoningBudgetMap: caps.reasoningBudgetMap,
+    defaultEffort: caps.defaultEffort,
   };
 }
 

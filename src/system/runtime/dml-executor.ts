@@ -94,8 +94,11 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
     trace: !!options.trace,
     streaming: options.stream,
     debug: options.verbose,
-    maxTokens: 65536,
+    maxTokens: options.selection.maxOutputTokens ?? 65536,
     compaction: resolveCompactionConfig(options.config, resolvedWorkspaceRoot),
+    reasoningType: options.selection.reasoningType,
+    reasoningBudgetMap: options.selection.reasoningBudgetMap,
+    contextWindow: options.selection.contextWindow,
   });
 
   const result: ExecuteDmlResult = {
@@ -208,9 +211,17 @@ async function executeDmlInternal(options: ExecuteDmlOptions): Promise<ExecuteDm
       shell,
     });
 
+    const modelInfo = {
+      modelId: options.selection.model,
+      complexity: options.selection.complexity ?? 'medium',
+      reasoning: options.selection.reasoning ?? false,
+      contextWindow: options.selection.contextWindow,
+      maxOutputTokens: options.selection.maxOutputTokens,
+    };
+
     for await (const event of sdk.runDML(options.dmlCode, {
       args: options.args,
-      params: options.params,
+      params: { ...options.params, model_info: modelInfo },
       workspacePath: options.workspacePath,
       gasLimit: options.gasLimit,
       signal: options.signal,

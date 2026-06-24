@@ -35,7 +35,7 @@ import {
   createShellToolEventBridge,
 } from '../system/runtime/shell-tool-events.js';
 import type { DMLEvent } from '../types.js';
-import { recordTokenUsage, type TokenUsageByModel } from '../system/runtime/token-usage.js';
+import { recordTokenUsage, mergeTokenUsageMaps, type TokenUsageByModel } from '../system/runtime/token-usage.js';
 
 const IGNORED_LIVE_LOG_TOOLS = new Set(['set_result', 'update_memory']);
 const BUILTIN_SLASH_COMMANDS = ['new', 'sessions', 'help', 'run', 'compile', 'skill-creator', 'set-model', 'cancel', 'exit', 'quit'] as const;
@@ -756,6 +756,7 @@ class FullscreenTui {
   private sessions: ConductorSessionSummary[] = [];
   private selectedSessionId = '';
   private sessionDetail: ConductorSessionDetail | null = null;
+  private liveUsageByModel: TokenUsageByModel = {};
   private commands: CommandInfo[] = [];
   private readonly activityBySessionId = new Map<string, ActivityBuffer>();
   private readonly ephemeralMessagesBySessionId = new Map<string, DisplayMessage[]>();
@@ -1804,6 +1805,7 @@ class FullscreenTui {
         toolAbortSignalRef: this.toolAbortSignalRef,
         onUserInput: (question) => this.requestClarification(question),
         onEvent: (event) => {
+          this.handleLiveUsageEvent(event);
           this.manageToolAbortSignal(event.event);
           activity.handle(event);
           this.taskTrackerFor(sessionId).handle(event);
@@ -1866,6 +1868,7 @@ class FullscreenTui {
         toolAbortSignalRef: this.toolAbortSignalRef,
         onUserInput: (question) => this.requestClarification(question),
         onEvent: (event) => {
+          this.handleLiveUsageEvent(event);
           this.manageToolAbortSignal(event.event);
           activity.handle(event);
           this.taskTrackerFor(sessionId).handle(event);
@@ -1936,6 +1939,7 @@ class FullscreenTui {
         toolAbortSignalRef: this.toolAbortSignalRef,
         onUserInput: (question) => this.requestClarification(question),
         onEvent: (event) => {
+          this.handleLiveUsageEvent(event);
           this.manageToolAbortSignal(event.event);
           activity.handle(event);
           this.taskTrackerFor(sessionId).handle(event);
@@ -2003,6 +2007,7 @@ class FullscreenTui {
         signal: this.currentAbortController.signal,
         onUserInput: (question) => this.requestClarification(question),
         onEvent: (event) => {
+          this.handleLiveUsageEvent(event);
           this.manageToolAbortSignal(event.event);
           activity.handle(event);
           this.taskTrackerFor(sessionId).handle(event);
@@ -2073,6 +2078,7 @@ class FullscreenTui {
         sandbox: this.options.sandbox,
         signal: this.currentAbortController.signal,
         onEvent: (event) => {
+          this.handleLiveUsageEvent(event);
           activity.handle(event);
           this.taskTrackerFor(sessionId).handle(event);
           this.requestRender();
@@ -3210,6 +3216,12 @@ class FullscreenTui {
     };
   }
 
+  private handleLiveUsageEvent(logEvent: ConductorLogEvent): void {
+    if (logEvent.event.type === 'usage' && logEvent.event.usage) {
+      recordTokenUsage(this.liveUsageByModel, logEvent.modelId, logEvent.event.usage);
+    }
+  }
+
   private updatePreviewFromEvent(logEvent: ConductorLogEvent): void {
     if (!this.currentPreview) {
       return;
@@ -3619,10 +3631,12 @@ class FullscreenTui {
   private async loadSelectedSessionDetail(): Promise<void> {
     if (!this.selectedSessionId) {
       this.sessionDetail = null;
+      this.liveUsageByModel = {};
       return;
     }
 
     this.sessionDetail = await getConductorSessionDetail(this.workspaceRoot, this.selectedSessionId);
+    this.liveUsageByModel = {};
 
     if (
       this.currentPreview
@@ -3958,7 +3972,11 @@ class FullscreenTui {
 
     const contextSize = summarizeContextSize(this.sessionDetail);
     const systemAssetSources = getSystemAssetSourcePaths(this.workspaceRoot);
-    const usageEntries = Object.entries(this.sessionDetail.usageByModel ?? {})
+    const mergedUsage = mergeTokenUsageMaps(
+      this.sessionDetail.usageByModel ?? {},
+      this.liveUsageByModel,
+    );
+    const usageEntries = Object.entries(mergedUsage)
       .sort((left, right) => right[1].totalTokens - left[1].totalTokens || left[0].localeCompare(right[0]));
 
     const body: string[] = [
@@ -4757,6 +4775,9 @@ async function executeRunnableCommand(
   } = {},
 ): Promise<CliRunResult> {
   const usageByModel: TokenUsageByModel = {};
+  const config = await loadConfig(workspaceRoot);
+  const runSelection = resolveModelSlot(config, 'run');
+  const modelId = runSelection.id;
 
   const executionLog = options.sessionId
     ? createSessionExecutionLogWriter({
@@ -4785,8 +4806,8 @@ async function executeRunnableCommand(
       signal: options.signal,
       toolAbortSignalRef: options.toolAbortSignalRef,
       onUserInput: options.onUserInput,
-      onEvent: (event: DMLEvent) => emitLogEvent({ scope: 'child', childSlug: target.childSlug, event }),
-      onChildEvent: (childSlug, event) => emitLogEvent({ scope: 'child', childSlug, event }),
+      onEvent: (event: DMLEvent) => emitLogEvent({ scope: 'child', childSlug: target.childSlug, modelId, event }),
+      onChildEvent: (childSlug, event) => emitLogEvent({ scope: 'child', childSlug, modelId, event }),
     });
 
     if (options.sessionId) {

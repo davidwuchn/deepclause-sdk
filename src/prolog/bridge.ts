@@ -10,7 +10,7 @@ import { anthropic, createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { generateText } from 'ai';
 import type { LanguageModel } from 'ai';
-import type { MemoryMessage } from '../types.js';
+import type { MemoryMessage, LLMUsage } from '../types.js';
 
 export interface RawProviderResponseSnapshot {
   requestId: string;
@@ -619,7 +619,7 @@ function buildSampleTokenPrompt(prompt: string, allowedTokens?: string[]): strin
   return `${prompt}\nAllowed tokens: ${JSON.stringify(allowedTokens)}`;
 }
 
-export async function sampleSingleToken(options: SampleSingleTokenOptions): Promise<string> {
+export async function sampleSingleToken(options: SampleSingleTokenOptions): Promise<{ token: string; usage?: LLMUsage }> {
   const model = createModelProvider(
     options.modelOptions.provider,
     options.modelOptions.model,
@@ -637,14 +637,20 @@ export async function sampleSingleToken(options: SampleSingleTokenOptions): Prom
     providerOptions: options.modelOptions.providerOptions,
   });
 
-  if (options.allowedTokens && options.allowedTokens.length > 0) {
-    return chooseAllowedSampleToken(result.text, options.allowedTokens);
-  }
+  const token = options.allowedTokens && options.allowedTokens.length > 0
+    ? chooseAllowedSampleToken(result.text, options.allowedTokens)
+    : normalizeSampleTokenResponse(result.text);
 
-  return normalizeSampleTokenResponse(result.text);
+  const usage: LLMUsage | undefined = result.usage ? {
+    inputTokens: result.usage.inputTokens ?? 0,
+    outputTokens: result.usage.outputTokens ?? 0,
+    totalTokens: result.usage.totalTokens ?? 0,
+  } : undefined;
+
+  return { token, usage };
 }
 
-export async function generateLlmReply(options: GenerateLlmReplyOptions): Promise<string> {
+export async function generateLlmReply(options: GenerateLlmReplyOptions): Promise<{ text: string; usage?: LLMUsage }> {
   const model = createModelProvider(
     options.modelOptions.provider,
     options.modelOptions.model,
@@ -662,7 +668,13 @@ export async function generateLlmReply(options: GenerateLlmReplyOptions): Promis
     providerOptions: options.modelOptions.providerOptions,
   });
 
-  return result.text;
+  const usage: LLMUsage | undefined = result.usage ? {
+    inputTokens: result.usage.inputTokens ?? 0,
+    outputTokens: result.usage.outputTokens ?? 0,
+    totalTokens: result.usage.totalTokens ?? 0,
+  } : undefined;
+
+  return { text: result.text, usage };
 }
 
 /**

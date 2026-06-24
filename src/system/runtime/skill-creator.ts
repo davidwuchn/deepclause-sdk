@@ -110,7 +110,7 @@ async function compileWithSkillCreatorInternal(
     debug: options.verbose,
     trace: !!options.trace,
     streaming: (options.stream ?? false) || !!options.onEvent,
-    maxTokens: 65536,
+    maxTokens: options.compileSelection.maxOutputTokens ?? 65536,
     compaction: resolveCompactionConfig(options.config, path.resolve(options.workspaceRoot ?? workspacePath)),
   });
 

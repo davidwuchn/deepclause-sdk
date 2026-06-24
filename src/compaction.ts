@@ -60,12 +60,14 @@ export interface CompactorExecutionRequest {
 export interface CompactorExecutionResponse {
   answer?: string;
   error?: string;
+  usageByModel?: import('./system/runtime/token-usage.js').TokenUsageByModel;
 }
 
 export interface AppliedCompactorResult {
   messages: MemoryMessage[];
   event: DMLEvent;
   applied: boolean;
+  usageByModel?: import('./system/runtime/token-usage.js').TokenUsageByModel;
 }
 
 export interface ResolvedCompactorModelConfig {
@@ -75,6 +77,7 @@ export interface ResolvedCompactorModelConfig {
   apiKey?: string;
   baseUrl?: string;
   temperature: number;
+  maxOutputTokens?: number;
 }
 
 export function resolveCompactionOptions(
@@ -139,8 +142,13 @@ export function estimateTokensForText(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
+const PER_MESSAGE_OVERHEAD = 4;
+
 export function estimateTokensForMessages(messages: MemoryMessage[]): number {
-  return messages.reduce((total, message) => total + estimateTokensForText(message.content), 0);
+  return messages.reduce(
+    (total, message) => total + PER_MESSAGE_OVERHEAD + estimateTokensForText(message.content),
+    0,
+  );
 }
 
 export function detectProviderFromModel(model: string): Provider {
@@ -183,19 +191,23 @@ export function resolveCompactorModelConfig(params: {
     apiKey: providerConfig.apiKey,
     baseUrl: providerConfig.baseUrl,
     temperature: params.selection.temperature,
+    maxOutputTokens: params.selection.maxOutputTokens,
   };
 }
 
 export function buildCompactorParams(
   binding: ResolvedCompactorBinding,
   messages: MemoryMessage[],
+  knownInputTokens?: number,
+  maxContextTokens?: number,
 ): Record<string, unknown> {
   return {
     compact_scope: binding.scope,
     compact_trigger: binding.trigger,
     compact_binding_name: binding.name ?? getBindingLabel(binding),
     message_count: messages.length,
-    estimated_tokens: estimateTokensForMessages(messages),
+    estimated_tokens: knownInputTokens ?? estimateTokensForMessages(messages),
+    max_context_tokens: maxContextTokens ?? 0,
     messages_json: JSON.stringify(messages),
   };
 }
@@ -203,10 +215,13 @@ export function buildCompactorParams(
 export async function executeCompactor(params: {
   binding: ResolvedCompactorBinding;
   messages: MemoryMessage[];
+  knownInputTokens?: number;
+  maxContextTokens?: number;
   execute: (request: CompactorExecutionRequest) => Promise<CompactorExecutionResponse>;
   emitEvent?: (event: DMLEvent) => void;
 }): Promise<AppliedCompactorResult> {
-  const beforeTokens = estimateTokensForMessages(params.messages);
+  const estimatedTokens = params.knownInputTokens ?? estimateTokensForMessages(params.messages);
+  const beforeTokens = estimatedTokens;
   if (params.messages.length === 0) {
     return {
       messages: params.messages,
@@ -223,7 +238,7 @@ export async function executeCompactor(params: {
   const request: CompactorExecutionRequest = {
     binding: params.binding,
     messages: params.messages,
-    params: buildCompactorParams(params.binding, params.messages),
+    params: buildCompactorParams(params.binding, params.messages, params.knownInputTokens, params.maxContextTokens),
   };
 
   params.emitEvent?.(buildCompactionEvent({
@@ -260,6 +275,7 @@ export async function executeCompactor(params: {
         afterTokens: beforeTokens,
         error: response.error,
       }),
+      usageByModel: response.usageByModel,
     };
   }
 
@@ -275,6 +291,7 @@ export async function executeCompactor(params: {
         afterTokens: beforeTokens,
         error: 'Compactor returned an unreadable response',
       }),
+      usageByModel: response.usageByModel,
     };
   }
 
@@ -288,6 +305,7 @@ export async function executeCompactor(params: {
         beforeTokens,
         afterTokens: beforeTokens,
       }),
+      usageByModel: response.usageByModel,
     };
   }
 
@@ -306,6 +324,7 @@ export async function executeCompactor(params: {
         afterTokens: beforeTokens,
         error: 'Compactor applied but did not return messages',
       }),
+      usageByModel: response.usageByModel,
     };
   }
 
@@ -321,6 +340,7 @@ export async function executeCompactor(params: {
         afterTokens: beforeTokens,
         error: validationError,
       }),
+      usageByModel: response.usageByModel,
     };
   }
 
@@ -336,6 +356,7 @@ export async function executeCompactor(params: {
         afterTokens,
         error: 'Compactor did not reduce message size',
       }),
+      usageByModel: response.usageByModel,
     };
   }
 
@@ -348,6 +369,7 @@ export async function executeCompactor(params: {
       beforeTokens,
       afterTokens,
     }),
+    usageByModel: response.usageByModel,
   };
 }
 

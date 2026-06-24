@@ -29,6 +29,8 @@ import {
 } from './system/runtime/shell-tool-events.js';
 import { checkToolPolicy } from './tools.js';
 import { generateLlmReply, sampleSingleToken } from './prolog/bridge.js';
+import { recordTokenUsage } from './system/runtime/token-usage.js';
+import { buildReasoningProviderOptions, type ReasoningType } from './system/config/model-database.js';
 
 /**
  * Convert swipl-wasm value to plain JavaScript value
@@ -164,6 +166,9 @@ export interface RunnerOptions {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   providerOptions?: Record<string, Record<string, any>>;
   compaction?: CompactionOptions;
+  reasoningType?: ReasoningType;
+  reasoningBudgetMap?: Record<string, number>;
+  contextWindow?: number;
 }
 
 export interface InternalRunOptions {
@@ -599,9 +604,34 @@ export class DMLRunner {
 
     // Extract memory from payload (now passed via state threading)
     const preparedMemory = this.extractMemoryFromPayload(rawPayload);
-    
+
+    // Extract reasoning effort and recipe context (from with_reasoning/with_recipe scoping)
+    const reasoningEffort = String(toJsValue(rawPayload.reasoningEffort) ?? 'none');
+    const recipeContext = String(toJsValue(rawPayload.recipeContext) ?? '');
+
+    // Build provider options — merge reasoning effort if set
+    const baseProviderOptions = this.options.providerOptions ?? {};
+    let effectiveProviderOptions = baseProviderOptions;
+    if (reasoningEffort !== 'none' && this.options.reasoningType && this.options.reasoningType !== 'none') {
+      const reasoningOpts = buildReasoningProviderOptions(
+        reasoningEffort,
+        this.options.reasoningType,
+        this.options.reasoningBudgetMap,
+      );
+      effectiveProviderOptions = { ...baseProviderOptions, ...reasoningOpts } as typeof baseProviderOptions;
+    }
+
+    // Prepend recipe context as a system message if present
+    let effectiveMemory = preparedMemory;
+    if (recipeContext) {
+      effectiveMemory = [
+        { role: 'system', content: `Recipe guidance:\n\n${recipeContext}` },
+        ...preparedMemory,
+      ];
+    }
+
     // Store current memory for getMemory() access
-    this.currentMemory = preparedMemory;
+    this.currentMemory = effectiveMemory;
 
     const emitToolEvent = (event: DMLEvent) => {
       emitRunnerEvent(event);
@@ -674,7 +704,7 @@ export class DMLRunner {
     const resultPromise = runAgentLoop({
       taskDescription,
       outputVars,
-      memory: preparedMemory,
+      memory: effectiveMemory,
       tools: availableTools,
       workspacePath: options.workspacePath,
       modelOptions: {
@@ -683,7 +713,7 @@ export class DMLRunner {
         temperature: this.options.temperature,
         maxOutputTokens: this.options.maxTokens,
         baseUrl: this.options.baseUrl,
-        providerOptions: this.options.providerOptions,
+        providerOptions: effectiveProviderOptions,
       },
       streaming: this.options.streaming,
       debug: this.options.debug,
@@ -709,8 +739,9 @@ export class DMLRunner {
           streamResolve = null;
         }
       },
-      onBeforeModelCall: async (messages) => this.applyCompactionBindings({
+      onBeforeModelCall: async (messages, lastInputTokens) => this.applyCompactionBindings({
         messages,
+        lastInputTokens,
         scope: 'loop',
         trigger: 'before_model_call',
         options,
@@ -840,7 +871,7 @@ export class DMLRunner {
 
     let succeeded = false;
     try {
-      const token = await sampleSingleToken({
+      const { token, usage } = await sampleSingleToken({
         prompt,
         allowedTokens,
         modelOptions: {
@@ -854,6 +885,9 @@ export class DMLRunner {
       });
       succeeded = true;
       this.postSampleTokenResult({ success: true, token });
+      if (usage) {
+        yield { type: 'usage', usage } as DMLEvent;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.postSampleTokenResult({ success: false, error: message });
@@ -879,7 +913,7 @@ export class DMLRunner {
 
     let succeeded = false;
     try {
-      const text = await generateLlmReply({
+      const { text, usage } = await generateLlmReply({
         messages,
         modelOptions: {
           provider: this.options.provider,
@@ -893,6 +927,9 @@ export class DMLRunner {
       });
       succeeded = true;
       this.postLlmResult({ success: true, text });
+      if (usage) {
+        yield { type: 'usage', usage } as DMLEvent;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.postLlmResult({ success: false, error: message });
@@ -1316,7 +1353,7 @@ export class DMLRunner {
             onToolEvent?.({ type: 'task_activity', taskState: 'started', taskDescription: prompt || 'sample_token', taskId: nestedStepId });
 
             try {
-              const token = await sampleSingleToken({
+              const { token, usage } = await sampleSingleToken({
                 prompt,
                 allowedTokens,
                 modelOptions: {
@@ -1329,6 +1366,9 @@ export class DMLRunner {
                 signal: runContext.signal,
               });
               this.postSampleTokenResult({ success: true, token });
+              if (usage) {
+                onToolEvent?.({ type: 'usage', usage });
+              }
               onToolEvent?.({ type: 'task_activity', taskState: 'completed', taskId: nestedStepId });
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
@@ -1347,7 +1387,7 @@ export class DMLRunner {
             onToolEvent?.({ type: 'task_activity', taskState: 'started', taskDescription: summarizeLlmMessages(messages), taskId: nestedStepId });
 
             try {
-              const text = await generateLlmReply({
+              const { text, usage } = await generateLlmReply({
                 messages,
                 modelOptions: {
                   provider: this.options.provider,
@@ -1360,6 +1400,9 @@ export class DMLRunner {
                 signal: runContext.signal,
               });
               this.postLlmResult({ success: true, text });
+              if (usage) {
+                onToolEvent?.({ type: 'usage', usage });
+              }
               onToolEvent?.({ type: 'task_activity', taskState: 'completed', taskId: nestedStepId });
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
@@ -1455,6 +1498,31 @@ export class DMLRunner {
             // Extract memory
             const memory = this.extractMemoryFromPayload(payload as Record<string, unknown>);
             const preparedMemory = memory;
+
+            // Extract reasoning effort and recipe context for nested loops
+            const nestedReasoningEffort = String(toJsValue((payload as Record<string, unknown>)?.reasoningEffort) ?? 'none');
+            const nestedRecipeContext = String(toJsValue((payload as Record<string, unknown>)?.recipeContext) ?? '');
+
+            // Build provider options for nested loop
+            const nestedBaseProviderOptions = this.options.providerOptions ?? {};
+            let nestedProviderOptions = nestedBaseProviderOptions;
+            if (nestedReasoningEffort !== 'none' && this.options.reasoningType && this.options.reasoningType !== 'none') {
+              const reasoningOpts = buildReasoningProviderOptions(
+                nestedReasoningEffort,
+                this.options.reasoningType,
+                this.options.reasoningBudgetMap,
+              );
+              nestedProviderOptions = { ...nestedBaseProviderOptions, ...reasoningOpts } as typeof nestedBaseProviderOptions;
+            }
+
+            // Prepend recipe context if present
+            let nestedEffectiveMemory = preparedMemory;
+            if (nestedRecipeContext) {
+              nestedEffectiveMemory = [
+                { role: 'system', content: `Recipe guidance:\n\n${nestedRecipeContext}` },
+                ...preparedMemory,
+              ];
+            }
             
             if (process.env.DEBUG_RUNNER) {
               console.log('[RUNNER] Tool agent loop request:', taskDescription.substring(0, 100));
@@ -1496,7 +1564,7 @@ export class DMLRunner {
               const result = await runAgentLoop({
                 taskDescription,
                 outputVars,
-                memory: preparedMemory,
+                memory: nestedEffectiveMemory,
                 tools: availableTools,
                 modelOptions: {
                   model: this.options.model,
@@ -1504,18 +1572,24 @@ export class DMLRunner {
                   temperature: this.options.temperature,
                   maxOutputTokens: this.options.maxTokens,
                   baseUrl: this.options.baseUrl,
-                  providerOptions: this.options.providerOptions,
+                  providerOptions: nestedProviderOptions,
                 },
-                streaming: false, // Nested loops don't stream
+                streaming: this.options.streaming,
                 debug: this.options.debug,
                 onOutput: (text) => {
                   outputs.push(text);
                   onOutput(text);
                 },
-                onStream: () => {}, // No streaming for nested
+                onStream: (chunk, done) => {
+                  onToolEvent?.({ type: 'stream', content: chunk, done });
+                },
+                onUsage: (usage) => {
+                  onToolEvent?.({ type: 'usage', usage });
+                },
                 onToolCall: onToolCall ?? (() => {}), // Forward tool call events to parent
-                onBeforeModelCall: async (messages) => this.applyCompactionBindings({
+                onBeforeModelCall: async (messages, lastInputTokens) => this.applyCompactionBindings({
                   messages,
+                  lastInputTokens,
                   scope: 'loop',
                   trigger: 'before_model_call',
                   options: { compaction: runContext.compaction },
@@ -1599,6 +1673,7 @@ export class DMLRunner {
 
   private async applyCompactionBindings(params: {
     messages: MemoryMessage[];
+    lastInputTokens?: number;
     scope: 'loop' | 'session' | 'run';
     trigger: 'before_model_call' | 'before_user_message' | 'before_task' | 'after_task';
     options: { compaction?: CompactionOptions };
@@ -1618,6 +1693,8 @@ export class DMLRunner {
       const result = await executeCompactor({
         binding,
         messages,
+        knownInputTokens: params.lastInputTokens,
+        maxContextTokens: this.options.contextWindow,
         emitEvent: params.emitEvent,
         execute: (request) => this.runBoundCompactor({
           request,
@@ -1627,6 +1704,18 @@ export class DMLRunner {
         }),
       });
       params.emitEvent?.(result.event);
+      if (result.usageByModel) {
+        for (const totals of Object.values(result.usageByModel)) {
+          params.emitEvent?.({ type: 'usage', usage: {
+            inputTokens: totals.inputTokens,
+            outputTokens: totals.outputTokens,
+            totalTokens: totals.totalTokens,
+            cacheReadTokens: totals.cacheReadTokens || undefined,
+            cacheWriteTokens: totals.cacheWriteTokens || undefined,
+            reasoningTokens: totals.reasoningTokens || undefined,
+          } });
+        }
+      }
       messages = result.messages;
     }
 
@@ -1662,6 +1751,7 @@ export class DMLRunner {
       const tools = binding.compactor.inheritTools ? params.registeredTools : new Map<string, ToolDefinition>();
       let answer = '';
       let errorContent = '';
+      const usageByModel: Record<string, import('./system/runtime/token-usage.js').TokenUsageTotals> = {};
       for await (const event of compactorRunner.run(code, {
         workspacePath: params.executionContext.workspacePath,
         gasLimit: binding.compactor.gasLimit,
@@ -1679,12 +1769,15 @@ export class DMLRunner {
           answer = event.content;
         } else if (event.type === 'error' && event.content) {
           errorContent = event.content;
+        } else if (event.type === 'usage' && event.usage) {
+          recordTokenUsage(usageByModel, this.options.model, event.usage);
         }
       }
 
       return {
         answer,
         error: errorContent || undefined,
+        usageByModel: Object.keys(usageByModel).length > 0 ? usageByModel : undefined,
       };
     } finally {
       dispose();
