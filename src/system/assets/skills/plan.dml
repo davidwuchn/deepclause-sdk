@@ -35,8 +35,6 @@ tool(ask_user(Prompt, Response),
     get_dict(user_response, Result, Response).
 
 agent_main(Request) :-
-    load_dml_reference(DmlReference),
-    load_dml_compiler_prompt(CompilerPrompt),
     load_coding_workflow_recipe(CodingWorkflowRecipe),
     resolve_model_info(ModelId, Complexity, Reasoning, TaskCount),
     output("DEBUG: model info resolved"),
@@ -61,14 +59,7 @@ Current user request:
 - Only target '.deepclause/' when the user explicitly asks for DeepClause internals, prompts, recipes, skills, or runtime configuration.
 - Use the available recipe, research, and child-skill tools when they materially improve the task list.
 - Consult the DML reference and compiler guidance below to understand the execution environment, but still return only the ordered list of task strings.
-
-DML language reference loaded from .deepclause/docs/DML_REFERENCE.md:
-
-~s
-
-DML compiler guidance loaded from .deepclause/system/DML_COMPILER_PROMPT.md:
-
-~s", [Request, TaskCount, DmlReference, CompilerPrompt]),
+", [Request, TaskCount]),
     system(SystemPrompt),
 
     task("Create a short file-safe slug for this request: '{Request}'.
