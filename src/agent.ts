@@ -211,6 +211,49 @@ function getLastMessageRole(messages: Array<{ role?: unknown }>): string | undef
   return typeof lastMessage?.role === 'string' ? lastMessage.role : undefined;
 }
 
+function sanitizeMessages<T extends { role: string; content: unknown }>(messages: T[]): T[] {
+  if (messages.length === 0) {
+    return messages;
+  }
+
+  const result: T[] = [];
+  for (const msg of messages) {
+    const prev = result[result.length - 1];
+    if (prev && prev.role === msg.role && msg.role !== 'system') {
+      // Two consecutive same-role messages — merge content if both are strings,
+      // otherwise insert a minimal separator user message
+      const prevContent = typeof prev.content === 'string' ? prev.content : '';
+      const msgContent = typeof msg.content === 'string' ? msg.content : '';
+      if (prevContent && msgContent) {
+        result[result.length - 1] = {
+          ...prev,
+          content: prevContent + '\n\n' + msgContent,
+        };
+        continue;
+      }
+      // Can't merge non-string content — insert a separator
+      if (msg.role === 'assistant') {
+        result.push({ role: 'user', content: 'Continue.' } as unknown as T);
+      } else {
+        result.push({ role: 'assistant', content: 'Understood.' } as unknown as T);
+      }
+    }
+    result.push(msg);
+  }
+
+  // Ensure the conversation doesn't end with two assistant messages
+  // (some APIs reject this even after merging)
+  if (result.length >= 2) {
+    const last = result[result.length - 1];
+    const secondLast = result[result.length - 2];
+    if (last.role === 'assistant' && secondLast.role === 'assistant') {
+      result.splice(result.length - 1, 0, { role: 'user', content: 'Continue.' } as unknown as T);
+    }
+  }
+
+  return result;
+}
+
 function truncateSummaryText(text: string, maxLength = 240): string {
   if (text.length <= maxLength) {
     return text;
@@ -695,6 +738,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       if (options.onBeforeModelCall) {
         messages = await options.onBeforeModelCall(normalizeMessagesForCompaction(messages), lastActualInputTokens);
       }
+
+      // Ensure proper role alternation — some APIs reject consecutive same-role messages
+      messages = sanitizeMessages(messages);
       
       if (streaming && onStream) {
         latestRawProviderResponse = null;

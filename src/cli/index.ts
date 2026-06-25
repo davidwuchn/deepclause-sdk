@@ -59,12 +59,82 @@ program
 
 program
   .command('set-model <model>')
-  .description('Set the default LLM model (canonical format: provider:model)')
+  .description('Set the default LLM model (format: provider:model, or just a model name to search)')
   .option('--slot <slot>', 'Apply only to a single slot: gateway, run, or compile')
+  .option('--provider <provider>', 'Non-interactive: specify provider directly (openai, anthropic, google, openrouter, custom:name)')
   .action(async (model, options) => {
     try {
       const slot = options.slot as ModelSlot | undefined;
-      const result = await setModel(process.cwd(), model, slot);
+
+      // If the model already has a provider prefix (contains : or is custom:), use as-is
+      const hasProviderPrefix = model.includes(':') || model.startsWith('custom:');
+
+      let finalModel = model;
+
+      if (!hasProviderPrefix) {
+        // Bare model name — search the database
+        const { searchModels } = await import('../system/config/model-database.js');
+        const results = searchModels(model);
+
+        if (results.length === 0) {
+          console.error(`❌ No models found matching "${model}". Try "deepclause list-models" to see available models.`);
+          process.exit(1);
+        }
+
+        if (options.provider) {
+          // Non-interactive: use specified provider
+          const match = results.find(r =>
+            r.providers.some(p => p.provider === options.provider || p.label === options.provider),
+          );
+          if (!match) {
+            console.error(`❌ Provider "${options.provider}" not available for model "${model}".`);
+            console.error('Available providers for matching models:');
+            for (const r of results.slice(0, 5)) {
+              console.error(`  ${r.modelId}: ${r.providers.map(p => p.label).join(', ')}`);
+            }
+            process.exit(1);
+          }
+          const provider = match.providers.find(p => p.provider === options.provider || p.label === options.provider)!;
+          finalModel = `${provider.provider}:${provider.modelId}`;
+        } else if (results.length === 1 && results[0].providers.length === 1) {
+          // Single match, single provider — use directly
+          const r = results[0];
+          const p = r.providers[0];
+          finalModel = `${p.provider}:${p.modelId}`;
+          console.log(`Found: ${r.entry.name} → ${p.label}`);
+        } else {
+          // Multiple matches or providers — show interactive selection
+          console.log(`\nModels matching "${model}":\n`);
+          let idx = 1;
+          const choices: { finalModel: string; label: string }[] = [];
+          for (const r of results.slice(0, 10)) {
+            for (const p of r.providers) {
+              console.log(`  ${idx}. ${r.entry.name} (${r.modelId}) via ${p.label}` +
+                ` | ctx=${r.entry.limit.context.toLocaleString()} out=${r.entry.limit.output.toLocaleString()}` +
+                ` reasoning=${r.entry.reasoning ? 'yes' : 'no'} complexity=${r.entry.complexity}`);
+              choices.push({ finalModel: `${p.provider}:${p.modelId}`, label: p.label });
+              idx++;
+            }
+          }
+
+          if (results.length > 10) {
+            console.log(`  ... and ${results.length - 10} more. Refine your search for fewer results.`);
+          }
+
+          const { promptUser } = await import('./interactive.js');
+          const answer = await promptUser(`Enter choice (1-${choices.length}) or press Enter for #1:`);
+          const choice = parseInt(answer.trim()) || 1;
+          if (choice < 1 || choice > choices.length) {
+            console.error('❌ Invalid choice.');
+            process.exit(1);
+          }
+          const selected = choices[choice - 1];
+          finalModel = selected.finalModel;
+          console.log(`Selected: ${finalModel}`);
+        }
+      }
+
+      const result = await setModel(process.cwd(), finalModel, slot);
       console.log(result.info);
     } catch (error) {
       console.error('❌ Error:', (error as Error).message);

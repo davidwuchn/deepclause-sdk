@@ -125,3 +125,65 @@ export function buildReasoningProviderOptions(
       return {};
   }
 }
+
+export interface AvailableProvider {
+  provider: string;
+  modelId: string;
+  label: string;
+  direct: boolean;
+}
+
+const VENDOR_TO_PROVIDER: Record<string, string> = {
+  openai: 'openai',
+  anthropic: 'anthropic',
+  google: 'google',
+};
+
+export function getAvailableProviders(dbModelId: string): AvailableProvider[] {
+  const vendor = dbModelId.split('/')[0];
+  const providers: AvailableProvider[] = [];
+
+  const directProvider = VENDOR_TO_PROVIDER[vendor];
+  if (directProvider) {
+    providers.push({
+      provider: directProvider,
+      modelId: dbModelId.split('/').slice(1).join('/'),
+      label: `${directProvider} (direct)`,
+      direct: true,
+    });
+  }
+
+  providers.push({
+    provider: 'openrouter',
+    modelId: dbModelId,
+    label: 'openrouter',
+    direct: false,
+  });
+
+  return providers;
+}
+
+export interface ModelSearchResult {
+  modelId: string;
+  entry: ModelDatabaseEntry;
+  providers: AvailableProvider[];
+}
+
+export function searchModels(query: string): ModelSearchResult[] {
+  const db = loadDatabase();
+  const q = query.toLowerCase().trim();
+  const results: ModelSearchResult[] = [];
+
+  for (const [id, entry] of Object.entries(db.models)) {
+    const haystack = `${id} ${entry.name} ${entry.family}`.toLowerCase();
+    if (haystack.includes(q)) {
+      results.push({
+        modelId: id,
+        entry,
+        providers: getAvailableProviders(id),
+      });
+    }
+  }
+
+  return results;
+}
