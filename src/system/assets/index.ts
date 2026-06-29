@@ -3,7 +3,7 @@ import { access, readFile } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
-export type SystemSkillAssetName = 'conductor' | 'skill-creator' | 'plan';
+export type SystemSkillAssetName = 'conductor' | 'skill-creator' | 'plan' | 'deep-planner' | 'security-planner';
 export type SystemPromptAssetName = 'conductor' | 'skill-creator' | 'task';
 export type SystemCompactorAssetName = 'default-session-compactor' | 'default-loop-compactor';
 export type WorkspaceDocAssetName = 'tui' | 'dml-reference';
@@ -29,6 +29,10 @@ function getSystemSkillFileName(name: SystemSkillAssetName): string {
       return 'skill-creator.dml';
     case 'plan':
       return 'plan.dml';
+    case 'deep-planner':
+      return 'deep-planner.dml';
+    case 'security-planner':
+      return 'security-planner.dml';
   }
 }
 

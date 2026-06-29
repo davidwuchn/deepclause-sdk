@@ -72,6 +72,20 @@ const SYSTEM_COMMAND_DEFINITIONS: ReadonlyArray<{
       { name: 'request', description: 'What the generated plan should do', required: true, position: 0 },
     ],
   },
+  {
+    name: 'deep-planner',
+    description: 'Generates a multi-strategy DML plan with multiple agent_main clauses. Prolog tries strategies in order via backtracking.',
+    parameters: [
+      { name: 'request', description: 'What the generated plan should do', required: true, position: 0 },
+    ],
+  },
+  {
+    name: 'security-planner',
+    description: 'Generates a multi-strategy security analysis plan for finding bugs and vulnerabilities.',
+    parameters: [
+      { name: 'request', description: 'Target to analyze (directory, file pattern, or specific concern)', required: true, position: 0 },
+    ],
+  },
 ];
 
 const SYSTEM_COMMAND_NAMES = new Set(SYSTEM_COMMAND_DEFINITIONS.map((definition) => definition.name));

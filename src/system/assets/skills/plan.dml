@@ -223,10 +223,17 @@ parse_plan_step(Dict, plan_step{description: Desc, tools: Tools, reasoning: Reas
         (   ValidTools = [] -> Tools = all ; Tools = ValidTools )
     ;   Tools = all ),
     ReasoningRaw = Dict.get(reasoning),
-    (   atom(ReasoningRaw) -> atom_string(ReasoningRaw, Reasoning) ; Reasoning = "none" ),
+    (   atom(ReasoningRaw) -> atom_string(ReasoningRaw, Reasoning)
+    ;   string(ReasoningRaw) -> Reasoning = ReasoningRaw
+    ;   Reasoning = "none"
+    ),
     RecipeRaw = Dict.get(recipe),
-    (   RecipeRaw = null ; var(RecipeRaw) -> Recipe = "none"
-    ;   atom(RecipeRaw) -> atom_string(RecipeRaw, Recipe)
+    (   (   RecipeRaw = null ; var(RecipeRaw) )
+    ->  Recipe = "none"
+    ;   atom(RecipeRaw)
+    ->  atom_string(RecipeRaw, Recipe)
+    ;   string(RecipeRaw)
+    ->  Recipe = RecipeRaw
     ;   Recipe = "none"
     ).
 

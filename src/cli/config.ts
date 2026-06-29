@@ -298,6 +298,14 @@ async function copySystemOverrideSeeds(systemDir: string, overwrite: boolean): P
       content: readFileSync(getSystemSkillAssetPath('plan'), 'utf8'),
     },
     {
+      fileName: 'deep-planner.dml',
+      content: readFileSync(getSystemSkillAssetPath('deep-planner'), 'utf8'),
+    },
+    {
+      fileName: 'security-planner.dml',
+      content: readFileSync(getSystemSkillAssetPath('security-planner'), 'utf8'),
+    },
+    {
       fileName: 'CONDUCTOR_PROMPT.md',
       content: readFileSync(getSystemPromptAssetPath('conductor'), 'utf8'),
     },
