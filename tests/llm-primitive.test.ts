@@ -8,7 +8,7 @@ const llmMocks = vi.hoisted(() => ({
   requests: [] as MemoryMessage[][],
   generateLlmReply: vi.fn(async ({ messages }: { messages: MemoryMessage[] }) => {
     llmMocks.requests.push(messages);
-    return llmMocks.responses.shift() ?? '';
+    return { text: llmMocks.responses.shift() ?? '', usage: undefined };
   }),
 }));
 

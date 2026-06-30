@@ -12,7 +12,7 @@ const llmMocks = vi.hoisted(() => ({
   requests: [] as MemoryMessage[][],
   generateLlmReply: vi.fn(async ({ messages }: { messages: MemoryMessage[] }) => {
     llmMocks.requests.push(messages);
-    return llmMocks.responses.shift() ?? 'SKIP';
+    return { text: llmMocks.responses.shift() ?? 'SKIP', usage: undefined };
   }),
 }));
 

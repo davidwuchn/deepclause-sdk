@@ -32,6 +32,7 @@ function parseArgs() {
     model: null,
     verbose: false,
     skipClone: false,
+    noCache: false,
   };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--case') opts.caseId = args[++i];
@@ -39,6 +40,7 @@ function parseArgs() {
     else if (args[i] === '--model') opts.model = args[++i];
     else if (args[i] === '--verbose') opts.verbose = true;
     else if (args[i] === '--skip-clone') opts.skipClone = true;
+    else if (args[i] === '--no-cache') { opts.noCache = true; opts.skipClone = false; }
     else if (args[i] === '--help') {
       console.log(`Usage: node run-security.mjs [options]
 
@@ -48,6 +50,7 @@ Options:
   --model <model>   Override model (e.g. custom:aliyun:qwen3.6-27b)
   --verbose         Show full output
   --skip-clone      Skip cloning (use existing checkout)
+  --no-cache        Re-clone repos from remote (ignore local cache)
   --help            Show this help
 `);
       process.exit(0);
@@ -63,24 +66,35 @@ function loadCases(caseId) {
   return cases;
 }
 
+const CACHE_DIR = join(__dirname, 'cache');
+
 function cloneRepo(caseData, targetDir) {
-  const { repo_url, vuln_commit } = caseData;
-  console.log(`  Cloning ${repo_url} @ ${vuln_commit.slice(0, 8)}...`);
-  execSync(`git clone --quiet ${repo_url} ${targetDir}`, { stdio: 'pipe' });
+  const { repo_url, vuln_commit, project } = caseData;
+  const cacheDir = join(CACHE_DIR, project.replace('/', '_'));
+
+  if (!existsSync(cacheDir)) {
+    console.log(`  Cloning ${repo_url} (first time, caching)...`);
+    execSync(`git clone --quiet ${repo_url} ${cacheDir}`, { stdio: 'pipe' });
+  } else {
+    console.log(`  Using cached repo: ${project}`);
+  }
+
+  // Shallow-clone the specific commit from the cache into the target dir
+  if (existsSync(targetDir)) rmSync(targetDir, { recursive: true, force: true });
+  execSync(`git clone --quiet ${cacheDir} ${targetDir}`, { stdio: 'pipe' });
   execSync(`git -C ${targetDir} checkout --quiet ${vuln_commit}`, { stdio: 'pipe' });
-  console.log(`  Checked out vulnerable commit.`);
+  console.log(`  Checked out ${vuln_commit.slice(0, 8)}.`);
 }
 
 const SDK_ROOT = resolve(__dirname, '..', '..');
-const DC = `npx tsx ${join(SDK_ROOT, 'src', 'cli', 'index.ts')}`;
 
-function runStream(cmd, cwd, timeoutMs) {
+function runStream(args, cwd, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const child = spawn('npx', ['tsx', join(SDK_ROOT, 'src', 'cli', 'index.ts'), ...cmd], {
+    const child = spawn('deepclause', args, {
       cwd,
       stdio: ['inherit', 'pipe', 'pipe'],
       timeout: timeoutMs,
-      shell: false,
+      env: { ...process.env },
     });
     let stdout = '';
     let stderr = '';
@@ -102,7 +116,7 @@ function runStream(cmd, cwd, timeoutMs) {
 
 function initWorkspace(repoDir, model) {
   console.log(`  Initializing DeepClause workspace...`);
-  const args = ['init'];
+  const args = ['init', '--force'];
   if (model) args.push('--model', model);
   return runStream(args, repoDir, 60000);
 }
@@ -114,12 +128,12 @@ async function runPlanner(caseData, repoDir, model) {
   if (model) args.push('--model', model);
   const output = await runStream(args, repoDir, 600000);
 
-  const planMatch = output.match(/I've created a security analysis plan in (plans\/[^\n]+)/);
+  const planMatch = output.match(/I've created a security analysis plan in (plans\/\S+\.dml)/);
   if (!planMatch) {
     throw new Error('Security planner did not produce a plan file.');
   }
   console.log(`\n  Plan generated: ${planMatch[1]}\n`);
-  return join(repoDir, planMatch[1]);
+  return planMatch[1];
 }
 
 async function runPlan(planPath, repoDir, model) {
@@ -196,7 +210,9 @@ async function main() {
     try {
       // Step 1: Clone repo
       if (!opts.skipClone) {
-        if (existsSync(repoDir)) rmSync(repoDir, { recursive: true, force: true });
+        if (opts.noCache && existsSync(join(CACHE_DIR, caseData.project.replace('/', '_')))) {
+          rmSync(join(CACHE_DIR, caseData.project.replace('/', '_')), { recursive: true, force: true });
+        }
         cloneRepo(caseData, repoDir);
       } else if (!existsSync(repoDir)) {
         throw new Error('Repo not found (use --skip-clone only after a previous run)');
