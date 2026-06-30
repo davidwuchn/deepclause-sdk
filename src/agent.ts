@@ -320,6 +320,31 @@ function buildImplicitTaskSummary(
   return 'Task completed successfully.';
 }
 
+type ModelLike = ReturnType<typeof createModelProvider>;
+
+async function generateTaskSummary(
+  model: ModelLike,
+  messages: Array<{ role: string; content: unknown }>,
+  modelOptions: { temperature: number; maxOutputTokens: number; providerOptions?: Record<string, Record<string, unknown>> },
+  signal?: AbortSignal,
+): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const summaryMessages: any[] = [
+    ...messages.filter(m => m.role === 'system' || m.role === 'user' || m.role === 'assistant'),
+    { role: 'user', content: 'Write a detailed summary of what you just did and what you found. Include: files examined and their key contents, vulnerabilities or issues discovered (with file paths and line numbers), commands run and their results, decisions made, and anything the next task should know. Do not include raw tool call syntax.' },
+  ];
+  const result = await generateText({
+    model,
+    messages: summaryMessages,
+    temperature: 0.3,
+    maxOutputTokens: 4096,
+    abortSignal: signal,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    providerOptions: modelOptions.providerOptions as any,
+  });
+  return result.text?.trim() || 'Task completed successfully.';
+}
+
 function getStreamResponseAwaitTimeoutMs(): number {
   const raw = process.env.DC_STREAM_RESPONSE_TIMEOUT_MS;
   if (raw != null) {
@@ -1171,9 +1196,17 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       content: `Task completed. Results: ${varSummary}`,
     });
   } else if (success && normalizedOutputVars.length === 0) {
+    // Try to generate a meaningful summary via LLM
+    let summary: string | null = null;
+    try {
+      summary = await generateTaskSummary(model, messages, modelOptions, signal);
+      debugLog(`Generated task summary: ${summary?.slice(0, 100)}`);
+    } catch (err) {
+      debugLog(`Summary generation failed: ${err instanceof Error ? err.message : err}`);
+    }
     persistentMessages.push({
       role: 'assistant',
-      content: buildImplicitTaskSummary(assistantTextResponses, completedToolActivities),
+      content: summary ?? buildImplicitTaskSummary(assistantTextResponses, completedToolActivities),
     });
   } else if (assistantTextResponses.length > 0) {
     persistentMessages.push({

@@ -145,38 +145,38 @@ async function runPlan(planPath, repoDir, model) {
   return output;
 }
 
-function checkFindings(output, caseData) {
-  const outputLower = output.toLowerCase();
+function checkFindings(runOutput, caseData, repoDir) {
+  const findingsPath = join(repoDir, '.deepclause.tmp', 'findings.md');
+
+  // The model only writes findings.md if it found vulnerabilities.
+  // If the file doesn't exist, no strategy succeeded.
+  if (!existsSync(findingsPath)) {
+    return {
+      findingsFileExists: false,
+      fileFound: false,
+      bugClassFound: false,
+      overall: false,
+    };
+  }
+
+  const findings = readFileSync(findingsPath, 'utf8').toLowerCase();
   const gtFiles = caseData.gt_files.map(f => f.toLowerCase());
   const bugClass = caseData.bug_class.toLowerCase();
   const cwe = caseData.cwe.toLowerCase();
 
-  // Check if any ground truth file is mentioned
-  const fileFound = gtFiles.some(f => outputLower.includes(f.toLowerCase()));
+  // Check if any ground truth file is mentioned in the findings
+  const fileFound = gtFiles.some(f => findings.includes(f));
 
-  // Check if the bug class or CWE is mentioned
-  const bugClassFound = outputLower.includes(bugClass) ||
-    outputLower.includes(cwe) ||
-    outputLower.includes(caseData.cwe.replace('CWE-', 'cve-'));
-
-  // Check for common vulnerability indicators
-  const indicators = {
-    'broken-access-control': ['access control', 'authorization', 'namespace', 'privilege'],
-    'path-traversal': ['path traversal', 'directory traversal', '../', 'backslash'],
-    'use-after-free': ['use-after-free', 'use after free', 'dangling', 'freed'],
-    'privilege-escalation': ['privilege', 'escalation', 'token', 'bypass'],
-    'rce': ['rce', 'remote code', 'command execution', 'arbitrary'],
-    'heap-buffer-overflow': ['buffer overflow', 'out of bounds', 'oob', 'heap'],
-    'sql-injection': ['sql injection', 'injection', 'interpolation', 'parameterized'],
-  };
-
-  const indicatorFound = (indicators[caseData.bug_class] || []).some(i => outputLower.includes(i));
+  // Check if the bug class or CWE is mentioned in the findings
+  const bugClassFound = findings.includes(bugClass) ||
+    findings.includes(cwe) ||
+    findings.includes(caseData.cwe.toLowerCase().replace('-', ' '));
 
   return {
+    findingsFileExists: true,
     fileFound,
     bugClassFound,
-    indicatorFound,
-    overall: fileFound && (bugClassFound || indicatorFound),
+    overall: fileFound && bugClassFound,
   };
 }
 
@@ -229,14 +229,23 @@ async function main() {
       writeFileSync(join(caseDir, 'plan-output.txt'), runOutput);
 
       // Step 5: Check findings
-      const findings = checkFindings(runOutput, caseData);
+      const findings = checkFindings(runOutput, caseData, repoDir);
       success = findings.overall;
 
       console.log(`  Findings:`);
       console.log(`    Ground truth file mentioned: ${findings.fileFound}`);
       console.log(`    Bug class identified: ${findings.bugClassFound}`);
-      console.log(`    Vulnerability indicators: ${findings.indicatorFound}`);
+      console.log(`    Findings file exists: ${findings.findingsFileExists}`);
+      console.log(`    Ground truth file mentioned: ${findings.fileFound}`);
+      console.log(`    Bug class identified: ${findings.bugClassFound}`);
       console.log(`    Overall: ${success ? 'FOUND' : 'NOT FOUND'}`);
+
+      // Copy findings file to case output for inspection
+      const findingsPath = join(repoDir, '.deepclause.tmp', 'findings.md');
+      if (existsSync(findingsPath)) {
+        const findingsContent = readFileSync(findingsPath, 'utf8');
+        writeFileSync(join(caseDir, 'findings.md'), findingsContent);
+      }
 
       results.push({
         id: caseData.id,
