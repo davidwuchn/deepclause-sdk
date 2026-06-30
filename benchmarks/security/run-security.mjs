@@ -88,7 +88,7 @@ function cloneRepo(caseData, targetDir) {
 
 const SDK_ROOT = resolve(__dirname, '..', '..');
 
-function runStream(args, cwd, timeoutMs) {
+function runStream(args, cwd, timeoutMs, label = 'process') {
   return new Promise((resolve, reject) => {
     const child = spawn('deepclause', args, {
       cwd,
@@ -98,6 +98,7 @@ function runStream(args, cwd, timeoutMs) {
     });
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
     child.stdout.on('data', (data) => {
       process.stdout.write(data);
       stdout += data.toString();
@@ -106,9 +107,15 @@ function runStream(args, cwd, timeoutMs) {
       process.stderr.write(data);
       stderr += data.toString();
     });
-    child.on('close', (code) => {
-      if (code === 0) resolve(stdout + stderr);
-      else reject(new Error(`Process exited with code ${code}\n${stderr.slice(-2000)}`));
+    child.on('close', (code, signal) => {
+      if (code === 0) {
+        resolve(stdout + stderr);
+      } else if (signal) {
+        const reason = timedOut ? `timed out after ${timeoutMs}ms` : `killed by signal ${signal}`;
+        reject(new Error(`${label} ${reason}\n${stderr.slice(-2000)}`));
+      } else {
+        reject(new Error(`${label} exited with code ${code}\n${stderr.slice(-2000)}`));
+      }
     });
     child.on('error', reject);
   });
@@ -118,7 +125,7 @@ function initWorkspace(repoDir, model) {
   console.log(`  Initializing DeepClause workspace...`);
   const args = ['init', '--force'];
   if (model) args.push('--model', model);
-  return runStream(args, repoDir, 60000);
+  return runStream(args, repoDir, 60000, 'init');
 }
 
 async function runPlanner(caseData, repoDir, model) {
@@ -126,7 +133,7 @@ async function runPlanner(caseData, repoDir, model) {
   console.log(`  Running security planner...\n`);
   const args = ['run', '.deepclause/system/security-planner', prompt, '--stream', '--verbose'];
   if (model) args.push('--model', model);
-  const output = await runStream(args, repoDir, 600000);
+  const output = await runStream(args, repoDir, 600000, 'security-planner');
 
   const planMatch = output.match(/I've created a security analysis plan in (plans\/\S+\.dml)/);
   if (!planMatch) {
@@ -140,7 +147,7 @@ async function runPlan(planPath, repoDir, model) {
   console.log(`  Running generated plan: ${basename(planPath)}...\n`);
   const args = ['run', planPath, '--stream', '--verbose'];
   if (model) args.push('--model', model);
-  const output = await runStream(args, repoDir, 1800000);
+  const output = await runStream(args, repoDir, 3600000, 'plan-execution');
   console.log('');
   return output;
 }

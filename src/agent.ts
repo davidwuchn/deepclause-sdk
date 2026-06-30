@@ -328,14 +328,32 @@ async function generateTaskSummary(
   modelOptions: { temperature: number; maxOutputTokens: number; providerOptions?: Record<string, Record<string, unknown>> },
   signal?: AbortSignal,
 ): Promise<string> {
+  // Strip tool-call and tool-result messages — the AI SDK requires matching
+  // results for every tool call ID, which may not survive message reconstruction.
+  // Keep only plain text system/user/assistant messages for context.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const summaryMessages: any[] = [
-    ...messages.filter(m => m.role === 'system' || m.role === 'user' || m.role === 'assistant'),
-    { role: 'user', content: 'Write a detailed summary of what you just did and what you found. Include: files examined and their key contents, vulnerabilities or issues discovered (with file paths and line numbers), commands run and their results, decisions made, and anything the next task should know. Do not include raw tool call syntax.' },
-  ];
+  const textOnlyMessages: any[] = [];
+  for (const m of messages) {
+    if (m.role === 'system' || m.role === 'user') {
+      const content = typeof m.content === 'string' ? m.content : '';
+      if (content.trim()) {
+        textOnlyMessages.push({ role: m.role, content });
+      }
+    } else if (m.role === 'assistant') {
+      // Only keep assistant messages that are plain strings (text output, not tool calls)
+      const content = typeof m.content === 'string' ? m.content : '';
+      if (content.trim()) {
+        textOnlyMessages.push({ role: 'assistant', content });
+      }
+    }
+  }
+  textOnlyMessages.push({
+    role: 'user',
+    content: 'Write a detailed summary of what you just did and what you found. Include: files examined and their key contents, vulnerabilities or issues discovered (with file paths and line numbers), commands run and their results, decisions made, and anything the next task should know. Do not include raw tool call syntax.',
+  });
   const result = await generateText({
     model,
-    messages: summaryMessages,
+    messages: textOnlyMessages,
     temperature: 0.3,
     maxOutputTokens: 4096,
     abortSignal: signal,

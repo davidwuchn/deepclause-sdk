@@ -155,6 +155,10 @@ transform_task_calls((A -> B), Bindings, (TA -> TB)) :- !,
 transform_task_calls(\+ A, Bindings, \+ TA) :- !,
     transform_task_calls(A, Bindings, TA).
 
+%% Transform task/1 to task_named/3 with a hidden Summary variable
+%% This ensures task/1 always produces a summary in the conversation history
+transform_task_calls(task(Desc), _Bindings, task_named(Desc, [_Summary], [typed_var{name: 'Summary', type: string}])) :- !.
+
 %% Transform task/2 to task_named/3
 transform_task_calls(task(Desc, V1), Bindings, task_named(Desc, [Var1], [Info1])) :- !,
     extract_var_info(Bindings, V1, Var1, Info1).
